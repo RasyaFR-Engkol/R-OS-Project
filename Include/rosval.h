@@ -1,0 +1,96 @@
+#ifndef ROSVAL_H
+#define ROSVAL_H
+
+#include <stdarg.h>
+#include <stdint.h>
+#include <stddef.h>
+#include <stdbool.h>
+
+/* Basic void / pointer (keep ZEROOBJ as requested) */
+typedef void    VOID;
+typedef void*   POINTER;
+typedef void*   ZEROOBJ; /* user wanted to keep this */
+
+/* Fixed-width integer aliases (keep original short names for compatibility) */
+typedef uint8_t   U8;
+typedef uint8_t   U8_T;
+typedef int8_t    VAL8;
+typedef int8_t    VAL8_T;
+
+typedef uint16_t  U16;
+typedef uint16_t  U16_T;
+typedef int16_t   VAL16;
+typedef int16_t   VAL16_T;
+
+typedef uint32_t  U32;
+typedef uint32_t  U32_T;
+typedef int32_t   VAL32;
+typedef int32_t   VAL32_T;
+
+typedef uint64_t  U64;
+typedef uint64_t  U64_T;
+typedef int64_t   VAL64;
+typedef int64_t   VAL64_T;
+
+typedef char CHAR8;
+typedef unsigned char UCHAR8;
+
+/* Pointer-sized integer types */
+typedef uintptr_t UPTR;
+typedef intptr_t  SPTR;
+
+/* Size/pointer diff */
+typedef size_t    SIZE_T;
+typedef ptrdiff_t PTRDIFF_T;
+
+/* Boolean */
+typedef bool      BOOL;
+#define TRUE      true
+#define FALSE     false
+
+/* Likely/unlikely helpers (and keep RosTrust/RosDoubt semantics) */
+#if defined(__GNUC__) || defined(__clang__)
+#define RosLikely(x)   __builtin_expect(!!(x), 1)
+#define RosUnlikely(x) __builtin_expect(!!(x), 0)
+#else
+#define RosLikely(x)   (x)
+#define RosUnlikely(x) (x)
+#endif
+
+#define RosTrust(x)  RosLikely(x)
+#define RosDoubt(x)  RosUnlikely(x)
+
+/* Common attribute wrappers */
+#if defined(__GNUC__) || defined(__clang__)
+#define ROS_UNUSED    __attribute__((unused))
+#define ROS_NORETURN  __attribute__((noreturn))
+#define ROS_PACKED    __attribute__((packed))
+#else
+#define ROS_UNUSED
+#define ROS_NORETURN
+#define ROS_PACKED
+#endif
+
+/* Sanity checks when C11 _Static_assert is available */
+#if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
+_Static_assert(sizeof(U8)  == 1, "U8 must be 1 byte");
+_Static_assert(sizeof(U16) == 2, "U16 must be 2 bytes");
+_Static_assert(sizeof(U32) == 4, "U32 must be 4 bytes");
+_Static_assert(sizeof(UPTR) >= sizeof(void*), "UPTR must hold a pointer");
+#endif
+
+#ifdef __cplusplus
+#define ABI_C extern "C"
+#else
+#define ABI_C
+#endif
+
+typedef va_list VA_LIST;
+#define VA_ARGS(a, b) va_args(a, b)
+#define VA_STRT(args, fmt) va_start(args, fmt)
+#define VA_END(args) va_end(args)
+
+// MISC Macro
+#define UNUSED__ [[maybe_unused]] 
+
+#endif

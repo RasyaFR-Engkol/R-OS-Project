@@ -1,0 +1,8 @@
+/.cache
+/.github
+/.vscode
+/build
+/compile_commands.json
+/log.txt
+/lognewer.txt
+/newlog.txt
