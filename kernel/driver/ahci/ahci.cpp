@@ -580,4 +580,7 @@ namespace AHCI{
     BOOL ok = IssueAndWait(Port, Slot);
         return ok;
     }
+
+
+    
 }
