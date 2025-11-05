@@ -8,6 +8,7 @@
 #include "framebuffer.hpp"
 #include "kernel/driver/pci/pci.hpp"
 #include "kernel/driver/ahci/ahci.hpp"
+#include "kernel/driver/xhci/xhci.hpp"
 #include "kernel/driver/pic/pic.hpp"
 #include "kernel/driver/pic/timer/pit.hpp"
 #include "kernel/intidt/idt.hpp"
@@ -36,8 +37,13 @@ ABI_C void KernelMain()
     // Enable IRQ-driven serial input (COM1 IRQ4)
     Serial::EnableIRQInput();
 
+    Arch::Sti();
+
     // Initialize PCI and its drivers
     PCI::IntializePCIDrivers();
+
+    // xHCI test: send multiple Enable Slot commands (no NOOP, no polling) to verify repeated MSIs.
+    xHCI::InterruptBurstTest(5);
 
     // AHCI read test: try LBA0 from first available SATA port and hex dump
     for (int i = 0; i < AHCI::g_ahci_controller_count; ++i) {
@@ -73,7 +79,6 @@ ABI_C void KernelMain()
         }
     }
 
-    Arch::Sti();
     // Main idle loop: poll serial and keyboard consumers so IRQ-driven
     // producers are serviced. This keeps IRQ handlers minimal (they only
     // enqueue) while the main loop does I/O and console rendering.

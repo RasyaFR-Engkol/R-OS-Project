@@ -3,6 +3,7 @@
 #include <string.hpp>
 #include <logging.hpp>
 #include "../ahci/ahci.hpp"
+#include "../xhci/xhci.hpp"
 
 namespace PCI{
     using namespace Printk;
@@ -55,6 +56,7 @@ namespace PCI{
                 U32 Reg8 = ReadDword(bus, device, function, 0x08);
                 U8 ClassCode = (U8)((Reg8 >> 24) & 0xFF);
                 U8 SubClass = (U8)((Reg8 >> 16) & 0xFF);
+                U8 ProgIF = (U8)((Reg8 >> 8) & 0xFF);
 
                 Write(Level::LOG_INFO, "PCI %d:%d:%d - Class:%x Subclass:%x\n",
                     (int)bus, (int)device, (int)function,
@@ -64,10 +66,18 @@ namespace PCI{
 
                 // Mencari AHCI disini
                 if (ClassCode == 0x01 && SubClass == 0x06) {
-                    Write(Level::LOG_INFO, "AHCI Controller Ditemukan di %d:%d:%d!\n",
+                    Write(Level::LOG_INFO, "AHCI Controller Found in %d:%d:%d!\n",
                         (int)bus, (int)device, (int)function);
                     
                     AHCI::RegisterAHCIController(bus, device, function, MSIOffset);
+                }
+                
+                // Mnecari xHCI
+                if(ClassCode == 0x0C && SubClass == 0x03 && ProgIF == 0x30){
+                    Write(Level::LOG_INFO, "USB XHCI Controller Found in %d:%d:%d!\n",
+                        (int)bus, (int)device, (int)function);
+                    xHCI::RegisterController(bus, device, function, MSIOffset);
+
                 }
 
                 if (function == 0) {
@@ -98,5 +108,8 @@ namespace PCI{
 
         // Inisialisasi modul PCI AHCI
         AHCI::InitializeAllControllers();
+
+        // Inisialisasi modul PCI xHCI
+        xHCI::InitializeAllControllers();
     }
 }

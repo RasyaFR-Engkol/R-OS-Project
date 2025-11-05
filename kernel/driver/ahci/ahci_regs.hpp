@@ -36,8 +36,7 @@ typedef struct __attribute__((packed)) {
 typedef struct __attribute__((packed)) {
     U64 dba;            // Alamat Fisik Buffer (DBA)
     U32 rsv0;           // Reserved
-    U32 dbc;            // Byte Count (max 4MB - 1)
-                        // Bit 0 (I) - Interrupt on completion
+    U32 dbc;            // Byte Count-1 in bits [21:0]; bit 31 = IOC (Interrupt on Completion)
 } HBA_PRDT_ENTRY;
 
 // ---------------------------------------------------
