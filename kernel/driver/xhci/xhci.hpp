@@ -43,7 +43,19 @@ namespace xHCI{
         U32 EventRingDequeueIndex;
 
         // Simple state to avoid double-issuing Enable Slot on repeated PSC
-        BOOL SentEnableSlot;
+        struct xHCIPortState {
+            U8 State; // see enum below for symbolic names
+        };
+        xHCIPortState PortStates[256]; // Array state buat tiap port
+        // Port state symbolic values
+        enum : U8 {
+            PORT_STATE_EMPTY = 0,
+            PORT_STATE_CONNECTED = 1,
+            PORT_STATE_RESETTING = 2,
+            PORT_STATE_ENABLED = 3,
+            PORT_STATE_ADDRESSING = 4,
+            PORT_STATE_ENABLE_SENT = 5 // per-port: Enable Slot command already sent
+        };
     };
 
     // TODO: Define global xHCI controller array

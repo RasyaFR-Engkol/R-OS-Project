@@ -17,16 +17,19 @@ CXXFLAGS := -g -std=gnu++20 -ffreestanding -fno-exceptions -fno-rtti -m64 -O2 \
 -mno-mmx -mno-sse -mno-avx \
 \
 -ffunction-sections -fdata-sections \
--Wformat-security
+-Wformat-security -fno-common
 
 LDFLAGS := -T x86_64/linkers.ld \
 -nostdlib \
 -z max-page-size=0x1000 \
+-gc-sections \
+
 
 ASFLAGS := -f elf64
 
 BUILD_DIR := build
 TARGET := $(BUILD_DIR)/kernel.elf
+CXX = /home/rasya/cross/bin/x86_64-elf-g++
 
 # Temukan semua file sumber (exclude build directory to avoid generated files)
 C_SRCS := $(shell find . -path ./$(BUILD_DIR) -prune -o -type f -name "*.c" -print)

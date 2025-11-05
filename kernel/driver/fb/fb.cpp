@@ -74,8 +74,13 @@ namespace FB {
         state.pitch = FBPitch;
         state.bpp = FBBitsPerPixel;
         state.bytes_per_pixel = (FBBitsPerPixel + 7) / 8;
-        // backbuffer is tightly packed (no padding) for faster software rendering
-        state.back_pitch = state.width * state.bytes_per_pixel;
+        // Use the same pitch for the backbuffer as the frontbuffer to avoid
+        // any stride/padding mismatch. Some firmwares (and GPUs) pad each
+        // scanline to a 4-byte or larger boundary; allocating a tightly
+        // packed backbuffer and copying only pixel bytes can produce visual
+        // corruption or apparent scaling. Matching the frontbuffer pitch
+        // keeps row layout identical and simplifies flush/copy.
+        state.back_pitch = state.pitch;
         // Allocate a page-backed backbuffer (contiguous virtual region) and map
         // physical pages for it. We avoid using Kmalloc here so the framebuffer
         // driver controls the mapping explicitly.
