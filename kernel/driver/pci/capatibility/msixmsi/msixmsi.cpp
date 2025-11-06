@@ -1,5 +1,6 @@
 #include <rossys.hpp>
 #include <rosval.h>
+#define PRINTK_MODULE_NAME "MSI"
 #include "msixmsi.hpp"
 #include <logging.hpp>
 
@@ -7,16 +8,18 @@
 // yang menerima interrupt. Alamat ini standar.
 constexpr U32 MSI_MSG_ADDRESS = 0xFEE00000;
 
+/* module name provided via PRINTK_MODULE_NAME */
+
 namespace MSI{
 
     U8 EnableMSI(U8 bus, U8 dev, U8 func, U8 msi_cap_offset, void (*handler)()){
         U8 Vector = IDT::AllocateVector();
         if(Vector == 0){
-            Printk::Write(Printk::Level::LOG_ERR, "[MSI] Failed to allocate interrupt vector for MSI\n");
+            Printk::Write(Printk::Level::LOG_ERR, " Failed to allocate interrupt vector for MSI\n");
             return 0;
         }
 
-        Printk::Write(Printk::Level::LOG_INFO, "[MSI] Allocated vector 0x%02x for MSI\n", (unsigned)Vector);
+        Printk::Write(Printk::Level::LOG_INFO, " Allocated vector 0x%02x for MSI\n", (unsigned)Vector);
         
         // MSI control and layout: first dword at capability offset contains
         // 8-bit CapID, 8-bit NextPtr, 16-bit Message Control (MC)

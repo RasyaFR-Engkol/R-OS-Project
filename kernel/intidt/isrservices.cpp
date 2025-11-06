@@ -1,3 +1,4 @@
+#define PRINTK_MODULE_NAME "ISRServ"
 #include "idt.hpp"
 #include "../log/printk/printk.hpp"
 #include <rosval.h>

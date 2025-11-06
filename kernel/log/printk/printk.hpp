@@ -2,6 +2,36 @@
 
 #include <rosval.h>
 
+/* Per-translation-unit module name provider.
+   Users can place `ExportSymbol("NAME")` in a module (after includes)
+   to override the default module name for `Printk::Write()` calls in that TU.
+
+   Implementation: define a static inline helper `__printk_module_name_impl()`
+   that returns the module name; the header provides a default returning
+   nullptr. `ExportSymbol(name)` defines the same helper in the TU which
+   overrides the default (static inline has internal linkage per TU).
+*/
+/* Allow modules to set `PRINTK_MODULE_NAME` before including this header.
+    If defined, use that as the module name; otherwise the per-TU
+    `ExportSymbol` macro is supported below (but prefer defining
+    `PRINTK_MODULE_NAME` before including for clarity).
+*/
+#ifdef PRINTK_MODULE_NAME
+static inline const char* __printk_module_name_impl(void) { return PRINTK_MODULE_NAME; }
+#else
+/* Default module name when none is provided via PRINTK_MODULE_NAME or
+    ExportSymbol: use a neutral label "Module" so logging always shows a
+    readable module name instead of NULL. */
+static inline const char* __printk_module_name_impl(void) { return "Module"; }
+#endif
+
+/* Backwards-compatible ExportSymbol macro (still available, but it must be
+    used at global scope after this header is included). Prefer defining
+    `PRINTK_MODULE_NAME` before including instead of using ExportSymbol.
+*/
+#define ExportSymbol(name) \
+     static inline const char* __printk_module_name_impl(void) { return name; }
+
 namespace Printk {
     typedef enum {
         LOG_EMERG = 1,
@@ -17,5 +47,15 @@ namespace Printk {
     VOID RateLimitCheck();
     VOID RateLimitReset();
     BOOL IsRateLimited();
-    BOOL Write(Level, const char *fmt, ...);
+    /* InternalWrite now accepts a VA_LIST so callers can forward va_list
+       directly. Use the variadic `Write` helper to build the va_list. */
+    BOOL InternalWrite(Level level, const char *module_name, const char *fmt, VA_LIST args);
+    static inline BOOL Write(Level level, const char *fmt, ...) {
+        VA_LIST Args;
+        VA_STRT(Args, fmt);
+        const char *module = __printk_module_name_impl();
+        BOOL ret = InternalWrite(level, module, fmt, Args);
+        VA_END(Args);
+        return ret;
+    }
 }

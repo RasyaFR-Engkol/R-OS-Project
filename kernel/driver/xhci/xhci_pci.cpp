@@ -1,3 +1,4 @@
+#define PRINTK_MODULE_NAME "XHCIPCI"
 #include <rosval.h>
 #include <logging.hpp>
 #include <drivers/pci.hpp>
@@ -10,7 +11,7 @@ namespace xHCI {
 
     VOID RegisterController(U8 Bus, U8 Device, U8 Function, U8 MSICapOffset){
         if(g_xhci_controller_count >= XHCI_MAX_CONTROLLERS) {
-            Write(Level::LOG_ERR, "[XHCI] Controller full\n");
+            Write(Level::LOG_ERR, " Controller full\n");
         }
 
         // Handle potential 64-bit BAR for xHCI (commonly a 64-bit MMIO BAR)
@@ -30,14 +31,14 @@ namespace xHCI {
         const SIZE_T MapPagesCount = 16;
         VOID *VirtAddr = PageAlloc::VirtualAllocPages(MapPagesCount);
         if(!VirtAddr){
-            Write(Level::LOG_ERR, "[XHCI] Failed allocating virtual for XHCI\n");
+            Write(Level::LOG_ERR, " Failed allocating virtual for XHCI\n");
             return;
         }
 
         // Avoid setting NX here (EFER.NXE may be clear during early boot).
         PFLAGS Flags = PAGE_PRESENT | PAGE_RW | PAGE_PCD;
         if(!PageAlloc::MapPages(KernelPML4, RegPhysPage, (UPTR)VirtAddr, MapPagesCount, Flags)) {
-            Write(Level::LOG_ERR, "[XHCI] Failed mapping XHCI registers\n");
+            Write(Level::LOG_ERR, " Failed mapping XHCI registers\n");
             return;
         }
 
@@ -56,17 +57,28 @@ namespace xHCI {
             U8 Vector = MSI::EnableMSI(Bus, Device, Function, MSICapOffset, xHCI_InterruptHandler_C0);
             if(Vector != 0){
                 DRV.IntVector = Vector;
-                Write(Level::LOG_INFO, "[XHCI] Enabled MSI on XHCI Controller %02X:%02X:%02X with vector 0x%02x\n",
+                Write(Level::LOG_INFO, " Enabled MSI on XHCI Controller %02X:%02X:%02X with vector 0x%02x\n",
                     (unsigned)Bus, (unsigned)Device, (unsigned)Function, (unsigned)Vector);
             } else {
-                Write(Level::LOG_ERR, "[XHCI] Failed to enable MSI on XHCI Controller %02X:%02X:%02X\n",
+                Write(Level::LOG_ERR, " Failed to enable MSI on XHCI Controller %02X:%02X:%02X\n",
+                    (unsigned)Bus, (unsigned)Device, (unsigned)Function);
+            }
+        } else {
+            // Try legacy INTx fallback
+            U8 irq = PCI::EnableLegacyINTxForDevice(Bus, Device, Function, xHCI_InterruptHandler_C0);
+            if (irq != 0) {
+                DRV.IntVector = (U8)(0x20 + irq);
+                Write(Level::LOG_INFO, " Enabled legacy INTx IRQ %u for XHCI Controller %02X:%02X:%02X (vector 0x%02x)\n",
+                    (unsigned)irq, (unsigned)Bus, (unsigned)Device, (unsigned)Function, (unsigned)DRV.IntVector);
+            } else {
+                Write(Level::LOG_WARNING, " No MSI and legacy INTx unavailable for XHCI %02X:%02X:%02X\n",
                     (unsigned)Bus, (unsigned)Device, (unsigned)Function);
             }
         }
 
         g_xhci_controller_count++;
 
-        Write(Level::LOG_INFO, "[XHCI] Registered XHCI Controller %02X:%02X:%02X\n",
+        Write(Level::LOG_INFO, " Registered XHCI Controller %02X:%02X:%02X\n",
             (unsigned)Bus, (unsigned)Device, (unsigned)Function);
 
     }

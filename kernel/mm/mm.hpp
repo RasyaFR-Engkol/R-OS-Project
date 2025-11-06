@@ -68,6 +68,10 @@ namespace PageAlloc{
     void PhysicalFreePages(UPTR addr, SIZE_T count);
     // Mark a physical range as used/reserved so allocator won't return it.
     void PhysicalReserve(UPTR addr, SIZE_T count);
+    // Low-memory (below 1 MiB) helpers for special allocations like trampoline
+    UPTR PhysicalAllocLowPages(SIZE_T count);
+    void PhysicalFreeLowPages(UPTR addr, SIZE_T count);
+    void PhysicalReserveLow(UPTR addr, SIZE_T count);
 
     BOOL MapPages(U64 *PML4Virt, UPTR PhysAddr, UPTR VirtAddr, SIZE_T Count, U64 Flags);
     namespace DMAAlloc{

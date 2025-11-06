@@ -1,8 +1,11 @@
+#define PRINTK_MODULE_NAME "AHCIIntr"
 #include <rosval.h>
 #include "ahci.hpp"
 #include "ahci_regs.hpp"
 #include "logging.hpp"
 #include "ahci_internal.hpp"
+
+/* module name provided via PRINTK_MODULE_NAME */
 
 namespace AHCI {
     // ISR wrappers for controllers. Keep them small and map to HandleInterrupt
@@ -20,7 +23,7 @@ namespace AHCI {
     };
 
     VOID HandleInterrupt(VAL32 Controller_ID){
-        Printk::Write(Printk::Level::LOG_CRIT, "[AHCI] Interrupt received from controller %u\n", (unsigned)Controller_ID);
+        Printk::Write(Printk::Level::LOG_CRIT, " Interrupt received from controller %u\n", (unsigned)Controller_ID);
 
         AHCIDriver &Driver = g_ahci_controllers[Controller_ID];
         volatile HBA_MEM* regs = Driver.regs;
@@ -28,11 +31,11 @@ namespace AHCI {
         U32 PortsWithIRQ = regs->is; // Interrupt Status Register
 
         if(PortsWithIRQ == 0){
-            Printk::Write(Printk::Level::LOG_WARNING, "[AHCI] Spurious interrupt on controller %u\n", (unsigned)Controller_ID);
+            Printk::Write(Printk::Level::LOG_WARNING, " Spurious interrupt on controller %u\n", (unsigned)Controller_ID);
             return;
         }
 
-        Printk::Write(Printk::Level::LOG_INFO, "[AHCI] Controller %u - Ports with IRQ: 0x%08x\n",
+        Printk::Write(Printk::Level::LOG_INFO, " Controller %u - Ports with IRQ: 0x%08x\n",
             (unsigned)Controller_ID, (unsigned)PortsWithIRQ);
 
         U32 handled_ports_mask = 0;
@@ -57,7 +60,7 @@ namespace AHCI {
 
             port->is = interesting;
 
-            Printk::Write(Printk::Level::LOG_INFO, "[AHCI] Controller %u Port %u - Port Status: 0x%08x\n",
+            Printk::Write(Printk::Level::LOG_INFO, " Controller %u Port %u - Port Status: 0x%08x\n",
                 (unsigned)Controller_ID, (unsigned)PortNum, (unsigned)interesting);
         }
 

@@ -2,9 +2,12 @@
 #include <rossys.hpp>
 #include <serial.hpp>
 #include "../../../intidt/idt.hpp"
+#define PRINTK_MODULE_NAME "PICKeyboard"
 #include <logging.hpp>
 #include <port.hpp>
 #include <framebuffer.hpp>
+
+/* module name provided via PRINTK_MODULE_NAME */
 
 namespace PIC{
     namespace Keyboard{
@@ -148,7 +151,7 @@ namespace PIC{
         void InitializeKeyboardPIC(){
             // Register the keyboard interrupt handler on vector 0x20 + 1 = 0x21 (IRQ1)
             IDT::RegisterInterruptHandler(0x21, Keyboard_OnIrq);
-            Printk::Write(Printk::Level::LOG_INFO, "[PIC-KEYBOARD] Keyboard PIC (PS/2) Initialized\n");
+            Printk::Write(Printk::Level::LOG_INFO, " Keyboard PIC (PS/2) Initialized\n");
         }
     }
 }

@@ -1,3 +1,4 @@
+#define PRINTK_MODULE_NAME "SERIAL"
 #include "../Include/serial.hpp"
 #include "../Include/rosval.h"
 #include "fbcon/fbcon.hpp"
@@ -6,6 +7,8 @@
 #include <port.hpp>
 #include "../driver/pic/pic.hpp"
 #include "../intidt/idt.hpp"
+
+/* module name provided via PRINTK_MODULE_NAME */
 
 namespace Serial {
     using namespace String;
@@ -220,7 +223,7 @@ namespace Serial {
         PIC::EnableIRQ(4);
         // Register ISR at vector 0x20 + 4
         IDT::RegisterInterruptHandler((U8)(0x20 + 4), Serial_OnIrq);
-        Printk::Write(Printk::Level::LOG_INFO, "[SERIAL] IRQ-driven input enabled on IRQ4 (vector 0x%02x)\n", (unsigned)(0x20 + 4));
+        Printk::Write(Printk::Level::LOG_INFO, " IRQ-driven input enabled on IRQ4 (vector 0x%02x)\n", (unsigned)(0x20 + 4));
     }
 
 } // namespace Serial

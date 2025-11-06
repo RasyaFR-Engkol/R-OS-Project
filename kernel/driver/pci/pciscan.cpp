@@ -1,9 +1,12 @@
+#define PRINTK_MODULE_NAME "PCI"
 #include "pci.hpp"
 #include <rosval.h>
 #include <string.hpp>
 #include <logging.hpp>
 #include "../ahci/ahci.hpp"
 #include "../xhci/xhci.hpp"
+
+/* module name provided via PRINTK_MODULE_NAME */
 
 namespace PCI{
     using namespace Printk;
@@ -96,9 +99,9 @@ namespace PCI{
     }
 
     void ScanAllBuses(){
-        Write(Level::LOG_INFO, "pci: start scanning all buses\n");
-        for(U8 bus = 0; bus < 255; bus++){
-            ScanBus(bus);
+        Write(Level::LOG_INFO, " start scanning all buses\n");
+        for(unsigned bus = 0; bus < 256; ++bus){
+            ScanBus((U8)bus);
         }
     }
 

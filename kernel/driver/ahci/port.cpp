@@ -1,9 +1,12 @@
+#define PRINTK_MODULE_NAME "AHCIPORT"
 #include <rosval.h>
 #include "ahci.hpp"
 #include "ahci_regs.hpp"
 #include "rossys.hpp"
 #include "logging.hpp"
 #include "ahci_internal.hpp"
+
+/* module name provided via PRINTK_MODULE_NAME */
 
 namespace AHCI {
 
@@ -30,20 +33,20 @@ namespace AHCI {
 
         Driver.dma_cmd_list[NumPort] = PageAlloc::DMAAlloc::AllocateDMAPages(1);
         if (!Driver.dma_cmd_list[NumPort]) {
-            Printk::Write(Printk::Level::LOG_ERR, "[AHCI] Port %d: Failed to allocate DMA for Command List\n", NumPort);
+            Printk::Write(Printk::Level::LOG_ERR, " Port %d: Failed to allocate DMA for Command List\n", NumPort);
             return FALSE;
         }
 
         Driver.dma_fis_buffers[NumPort] = PageAlloc::DMAAlloc::AllocateDMAPages(1);
         if (!Driver.dma_fis_buffers[NumPort]) {
-            Printk::Write(Printk::Level::LOG_ERR, "[AHCI] Port %d: Failed to allocate DMA for FIS Buffer\n", NumPort);
+            Printk::Write(Printk::Level::LOG_ERR, " Port %d: Failed to allocate DMA for FIS Buffer\n", NumPort);
             PageAlloc::DMAAlloc::FreeDMABuffer(Driver.dma_cmd_list[NumPort]);
             return FALSE;
         }
 
         Driver.dma_cmd_tables[NumPort] = PageAlloc::DMAAlloc::AllocateDMAPages(2);
         if(!Driver.dma_cmd_tables[NumPort]) {
-            Printk::Write(Printk::Level::LOG_ERR, "[AHCI] Port %d: Failed to allocate DMA for Command Table\n", NumPort);
+            Printk::Write(Printk::Level::LOG_ERR, " Port %d: Failed to allocate DMA for Command Table\n", NumPort);
             PageAlloc::DMAAlloc::FreeDMABuffer(Driver.dma_cmd_list[NumPort]);
             PageAlloc::DMAAlloc::FreeDMABuffer(Driver.dma_fis_buffers[NumPort]);
             return FALSE;
@@ -80,7 +83,7 @@ namespace AHCI {
         U8 DET = (U8)(SSTS & 0x0F);
 
         if(DET != 0x03) {
-            Printk::Write(Printk::Level::LOG_INFO, "[AHCI] Port %d: No device detected (DET=%u)\n", (unsigned)PortNum, (unsigned)DET);
+            Printk::Write(Printk::Level::LOG_INFO, " Port %d: No device detected (DET=%u)\n", (unsigned)PortNum, (unsigned)DET);
             return DeviceType::NONE;
         }
 
@@ -88,19 +91,19 @@ namespace AHCI {
 
         switch(Sign){
             case 0x00000101:
-                Printk::Write(Printk::Level::LOG_INFO, "[AHCI] Port %d: SATA device detected\n", (unsigned)PortNum);
+                Printk::Write(Printk::Level::LOG_INFO, " Port %d: SATA device detected\n", (unsigned)PortNum);
                 return DeviceType::SATA;
             case 0xEB140101:
-                Printk::Write(Printk::Level::LOG_INFO, "[AHCI] Port %d: SEMB device detected\n", (unsigned)PortNum);
+                Printk::Write(Printk::Level::LOG_INFO, " Port %d: SEMB device detected\n", (unsigned)PortNum);
                 return DeviceType::SEMB;
             case 0x96690101:
-                Printk::Write(Printk::Level::LOG_INFO, "[AHCI] Port %d: Port Multiplier device detected\n", (unsigned)PortNum);
+                Printk::Write(Printk::Level::LOG_INFO, " Port %d: Port Multiplier device detected\n", (unsigned)PortNum);
                 return DeviceType::PM;
             case 0x00000002:
-                Printk::Write(Printk::Level::LOG_INFO, "[AHCI] Port %d: SATAPI device detected\n", (unsigned)PortNum);
+                Printk::Write(Printk::Level::LOG_INFO, " Port %d: SATAPI device detected\n", (unsigned)PortNum);
                 return DeviceType::SATAPI;
             default:
-                Printk::Write(Printk::Level::LOG_INFO, "[AHCI] Port %d: Unknown device signature: 0x%08X\n", (unsigned)PortNum, (unsigned)Sign);
+                Printk::Write(Printk::Level::LOG_INFO, " Port %d: Unknown device signature: 0x%08X\n", (unsigned)PortNum, (unsigned)Sign);
                 return DeviceType::NONE;
         }
     }

@@ -4,6 +4,7 @@
 
 #include "mm.hpp"
 #include "../Include/serial.hpp"
+#include "../Include/rossys.hpp"
 #include "../mm/kmalloc/kmalloc.hpp"
 #include "../../x86_64/tss.hpp"
 #include <bootinfo.h>
@@ -122,6 +123,19 @@ namespace Paging{
 
     // Load new PML4 (CR3 requires physical address)
     DoCR3::Load((uint64_t*)KernelPML4Phys);
+
+    // Enable NX (No-Execute) in EFER so the NX bit in page tables takes effect.
+    // EFER.NXE is bit 11 (1 << 11).
+    {
+        U64 efer = Arch::MSR::ReadEFER();
+        const U64 NXE_BIT = (1ULL << 11);
+        if (!(efer & NXE_BIT)) {
+            Arch::MSR::WriteEFER(efer | NXE_BIT);
+            Serial::Write("[ROS] EFER.NXE enabled\n");
+        } else {
+            Serial::Write("[ROS] EFER.NXE already set\n");
+        }
+    }
 
     // After loading CR3, the higher-half direct map is active.
     // Update KernelPML4 to point to the HHDM-mapped virtual address

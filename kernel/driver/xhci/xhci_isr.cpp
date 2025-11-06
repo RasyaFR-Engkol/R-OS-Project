@@ -1,3 +1,4 @@
+#define PRINTK_MODULE_NAME "XHCIIntr"
 #include <rosval.h>
 #include <rossys.hpp>
 #include <logging.hpp>
@@ -28,7 +29,7 @@ namespace xHCI{
                 U64 cmd_ptr = Event->parameter;
                 U8  ccode   = (U8)(Event->status >> 24);
                 U8  slotId  = (U8)(Event->control >> 24);
-                Write(Level::LOG_INFO, "[XHCI] Controller %u - CCE: cc=%u slot=%u cmd_ptr=0x%016llx status=0x%08x ctl=0x%08x\n",
+                Write(Level::LOG_INFO, " Controller %u - CCE: cc=%u slot=%u cmd_ptr=0x%016llx status=0x%08x ctl=0x%08x\n",
                     (unsigned)Controller_ID,
                     (unsigned)ccode,
                     (unsigned)slotId,
@@ -40,7 +41,7 @@ namespace xHCI{
                 U64 param = Event->parameter;
                 U8 portId = (U8)((param >> 24) & 0xFFu);
                 if (portId == 0 || portId > DRV.PortCount) {
-                    Write(Level::LOG_WARNING, "[XHCI] Controller %u - PSC with invalid PortID=%u (param=0x%016llx)\n",
+                    Write(Level::LOG_WARNING, " Controller %u - PSC with invalid PortID=%u (param=0x%016llx)\n",
                           (unsigned)Controller_ID, (unsigned)portId, (unsigned long long)param);
                 } else {
                     U32 idx = (U32)portId - 1;
@@ -50,7 +51,7 @@ namespace xHCI{
                      * read the port_sc value through the volatile struct pointer instead.
                      */
                     U32 portsc_val = PR->port_sc; // read current PORTSC value
-                    Write(Level::LOG_INFO, "[XHCI] Controller %u - PSC: Port%u PORTSC=0x%08x\n",
+                    Write(Level::LOG_INFO, " Controller %u - PSC: Port%u PORTSC=0x%08x\n",
                           (unsigned)Controller_ID, (unsigned)portId, (unsigned)portsc_val);
 
                     U32 NewVAL = portsc_val & ((1u << 9) | (1u << 16));
@@ -64,7 +65,7 @@ namespace xHCI{
                         DRV.PortStates[idx].State = xHCIDriver::PORT_STATE_EMPTY;
                     } else if (ccs && !ped) {
                         // Connected but not enabled: initiate Port Reset first (do NOT sleep in ISR)
-                        Write(Level::LOG_INFO, "[XHCI] Controller %u - Port%u connected but disabled, issuing Port Reset\n",
+                        Write(Level::LOG_INFO, " Controller %u - Port%u connected but disabled, issuing Port Reset\n",
                               (unsigned)Controller_ID, (unsigned)portId);
                         // Mark port as resetting
                         DRV.PortStates[idx].State = xHCIDriver::PORT_STATE_RESETTING;
@@ -74,7 +75,7 @@ namespace xHCI{
                     } else if (ccs && ped) {
                         // Port is connected and enabled: now it's valid to Enable Slot
                         if (DRV.PortStates[idx].State != xHCIDriver::PORT_STATE_ENABLE_SENT) {
-                            Write(Level::LOG_INFO, "[XHCI] Controller %u - Port%u enabled, issuing Enable Slot\n",
+                            Write(Level::LOG_INFO, " Controller %u - Port%u enabled, issuing Enable Slot\n",
                                   (unsigned)Controller_ID, (unsigned)portId);
                             SendEnableSlotCommand(DRV);
                             DRV.PortStates[idx].State = xHCIDriver::PORT_STATE_ENABLE_SENT;
@@ -87,7 +88,7 @@ namespace xHCI{
                     PR->port_sc = NewVAL;
                 }
             } else {
-                Write(Level::LOG_INFO, "[XHCI] Controller %u - Event Type %u (param=0x%016llx status=0x%08x ctl=0x%08x)\n",
+                Write(Level::LOG_INFO, " Controller %u - Event Type %u (param=0x%016llx status=0x%08x ctl=0x%08x)\n",
                     (unsigned)Controller_ID, (unsigned)EventType,
                     (unsigned long long)Event->parameter,
                     (unsigned)Event->status,
@@ -115,11 +116,11 @@ namespace xHCI{
     }
 
     static VOID xHCI_HandleInterrupt(VAL32 Controller_ID){
-        Write(Level::LOG_CRIT, "[XHCI] Interrupt received from controller %u \n", (unsigned)Controller_ID);
+        Write(Level::LOG_CRIT, " Interrupt received from controller %u \n", (unsigned)Controller_ID);
         xHCIDriver &DRV = g_xhci_controllers[Controller_ID];
         U32 Status = DRV.op_regs->usb_sts;
         if(!(Status & (1u << 3))){
-            Write(Level::LOG_WARNING, "[XHCI] Spurious interrupt on controller %u\n", (unsigned)Controller_ID);
+            Write(Level::LOG_WARNING, " Spurious interrupt on controller %u\n", (unsigned)Controller_ID);
             return;
         }
         ProcessPendingEvents(DRV, Controller_ID);

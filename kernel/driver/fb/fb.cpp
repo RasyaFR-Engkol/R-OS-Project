@@ -1,3 +1,4 @@
+#define PRINTK_MODULE_NAME "FB"
 #include <rosval.h>
 #include <rossys.hpp>
 #include <framebuffer.hpp>
@@ -7,6 +8,8 @@
 #include "../../mm/mm.hpp"
 #include "../../mm/kmalloc/kmalloc.hpp"
 #include <string.hpp>
+
+/* module name provided via PRINTK_MODULE_NAME */
 
 namespace FB {
     // Cached framebuffer state to avoid repeated BootInfo/HHDM lookups
@@ -25,7 +28,7 @@ namespace FB {
     VOID Init(){
         const BootInfo *bi = BootInfoGet();
         if(!bi || !bi->has_framebuffer) {
-            Serial::Printf("[GOPFB] No framebuffer info in BootInfo\n");
+            Serial::Printf("No framebuffer info in BootInfo\n");
             return;
         }
 

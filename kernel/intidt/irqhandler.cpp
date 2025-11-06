@@ -6,38 +6,24 @@
 #include "idt.hpp"
 
 // Common IRQ dispatcher called by asm stubs with irq number [0..207]
+// Forward-declare LAPIC helper provided by ACPI MADT module so IRQ path
+// can send EOI without remapping the register itself.
+namespace ACPI { namespace LAPIC { VOID LapicWrite(U32 RegOffset, U32 Value); } }
+
 static inline void LAPIC_SendEOI() {
-    // Lazily map Local APIC MMIO (phys 0xFEE00000) at a dedicated VA (not in HHDM), then write EOI at +0xB0.
-    static volatile U32* s_lapic_eoi = nullptr;
-    static volatile U32* s_lapic_regs = nullptr;
-    if (!s_lapic_eoi) {
-        const UPTR LAPIC_PHYS_BASE = 0xFEE00000u;
-        // Allocate a fresh virtual page from the kernel VA pool to avoid clashing with 2MiB HHDM huge pages
-        void* va = PageAlloc::VirtualAllocPages(1);
-        if (!va) {
-            Serial::Write("[APIC] ERROR: Failed to allocate VA for Local APIC MMIO page\n");
-            return;
-        }
-        // Map one 4KiB page for LAPIC with cache disabled attributes
-        PFLAGS flags = PAGE_PRESENT | PAGE_RW | PAGE_PCD | PAGE_PWT;
-        if (!PageAlloc::MapPages(KernelPML4, LAPIC_PHYS_BASE, (UPTR)va, 1, flags)) {
-            Serial::Write("[APIC] ERROR: Failed to map Local APIC MMIO page\n");
-            // return VA to pool if mapping failed
-            PageAlloc::VirtualFreePages(va, 1);
-            return; // avoid PF; better to lose an EOI than triple-fault
-        }
-        s_lapic_regs = (volatile U32*)va;
-        s_lapic_eoi  = s_lapic_regs + (0xB0u >> 2);
-    }
-    *s_lapic_eoi = 0;
+    // EOI register offset is 0xB0; write 0 to signal end-of-interrupt.
+    ACPI::LAPIC::LapicWrite(0x0B0, 0);
 }
 
 ABI_C VOID IrqDispatch(U64 irq) {
     U8 vector = 0x20 + (U8)irq; // hardware IRQ vectors base at 0x20
-    // Call registered handler if present
+    
+    // Panggil handler yang terdaftar
     IDT::InvokeInterruptHandler(vector);
-    // Send EOI: use legacy PIC for 0..15, Local APIC for >=16 (IOAPIC/MSI/MSI-X)
-    if (irq < 16) {
+    
+    // ATURAN BARU: SELALU kirim EOI ke LAPIC untuk SEMUA 
+    // interrupt hardware (GSI, MSI, LAPIC Timer, dll.)
+    if(PIC::G_StillLegacyINTx){
         PIC::SendEOI((U8)irq);
     } else {
         LAPIC_SendEOI();

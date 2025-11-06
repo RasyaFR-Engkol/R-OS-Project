@@ -1,3 +1,4 @@
+#define PRINTK_MODULE_NAME "FBConsole"
 #include <rosval.h>
 #include <rossys.hpp>
 #include <bootinfo.h>
@@ -6,6 +7,8 @@
 #include <mm.hpp>
 #include <logging.hpp>
 #include <string.hpp>
+
+/* module name provided via PRINTK_MODULE_NAME */
 
 namespace FBConsole {
     // Untuk sementara taro PSF1 Header disini aja
@@ -48,18 +51,18 @@ namespace FBConsole {
         SIZE_T fontlen =Lat15_VGA16_psf_len;
         U8 *fontdata = (U8*)Kmalloc::Alloc(fontlen);
         if(!fontdata){
-            Printk::Write(Printk::Level::LOG_EMERG, "[FBCON] Failed to allocate memory\n");
+            Printk::Write(Printk::Level::LOG_EMERG, "Failed to allocate memory\n");
             // Gak akan pernah sampe sini
             return;
         }
         String::Memcpy(fontdata, Lat15_VGA16_psf, fontlen);
 
-        Printk::Write(Printk::Level::LOG_INFO, "[FBCON] Font loaded, size %u bytes\n", (unsigned)fontlen);
+        Printk::Write(Printk::Level::LOG_INFO, "Font loaded, size %u bytes\n", (unsigned)fontlen);
 
         // Validasi font
         /* Basic validation: ensure we at least have a PSF1 header */
         if (fontlen < sizeof(FBConsole::PSF1_HEADER)) {
-            Printk::Write(Printk::Level::LOG_EMERG, "[FBCON] Font too small for PSF1 header (len=%u)\n", (unsigned)fontlen);
+            Printk::Write(Printk::Level::LOG_EMERG, "Font too small for PSF1 header (len=%u)\n", (unsigned)fontlen);
             return;
         }
 
@@ -67,7 +70,7 @@ namespace FBConsole {
 
         /* Correct magic checks: compare magic[0] and magic[1] */
         if (HandlePSF->magic[0] != PSF1_MAGIC0 || HandlePSF->magic[1] != PSF1_MAGIC1) {
-            Printk::Write(Printk::Level::LOG_EMERG, "[FBCON] Invalid PSF1 magic: %02x %02x\n",
+            Printk::Write(Printk::Level::LOG_EMERG, "Invalid PSF1 magic: %02x %02x\n",
                 (unsigned)HandlePSF->magic[0], (unsigned)HandlePSF->magic[1]);
             return;
         }
@@ -76,7 +79,7 @@ namespace FBConsole {
         unsigned glyphs = (HandlePSF->mode & PSF1_MODE_512) ? 512u : 256u;
         size_t expected = sizeof(FBConsole::PSF1_HEADER) + (size_t)glyphs * (size_t)HandlePSF->charsize;
         if (fontlen < expected) {
-            Printk::Write(Printk::Level::LOG_EMERG, "[FBCON] PSF1 font truncated: got %u bytes, need %u\n",
+            Printk::Write(Printk::Level::LOG_EMERG, "PSF1 font truncated: got %u bytes, need %u\n",
                 (unsigned)fontlen, (unsigned)expected);
             return;
         }
@@ -117,10 +120,10 @@ namespace FBConsole {
         g_ready = TRUE;
 
         // Optionally print a small test string both to serial (Printk) and screen
-        Printk::Write(Printk::Level::LOG_INFO, "[FBCON] PSF font ready (%u glyphs, %u rows)\n",
+        Printk::Write(Printk::Level::LOG_INFO, " PSF font ready (%u glyphs, %u rows)\n",
             (unsigned)g_psf_glyphs, (unsigned)g_psf_charsize);
 
-        // We no longer draw a manual "[FBCON] Ready" string here. Instead
+        // We no longer draw a manual " Ready" string here. Instead
         // rely on Printk::Write (called above) which will mirror the same
         // message to the framebuffer via FBConsole::WriteString(). This
         // avoids duplicate on-screen messages and keeps logging centralized.

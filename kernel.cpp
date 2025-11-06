@@ -5,6 +5,8 @@
 #include <serial.hpp>
 #include <rosval.h>
 #include <bootinfo.h>
+#include "firmware/acpi/acpi.hpp"
+#include "firmware/acpi/driver/timer/timer.hpp"
 #include "framebuffer.hpp"
 #include "kernel/driver/pci/pci.hpp"
 #include "kernel/driver/ahci/ahci.hpp"
@@ -15,6 +17,7 @@
 #include "kernel/log/printk/printk.hpp"
 #include "kernel/mm/kmalloc/kmalloc.hpp"
 #include "kernel/mm/mm.hpp"
+#include "firmware/acpi/madt/smpmod/smp.hpp"
 #include "debug.hpp"
 #include "rossys.hpp"
 
@@ -28,16 +31,36 @@ ABI_C void KernelMain()
     IDT::InitializeIDT();
     FB::Init();
     FBConsole::Init();
-    // Already executing in higher-half by design; no runtime relocation needed.
 
+    // Initialize PIC and PIT early so we can use PIT as a calibration
+    // source for APIC timer calibration when ACPI brings up LAPIC.
     PIC::InitializePIC();
     PIC::Keyboard::InitializeKeyboardPIC();
-    PIT::InitializePIT(100); // set PIT to 100 Hz
+    PIT::InitializePIT(100); // set PIT to 100 Hz (calibration/reference)
 
     // Enable IRQ-driven serial input (COM1 IRQ4)
     Serial::EnableIRQInput();
 
+    // Initialize ACPI/MADT which will parse tables and initialize LAPIC/IOAPIC
+    // (but do not start the LAPIC timer yet; we need interrupts enabled to
+    // calibrate it against the PIT).
+    ACPI::Initialize();
+
+    // Enable interrupts so PIT IRQs will increment PIT::ticks for calibration
     Arch::Sti();
+
+    // Calibrate and start LAPIC timer at 100 Hz (uses PIT ticks)
+    ACPI::Timer::InitializeLapicTimer(0x20, 100, TRUE);
+
+    // Now mask and disable legacy PIC hardware while interrupts are briefly
+    // disabled inside the call. After that, re-enable interrupts so LAPIC
+    // delivered interrupts are accepted.
+    PIC::DisableIRQWhileAndMaskOldPIC();
+    Arch::Sti();
+
+    // Now that LAPIC timer calibrated, PIT ticks flowing, interrupts enabled,
+    // and IOAPIC/LAPIC initialized, start Application Processors.
+    ACPI::LAPIC::SMP::InitSMP();
 
     // Initialize PCI and its drivers
     PCI::IntializePCIDrivers();

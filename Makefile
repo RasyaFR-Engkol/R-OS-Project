@@ -34,17 +34,26 @@ CXX = /home/rasya/cross/bin/x86_64-elf-g++
 # Temukan semua file sumber (exclude build directory to avoid generated files)
 C_SRCS := $(shell find . -path ./$(BUILD_DIR) -prune -o -type f -name "*.c" -print)
 CPP_SRCS := $(shell find . -path ./$(BUILD_DIR) -prune -o -type f -name "*.cpp" -print)
-ASM_SRCS := $(shell find . -path ./$(BUILD_DIR) -prune -o -type f -name "*.asm" -print)
+# All ASM sources except the AP trampoline which is a flat binary
+ASM_SRCS := $(shell find . -path ./$(BUILD_DIR) -prune -o -type f -name "*.asm" -print | \
+			grep -v "firmware/acpi/madt/smpmod/rmpmlmtramp.asm")
 
 # Ubah jadi object file path di build/
 C_OBJS := $(patsubst ./%, $(BUILD_DIR)/%, $(C_SRCS:.c=.o))
 CPP_OBJS := $(patsubst ./%, $(BUILD_DIR)/%, $(CPP_SRCS:.cpp=.o))
 ASM_OBJS := $(patsubst ./%, $(BUILD_DIR)/%, $(ASM_SRCS:.asm=.o))
 
-OBJS := $(C_OBJS) $(CPP_OBJS) $(ASM_OBJS)
+# AP Trampoline (flat binary at 0x8000). We assemble both a flat binary and an
+# embedded object so the kernel can memcpy it into low memory automatically.
+TRAMP_SRC := firmware/acpi/madt/smpmod/rmpmlmtramp.asm
+TRAMP_BIN := $(BUILD_DIR)/firmware/acpi/madt/smpmod/rmpmlmtramp.bin
+TRAMP_OBJ := $(BUILD_DIR)/firmware/acpi/madt/smpmod/rmpmlmtramp_bin.o
+
+OBJS := $(C_OBJS) $(CPP_OBJS) $(ASM_OBJS) $(TRAMP_OBJ)
+
 
 # Default rule 
-all: $(TARGET)
+all: $(TRAMP_BIN) $(TRAMP_OBJ) $(TARGET)
 
 # Linking
 $(TARGET): $(OBJS)
@@ -71,6 +80,21 @@ $(BUILD_DIR)/%.o: %.cpp
 $(BUILD_DIR)/%.o: %.asm
 	@mkdir -p $(dir $@)
 	$(AS) $(ASFLAGS) $< -o $@
+
+# Build AP trampoline as a flat binary to honor ORG 0x8000 in the ASM
+$(TRAMP_BIN): $(TRAMP_SRC)
+	@mkdir -p $(dir $@)
+	$(AS) -f bin $< -o $@
+	@echo "Built AP trampoline binary: $@"
+
+$(TRAMP_OBJ): $(TRAMP_BIN)
+	@mkdir -p $(dir $@)
+	$(LD) -r -b binary -o $@ $<
+	@echo "Embedded AP trampoline object: $@"
+
+# (Optional) To wrap the binary into an ELF for debugging/tools, run manually:
+#   $(LD) -r -b binary -o $(TRAMP_BIN:.bin=.o) $(TRAMP_BIN)
+#   $(LD) -T x86_64/ap_trampoline.ld -o $(TRAMP_BIN:.bin=.elf) $(TRAMP_BIN:.bin=.o)
 
 clean:
 	rm -rf $(BUILD_DIR)

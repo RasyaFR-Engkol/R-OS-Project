@@ -6,6 +6,9 @@
 // Mirror logs to framebuffer console when available
 #include "../fbcon/fbcon.hpp"
 
+// Module-name is provided per-translation-unit via `ExportSymbol()` macro in
+// the header (static inline helper). No global weak symbol is needed.
+
 namespace Printk {
     using namespace String;
     using namespace Port;
@@ -160,9 +163,7 @@ namespace Printk {
         while (1) Arch::HaltCPU();
     }
 
-    BOOL Write(Printk::Level level, const char *fmt, ...) {
-        VA_LIST Args;
-        VA_STRT(Args, fmt);
+    BOOL InternalWrite(Printk::Level level, const char *module_name, const char *fmt, VA_LIST Args) {
 
         // Emit level prefix (restore levelling)
         const CHAR8* levelPrefix = "";
@@ -179,6 +180,11 @@ namespace Printk {
         }
         // write prefix to buffer (and it will flush to serial on '\n' if present)
         Printk::WriteToLogBuffer(levelPrefix);
+
+        const CHAR8* mod = module_name ? module_name : "Kernel";
+        WriteToLogBuffer("[");
+        WriteToLogBuffer(mod);
+        WriteToLogBuffer("] ");
 
         // ketika masih ada karakter *fmt, kita akan masuk ke case
         // *fmt, lalu kita mulai iterasi 1 1 karakternya untuk di printf
@@ -311,8 +317,6 @@ namespace Printk {
             }
             fmt++;
         }
-        VA_END(Args);
-
         // After formatting finished, flush remaining content to serial
         FlushLogBufferToSerial(TRUE);
 

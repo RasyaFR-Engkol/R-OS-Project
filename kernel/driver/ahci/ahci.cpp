@@ -1,3 +1,4 @@
+#define PRINTK_MODULE_NAME "AHCI"
 #include <rosval.h>
 #include "ahci.hpp"
 #include "ahci_regs.hpp"
@@ -9,6 +10,8 @@
 #include "../pic/timer/pit.hpp"
 #include "../pci/capatibility/msixmsi/msixmsi.hpp"
 #include "ahci_internal.hpp"
+
+    /* module name provided via PRINTK_MODULE_NAME */
 
 namespace AHCI {
     // Core AHCI controller globals remain here; other translation units
@@ -54,10 +57,22 @@ namespace AHCI {
             U8 Vector = MSI::EnableMSI(Bus, Device, Function, MSICapOffset, MyHandler);
             if(Vector != 0){
                 DRV.IntVector = Vector;
-                Printk::Write(Printk::Level::LOG_INFO, "[AHCI] Enabled MSI on AHCI Controller %02X:%02X:%02X with vector 0x%02x\n",
+                Printk::Write(Printk::Level::LOG_INFO, " Enabled MSI on AHCI Controller %02X:%02X:%02X with vector 0x%02x\n",
                     (unsigned)Bus, (unsigned)Device, (unsigned)Function, (unsigned)Vector);
             } else {
-                Printk::Write(Printk::Level::LOG_ERR, "[AHCI] Failed to enable MSI on AHCI Controller %02X:%02X:%02X\n",
+                Printk::Write(Printk::Level::LOG_ERR, " Failed to enable MSI on AHCI Controller %02X:%02X:%02X\n",
+                    (unsigned)Bus, (unsigned)Device, (unsigned)Function);
+            }
+        } else {
+            // Try legacy INTx fallback
+            VOID (*MyHandler)(VOID) = g_ahci_handlers[g_ahci_controller_count];
+            U8 irq = PCI::EnableLegacyINTxForDevice(Bus, Device, Function, (void(*)())MyHandler);
+            if (irq != 0) {
+                DRV.IntVector = (U8)(0x20 + irq);
+                Printk::Write(Printk::Level::LOG_INFO, " Enabled legacy INTx IRQ %u for AHCI Controller %02X:%02X:%02X (vector 0x%02x)\n",
+                    (unsigned)irq, (unsigned)Bus, (unsigned)Device, (unsigned)Function, (unsigned)DRV.IntVector);
+            } else {
+                Printk::Write(Printk::Level::LOG_WARNING, " No MSI and legacy INTx unavailable for AHCI %02X:%02X:%02X\n",
                     (unsigned)Bus, (unsigned)Device, (unsigned)Function);
             }
         }
@@ -66,13 +81,13 @@ namespace AHCI {
 
         Arch::RestoreInterrupts(_ahci_rflags);
 
-        Printk::Write(Printk::Level::LOG_INFO, "[AHCI] Registered AHCI Controller at %02X:%02X:%02X, ABAR phys=%p virt=%p\n",
+        Printk::Write(Printk::Level::LOG_INFO, " Registered AHCI Controller at %02X:%02X:%02X, ABAR phys=%p virt=%p\n",
             (unsigned)Bus, (unsigned)Device, (unsigned)Function,
             (void*)(uintptr_t)ABAR_Phys, VirtAddr);
     }
 
     VOID InitializeAllControllers() {
-        Printk::Write(Printk::Level::LOG_NOTICE, "[AHCI] Initializing all AHCI controllers (%d found)\n", g_ahci_controller_count);
+        Printk::Write(Printk::Level::LOG_NOTICE, " Initializing all AHCI controllers (%d found)\n", g_ahci_controller_count);
 
         for(int i = 0; i < g_ahci_controller_count; i++) {
             AHCIDriver &DRV = g_ahci_controllers[i];
@@ -82,7 +97,7 @@ namespace AHCI {
 
             U32 PortImplemented = DRV.regs->pi;
 
-            Printk::Write(Printk::Level::LOG_INFO, "[AHCI] Controller %d at %02X:%02X:%02X - Ports Implemented: 0x%08X\n",
+            Printk::Write(Printk::Level::LOG_INFO, " Controller %d at %02X:%02X:%02X - Ports Implemented: 0x%08X\n",
                 i, (unsigned)DRV.bus, (unsigned)DRV.dev, (unsigned)DRV.func,
                 (unsigned)PortImplemented);
 
@@ -100,7 +115,7 @@ namespace AHCI {
                         }
                         DRV.port_device[portnum] = DevType;
                     } else {
-                        Printk::Write(Printk::Level::LOG_ERR, "[AHCI] Controller %d Port %d failed to initialize\n", i, portnum);
+                        Printk::Write(Printk::Level::LOG_ERR, " Controller %d Port %d failed to initialize\n", i, portnum);
                     }
                 }
             }

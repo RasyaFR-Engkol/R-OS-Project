@@ -1,3 +1,4 @@
+#define PRINTK_MODULE_NAME "IDTINIT"
 #include <rosval.h>
 #include "idt.hpp"
 #include "serial.hpp"

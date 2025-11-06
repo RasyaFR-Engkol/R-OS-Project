@@ -1,3 +1,4 @@
+#define PRINTK_MODULE_NAME "PITTimer"
 #include <rosval.h>
 #include "pit.hpp"
 #include "../../pic/pic.hpp"
@@ -5,6 +6,8 @@
 #include <logging.hpp>
 #include <serial.hpp>
 #include "../../../intidt/idt.hpp"
+
+/* module name provided via PRINTK_MODULE_NAME */
 
 namespace PIT {
     U16 PITReload = 0;
@@ -33,7 +36,7 @@ namespace PIT {
 
         // Register the timer interrupt handler on vector 0x20 (IRQ0)
         IDT::RegisterInterruptHandler(0x20, PIT_OnIrq);
-        Printk::Write(Printk::Level::LOG_INFO, "[PITTIMER] Initialize PIT at %u Hz (Divisor=%u)\n", hz, Divisor);
+        Printk::Write(Printk::Level::LOG_INFO, " Initialize PIT at %u Hz (Divisor=%u)\n", hz, Divisor);
     }
 
 }

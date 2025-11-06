@@ -1,3 +1,4 @@
+#define PRINTK_MODULE_NAME "XHCITest"
 #include <rosval.h>
 #include <logging.hpp>
 #include <mm.hpp>
@@ -11,17 +12,17 @@ namespace xHCI {
     // Issue an Enable Slot command for initialized controllers without using NOOP or polling.
     // Completion will be delivered via MSI as a Command Completion Event (CCE).
     VOID SimulateDeviceConnectTest(){
-        Write(Level::LOG_NOTICE, "[XHCI] Test: Enable Slot without NOOP (interrupt-only)\n");
+        Write(Level::LOG_NOTICE, " Test: Enable Slot without NOOP (interrupt-only)\n");
         for (VAL32 i = 0; i < g_xhci_controller_count; ++i) {
             xHCIDriver &DRV = g_xhci_controllers[i];
             if (!DRV.Initialized) {
-                Write(Level::LOG_WARNING, "[XHCI] Controller %u not initialized, skipping test\n", (unsigned)i);
+                Write(Level::LOG_WARNING, " Controller %u not initialized, skipping test\n", (unsigned)i);
                 continue;
             }
             // Issue per-port Enable Slot for any port that has not yet had an EnableSlot sent.
             for (U32 p = 0; p < DRV.PortCount; ++p) {
                 if (DRV.PortStates[p].State != xHCIDriver::PORT_STATE_ENABLE_SENT) {
-                    Write(Level::LOG_INFO, "[XHCI] Controller %u - issuing Enable Slot for Port %u (no polling)\n", (unsigned)i, (unsigned)(p+1));
+                    Write(Level::LOG_INFO, " Controller %u - issuing Enable Slot for Port %u (no polling)\n", (unsigned)i, (unsigned)(p+1));
                     SendEnableSlotCommand(DRV);
                     DRV.PortStates[p].State = xHCIDriver::PORT_STATE_ENABLE_SENT;
                     break; // issue one for now (original test issued one per controller)
@@ -40,7 +41,7 @@ namespace xHCI {
                         asm volatile ("mfence" ::: "memory");
                         IR0->iman |= (1u << 1);
                         U32 iman_after = IR0->iman;
-                        Write(Level::LOG_INFO, "[XHCI] Controller %u - Re-armed IMAN.IE (iman: 0x%08x -> 0x%08x)\n",
+                        Write(Level::LOG_INFO, " Controller %u - Re-armed IMAN.IE (iman: 0x%08x -> 0x%08x)\n",
                               (unsigned)i, (unsigned)iman_before, (unsigned)iman_after);
                     }
                 }
@@ -52,15 +53,15 @@ namespace xHCI {
     // This verifies that multiple MSIs are delivered and processed correctly.
     VOID InterruptBurstTest(U32 times) {
         if (times == 0) times = 1;
-        Write(Level::LOG_NOTICE, "[XHCI] Test: Interrupt burst (Enable Slot x%u, no NOOP, no polling)\n", (unsigned)times);
+        Write(Level::LOG_NOTICE, " Test: Interrupt burst (Enable Slot x%u, no NOOP, no polling)\n", (unsigned)times);
         for (VAL32 i = 0; i < g_xhci_controller_count; ++i) {
             xHCIDriver &DRV = g_xhci_controllers[i];
             if (!DRV.Initialized) {
-                Write(Level::LOG_WARNING, "[XHCI] Controller %u not initialized, skipping burst\n", (unsigned)i);
+                Write(Level::LOG_WARNING, " Controller %u not initialized, skipping burst\n", (unsigned)i);
                 continue;
             }
             for (U32 n = 0; n < times; ++n) {
-                Write(Level::LOG_INFO, "[XHCI] Controller %u - burst %u/%u: issuing Enable Slot\n", (unsigned)i, (unsigned)(n+1), (unsigned)times);
+                Write(Level::LOG_INFO, " Controller %u - burst %u/%u: issuing Enable Slot\n", (unsigned)i, (unsigned)(n+1), (unsigned)times);
                 SendEnableSlotCommand(DRV);
                 Arch::Time::Sleep(1);
             }

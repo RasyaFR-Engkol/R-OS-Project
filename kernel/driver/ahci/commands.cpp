@@ -1,3 +1,4 @@
+#define PRINTK_MODULE_NAME "AHCICMDS"
 #include <rosval.h>
 #include "ahci.hpp"
 #include "ahci_regs.hpp"
@@ -8,6 +9,8 @@
 #include <logging.hpp>
 #include "../pic/timer/pit.hpp"
 #include "ahci_internal.hpp"
+
+/* module name provided via PRINTK_MODULE_NAME */
 
 namespace AHCI {
 
@@ -73,24 +76,24 @@ namespace AHCI {
         } else {
             while (Port->ci & (1u << Slot)) {
                 if ((PIT::ticks - start) > TIMEOUT_TICKS) {
-                    Printk::Write(Printk::Level::LOG_ERR, "[AHCI] IssueAndWait timeout (IF=0)\n");
+                    Printk::Write(Printk::Level::LOG_ERR, " IssueAndWait timeout (IF=0)\n");
                     break;
                 }
             }
         }
         if (Port->ci & (1u << Slot)) {
-            Printk::Write(Printk::Level::LOG_ERR, "[AHCI] Timeout waiting slot %u to complete (CI=0x%08X)\n",
+            Printk::Write(Printk::Level::LOG_ERR, " Timeout waiting slot %u to complete (CI=0x%08X)\n",
                           (unsigned)Slot, (unsigned)Port->ci);
             Port->ci &= ~(1u << Slot);
             return FALSE;
         }
         if (Port->is & (1u << 30)) {
-            Printk::Write(Printk::Level::LOG_ERR, "[AHCI] TFES set after command (IS=0x%08X)\n", (unsigned)Port->is);
+            Printk::Write(Printk::Level::LOG_ERR, " TFES set after command (IS=0x%08X)\n", (unsigned)Port->is);
             Port->is = 0xFFFFFFFF;
             return FALSE;
         }
         if (Port->tfd & 0x01) {
-            Printk::Write(Printk::Level::LOG_ERR, "[AHCI] TaskFile ERR after command (TFD=0x%02X)\n", (unsigned)Port->tfd);
+            Printk::Write(Printk::Level::LOG_ERR, " TaskFile ERR after command (TFD=0x%02X)\n", (unsigned)Port->tfd);
             Port->is = 0xFFFFFFFF;
             return FALSE;
         }
@@ -101,13 +104,13 @@ namespace AHCI {
     BOOL SendIdentify(AHCIDriver &Driver, VAL32 PortNum){
         PageAlloc::DMAAlloc::DMABuffer *IDBuf = PageAlloc::DMAAlloc::AllocateDMAPages(1);
         if(!IDBuf){
-            Printk::Write(Printk::Level::LOG_ERR, "[AHCI] Port %d: Failed to allocate DMA buffer for IDENTIFY\n", PortNum);
+            Printk::Write(Printk::Level::LOG_ERR, " Port %d: Failed to allocate DMA buffer for IDENTIFY\n", PortNum);
             return FALSE;
         }
 
         VAL32 Slot = FindFreeCommandSlot(Driver, PortNum);
         if(Slot == (VAL32)-1){
-            Printk::Write(Printk::Level::LOG_ERR, "[AHCI] Port %d: No free command slot available for IDENTIFY\n", PortNum);
+            Printk::Write(Printk::Level::LOG_ERR, " Port %d: No free command slot available for IDENTIFY\n", PortNum);
             PageAlloc::DMAAlloc::FreeDMABuffer(IDBuf);
             return FALSE;
         }
@@ -146,21 +149,21 @@ namespace AHCI {
         }
 
         if ((Port->ci & (1u << Slot)) != 0) {
-            Printk::Write(Printk::Level::LOG_ERR, "[AHCI] Port %d: IDENTIFY command timeout (slot still active)\n", PortNum);
+            Printk::Write(Printk::Level::LOG_ERR, " Port %d: IDENTIFY command timeout (slot still active)\n", PortNum);
             Port->ci &= ~(1u << Slot);
             PageAlloc::DMAAlloc::FreeDMABuffer(IDBuf);
             return FALSE;
         }
 
         if (Port->is & (1u << 30)) {
-            Printk::Write(Printk::Level::LOG_ERR, "[AHCI] Port %d: IDENTIFY TFES set (IS=0x%08X)\n", PortNum, (unsigned)Port->is);
+            Printk::Write(Printk::Level::LOG_ERR, " Port %d: IDENTIFY TFES set (IS=0x%08X)\n", PortNum, (unsigned)Port->is);
             Port->is = 0xFFFFFFFF; // acknowledge
             PageAlloc::DMAAlloc::FreeDMABuffer(IDBuf);
             return FALSE;
         }
         
         if(Port->tfd & 0x01) {
-            Printk::Write(Printk::Level::LOG_ERR, "[AHCI] Port %d: IDENTIFY command failed (TFD=0x%02X)\n", PortNum, (unsigned)(Port->tfd));
+            Printk::Write(Printk::Level::LOG_ERR, " Port %d: IDENTIFY command failed (TFD=0x%02X)\n", PortNum, (unsigned)(Port->tfd));
             Port->is = 0xFFFFFFFF; // acknowledge
             PageAlloc::DMAAlloc::FreeDMABuffer(IDBuf);
             return FALSE;
@@ -174,7 +177,7 @@ namespace AHCI {
         
         U64 TotalBytes = TotalSectors * 512;
 
-        Printk::Write(Printk::Level::LOG_INFO, "[AHCI] Port %d: IDENTIFY successful - Total Size: %llu bytes (%llu sectors)\n",
+        Printk::Write(Printk::Level::LOG_INFO, " Port %d: IDENTIFY successful - Total Size: %llu bytes (%llu sectors)\n",
             PortNum, TotalBytes, TotalSectors);
 
         PageAlloc::DMAAlloc::FreeDMABuffer(IDBuf);
@@ -224,7 +227,7 @@ namespace AHCI {
 
         U32 bytes = count * 512u;
         if (bytes > buf->Size) {
-            Printk::Write(Printk::Level::LOG_ERR, "[AHCI] Write: buffer too small (need %u have %u)\n",
+            Printk::Write(Printk::Level::LOG_ERR, " Write: buffer too small (need %u have %u)\n",
                           (unsigned)bytes, (unsigned)buf->Size);
             return FALSE;
         }
