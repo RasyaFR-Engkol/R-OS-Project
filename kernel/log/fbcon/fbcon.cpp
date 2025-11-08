@@ -1,3 +1,4 @@
+#include "fbcon.hpp"
 #define PRINTK_MODULE_NAME "FBConsole"
 #include <rosval.h>
 #include <rossys.hpp>
@@ -7,6 +8,7 @@
 #include <mm.hpp>
 #include <logging.hpp>
 #include <string.hpp>
+#include <rossys.hpp>
 
 /* module name provided via PRINTK_MODULE_NAME */
 
@@ -40,12 +42,19 @@ namespace FBConsole {
     static U32 g_cur_row = 0;
     // Text buffer (grid of chars)
     static CHAR8* g_grid = nullptr;
+    static CHAR8 g_cursor_char = '_';
+    static BOOL g_cursor_visible = TRUE;
+    static U64 g_last_blink_time = 0;
+    static U64 g_blink_interval_tick = 0;
 
     // Forward declarations
     static inline void RenderCell(U32 col, U32 row);
     static inline void RenderAll();
     static inline void NewLine();
     static inline void ScrollOne();
+    static inline void RenderCursor(BOOL show);
+    static inline void HideCursor();
+    static inline void ShowCursor();
 
     VOID Init(){
         SIZE_T fontlen =Lat15_VGA16_psf_len;
@@ -88,9 +97,9 @@ namespace FBConsole {
         g_psf_glyphs = glyphs;
         g_psf_charsize = (unsigned)HandlePSF->charsize;
         g_psf_font = fontdata + sizeof(FBConsole::PSF1_HEADER);
-    // Tighter spacing: no extra pixels horizontally/vertically
-    g_cell_w = g_psf_charwidth;   // 8px typical for PSF1
-    g_cell_h = g_psf_charsize;    // e.g., 16 rows
+        // Tighter spacing: no extra pixels horizontally/vertically
+        g_cell_w = g_psf_charwidth;   // 8px typical for PSF1
+        g_cell_h = g_psf_charsize;    // e.g., 16 rows
 
         /* Clear the screen to black (if framebuffer available). We use BootInfo to
          * query resolution because FB::Get() isn't exposed here. FB::Rect will
@@ -118,6 +127,13 @@ namespace FBConsole {
 
         // Mark console ready so other code (or Printk) can detect it
         g_ready = TRUE;
+
+        g_blink_interval_tick = (U64)Arch::Time::TickHz() / 2;
+        if (g_blink_interval_tick == 0) {
+            g_blink_interval_tick = 50; // Fallback (assuming 100Hz)
+        }
+        g_last_blink_time = Arch::Time::NowTicks();
+        ShowCursor();
 
         // Optionally print a small test string both to serial (Printk) and screen
         Printk::Write(Printk::Level::LOG_INFO, " PSF font ready (%u glyphs, %u rows)\n",
@@ -214,9 +230,47 @@ namespace FBConsole {
         g_cur_col = 0;
     }
 
+    static inline void RenderCursor(BOOL show){
+        if(!g_grid) return;
+        if(g_cur_col >= g_cols || g_cur_row >= g_rows) return;
+
+        U32 Px = g_cur_col * g_cell_w;
+        U32 Py = g_cur_row * g_cell_h;
+
+        CHAR8 CharToDraw;
+        if(show){
+            CharToDraw = g_cursor_char;
+        } else {
+            CharToDraw = g_grid[g_cur_row * g_cols + g_cur_col];
+        }
+
+        PutCharAt(Px, Py, CharToDraw, g_fg);
+        FB::Flush(Px, Py, g_cell_w, g_cell_h);
+    }
+
+    static inline void HideCursor(){
+        if(!g_cursor_visible) return;
+        RenderCursor(FALSE);
+        g_cursor_visible = FALSE;
+    }
+
+    static inline void ShowCursor(){
+        // If already visible, don't reset the blink timer - frequent
+        // ShowCursor() calls (e.g. from logging) shouldn't prevent the
+        // regular blink toggle. Only render and update state when the
+        // visibility actually changes.
+        if (g_cursor_visible) return;
+        RenderCursor(TRUE); // draw underscore
+        g_cursor_visible = TRUE;
+        g_last_blink_time = Arch::Time::NowTicks();
+    }
+
     // Write a zero-terminated string with newline, wrap and scrolling
     VOID WriteString(const CHAR8 *s) {
         if (!g_ready || !s || !g_grid) return;
+
+        HideCursor();
+
         for (const CHAR8* p = s; *p; ++p) {
             CHAR8 ch = *p;
             if (ch == '\b') {
@@ -243,9 +297,15 @@ namespace FBConsole {
                 continue;
             }
             if (ch == '\t') {
-                // simple 4-space tabs
-                for (int i = 0; i < 4; ++i) {
-                    WriteString(" ");
+                // MODIFIKASI: Logika tab non-rekursif
+                U32 spaces_to_add = 4 - (g_cur_col % 4);
+                for (U32 i = 0; i < spaces_to_add; ++i) {
+                    if (g_cur_col >= g_cols) {
+                        NewLine();
+                    }
+                    g_grid[g_cur_row * g_cols + g_cur_col] = ' ';
+                    RenderCell(g_cur_col, g_cur_row);
+                    ++g_cur_col;
                 }
                 continue;
             }
@@ -257,6 +317,23 @@ namespace FBConsole {
             g_grid[g_cur_row * g_cols + g_cur_col] = ch;
             RenderCell(g_cur_col, g_cur_row);
             ++g_cur_col;
+        }
+
+        ShowCursor();
+    }
+
+    VOID UpdateCursor(){
+        if(!g_ready) return;
+
+        U64 current_time = Arch::Time::NowTicks();
+        U64 elapsed = current_time - g_last_blink_time;
+        if(elapsed >= g_blink_interval_tick){
+            if(g_cursor_visible){
+                HideCursor();
+            } else {
+                ShowCursor();
+            }
+            g_last_blink_time = current_time;
         }
     }
 }

@@ -204,8 +204,11 @@ namespace Printk {
                 fmt++;
 
                 BOOL ZeroPadding = FALSE;
-                // Kalo FMT formatting awalan punya %0 padding, make
-                // aktifkan padding
+                BOOL LeftJustify = FALSE;
+                // Parse flags: '-', '0' (we support left-justify and zero-pad)
+                if (*fmt == '-') {
+                    LeftJustify = TRUE; fmt++;
+                }
                 if(*fmt == '0') {
                     ZeroPadding = TRUE;
                     fmt++;
@@ -218,6 +221,17 @@ namespace Printk {
                     fmt++;
                 }
 
+                // Parse precision (optional) and length modifier: l, ll, z
+                BOOL HasPrecision = FALSE;
+                VAL32 Precision = 0;
+                if (*fmt == '.') {
+                    fmt++;
+                    HasPrecision = TRUE;
+                    while (*fmt >= '0' && *fmt <= '9') {
+                        Precision = Precision * 10 + (*fmt - '0');
+                        fmt++;
+                    }
+                }
                 // Parse length modifier: l, ll, z
                 enum LenMod { LM_NONE, LM_L, LM_LL, LM_Z };
                 LenMod LM = LM_NONE;
@@ -241,9 +255,15 @@ namespace Printk {
                         str = va_arg(Args, const CHAR8*);
                         if (!str) str = "(null)";
                         unsigned long long slen = Strlen(str);
+                        if (HasPrecision && Precision < (VAL32)slen) slen = Precision;
                         int pad = (Width > (int)slen) ? (Width - (int)slen) : 0;
-                        for (int i = 0; i < pad; ++i) Printk::WriteToLogBuffer(" ");
-                        Printk::WriteToLogBuffer(str);
+                        if (!LeftJustify) {
+                            for (int i = 0; i < pad; ++i) Printk::WriteToLogBuffer(" ");
+                            for (unsigned long long k = 0; k < slen; ++k) Printk::WriteToLogBufferChar(str[k]);
+                        } else {
+                            for (unsigned long long k = 0; k < slen; ++k) Printk::WriteToLogBufferChar(str[k]);
+                            for (int i = 0; i < pad; ++i) Printk::WriteToLogBuffer(" ");
+                        }
                         break;
                     }
                     case 'c': {
@@ -264,14 +284,30 @@ namespace Printk {
                         bool neg = (out[0] == '-');
                         if (neg) ++out;
                         unsigned long long len = Strlen(out);
-                        int total_len = (int)len + (neg ? 1 : 0);
-                        if (ZeroPadding) {
+                        int num_digits = (int)len;
+                        int total_len = num_digits + (neg ? 1 : 0);
+                        // If precision specified for integers, it defines minimum digits
+                        int min_digits = 0;
+                        if (HasPrecision) min_digits = (int)Precision;
+                        int zero_pad = 0;
+                        if (min_digits > num_digits) zero_pad = min_digits - num_digits;
+                        // If no precision, ZeroPadding flag may request zero pad to width
+                        if (!HasPrecision && ZeroPadding && !LeftJustify && Width > total_len) zero_pad = Width - total_len;
+
+                        if (LeftJustify) {
                             if (neg) Printk::WriteToLogBufferChar('-');
-                            for (int i = total_len; i < Width; ++i) Printk::WriteToLogBufferChar('0');
+                            for (int z = 0; z < zero_pad; ++z) Printk::WriteToLogBufferChar('0');
                             Printk::WriteToLogBuffer(out);
+                            for (int i = total_len + zero_pad; i < Width; ++i) Printk::WriteToLogBufferChar(' ');
                         } else {
-                            for (int i = total_len; i < Width; ++i) Printk::WriteToLogBufferChar(' ');
-                            if (neg) Printk::WriteToLogBufferChar('-');
+                            // pad spaces before sign if no zero padding
+                            if (zero_pad == 0) {
+                                for (int i = total_len; i < Width; ++i) Printk::WriteToLogBufferChar(' ');
+                                if (neg) Printk::WriteToLogBufferChar('-');
+                            } else {
+                                if (neg) Printk::WriteToLogBufferChar('-');
+                                for (int z = 0; z < zero_pad; ++z) Printk::WriteToLogBufferChar('0');
+                            }
                             Printk::WriteToLogBuffer(out);
                         }
                         break;
@@ -284,8 +320,19 @@ namespace Printk {
                         else uval = (unsigned long long)va_arg(Args, unsigned int);
                         Utoa(uval, Buf, 10);
                         unsigned long long len = Strlen(Buf);
-                        for (int i = (int)len; i < Width; ++i) Printk::WriteToLogBufferChar(ZeroPadding ? '0' : ' ');
-                        Printk::WriteToLogBuffer(Buf);
+                        int num_digits = (int)len;
+                        int min_digits = HasPrecision ? (int)Precision : 0;
+                        int zero_pad = (min_digits > num_digits) ? (min_digits - num_digits) : 0;
+                        if (!HasPrecision && ZeroPadding && !LeftJustify && Width > num_digits) zero_pad = Width - num_digits;
+                        if (LeftJustify) {
+                            for (int z = 0; z < zero_pad; ++z) Printk::WriteToLogBufferChar('0');
+                            Printk::WriteToLogBuffer(Buf);
+                            for (int i = num_digits + zero_pad; i < Width; ++i) Printk::WriteToLogBufferChar(' ');
+                        } else {
+                            for (int i = num_digits + zero_pad; i < Width; ++i) Printk::WriteToLogBufferChar(' ');
+                            for (int z = 0; z < zero_pad; ++z) Printk::WriteToLogBufferChar('0');
+                            Printk::WriteToLogBuffer(Buf);
+                        }
                         break;
                     }
                     case 'x':
@@ -301,8 +348,19 @@ namespace Printk {
                             for (char* p = Buf; *p; ++p) if (*p >= 'a' && *p <= 'f') *p = *p - 'a' + 'A';
                         }
                         unsigned long long len = Strlen(Buf);
-                        for (int i = (int)len; i < Width; ++i) Printk::WriteToLogBufferChar(ZeroPadding ? '0' : ' ');
-                        Printk::WriteToLogBuffer(Buf);
+                        int num_digits = (int)len;
+                        int min_digits = HasPrecision ? (int)Precision : 0;
+                        int zero_pad = (min_digits > num_digits) ? (min_digits - num_digits) : 0;
+                        if (!HasPrecision && ZeroPadding && !LeftJustify && Width > num_digits) zero_pad = Width - num_digits;
+                        if (LeftJustify) {
+                            for (int z = 0; z < zero_pad; ++z) Printk::WriteToLogBufferChar('0');
+                            Printk::WriteToLogBuffer(Buf);
+                            for (int i = num_digits + zero_pad; i < Width; ++i) Printk::WriteToLogBufferChar(' ');
+                        } else {
+                            for (int i = num_digits + zero_pad; i < Width; ++i) Printk::WriteToLogBufferChar(' ');
+                            for (int z = 0; z < zero_pad; ++z) Printk::WriteToLogBufferChar('0');
+                            Printk::WriteToLogBuffer(Buf);
+                        }
                         break;
                     }
                     case 'p': {

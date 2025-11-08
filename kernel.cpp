@@ -14,6 +14,7 @@
 #include "kernel/driver/pic/pic.hpp"
 #include "kernel/driver/pic/timer/pit.hpp"
 #include "kernel/intidt/idt.hpp"
+#include "kernel/log/fbcon/fbcon.hpp"
 #include "kernel/log/printk/printk.hpp"
 #include "kernel/mm/kmalloc/kmalloc.hpp"
 #include "kernel/mm/mm.hpp"
@@ -102,6 +103,7 @@ ABI_C void KernelMain()
     // producers are serviced. This keeps IRQ handlers minimal (they only
     // enqueue) while the main loop does I/O and console rendering.
     for (;;) {
+        FBConsole::UpdateCursor();
         // Drain any incoming serial characters (mirrors to FB/serial)
         Serial::PollToConsoles();
         // Process queued keyboard scancodes and echo them to consoles
