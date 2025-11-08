@@ -3,8 +3,10 @@
 #include <string.hpp>
 #include <port.hpp>
 #include <rossys.hpp>
+#include <spinlock/simple.hpp>
 // Mirror logs to framebuffer console when available
 #include "../fbcon/fbcon.hpp"
+#include "framebuffer.hpp"
 
 // Module-name is provided per-translation-unit via `ExportSymbol()` macro in
 // the header (static inline helper). No global weak symbol is needed.
@@ -17,6 +19,13 @@ namespace Printk {
     static size_t LogBufferIndex = 0;
     // Index of the earliest byte not yet flushed to serial
     static size_t LogBufferFlushIndex = 0;
+    SPINLOCK_T PrintkLock;
+
+    VOID Init(){
+        Arch::Spinlock::SpinlockInit(&PrintkLock);
+        Serial::Init();
+        FBConsole::Init();
+    }
 
     // Append string to log buffer; flush to serial on '\n' or '\0'.
     VOID WriteToLogBuffer(const CHAR8* s) {
@@ -29,7 +38,7 @@ namespace Printk {
                 // If buffer is full, flush pending region to serial then wrap
                 if (LogBufferFlushIndex < LogBufferIndex) {
                     size_t seglen = LogBufferIndex - LogBufferFlushIndex;
-                    CHAR8 tmp[1024];
+                    CHAR8 tmp[sizeof(LogBuffer) + 1];
                     for (size_t k = 0; k < seglen; ++k) tmp[k] = LogBuffer[LogBufferFlushIndex + k];
                     tmp[seglen] = '\0';
                     Serial::Write(tmp);
@@ -45,7 +54,7 @@ namespace Printk {
             if (ch == '\n' || ch == '\0') {
                 if (LogBufferFlushIndex < LogBufferIndex) {
                     size_t seglen = LogBufferIndex - LogBufferFlushIndex;
-                    CHAR8 tmp[1024];
+                    CHAR8 tmp[sizeof(LogBuffer) + 1];
                     for (size_t k = 0; k < seglen; ++k) tmp[k] = LogBuffer[LogBufferFlushIndex + k];
                     tmp[seglen] = '\0';
                     Serial::Write(tmp);
@@ -75,7 +84,7 @@ namespace Printk {
         if (LogBufferFlushIndex < LogBufferIndex) {
             // contiguous region
             size_t seglen = LogBufferIndex - LogBufferFlushIndex;
-            CHAR8 tmp[1024];
+            CHAR8 tmp[sizeof(LogBuffer) + 1];
             for (size_t k = 0; k < seglen; ++k) tmp[k] = LogBuffer[LogBufferFlushIndex + k];
             tmp[seglen] = '\0';
             Serial::Write(tmp);
@@ -83,7 +92,7 @@ namespace Printk {
         } else if (force && LogBufferFlushIndex > LogBufferIndex) {
             // wrapped: flush [flushIndex, end) then [0, LogBufferIndex)
             size_t seglen1 = sizeof(LogBuffer) - LogBufferFlushIndex;
-            CHAR8 tmp[1024];
+            CHAR8 tmp[sizeof(LogBuffer) + 1];
             size_t pos = 0;
             for (size_t k = 0; k < seglen1; ++k) tmp[pos++] = LogBuffer[LogBufferFlushIndex + k];
             for (size_t k = 0; k < LogBufferIndex; ++k) tmp[pos++] = LogBuffer[k];
@@ -164,7 +173,6 @@ namespace Printk {
     }
 
     BOOL InternalWrite(Printk::Level level, const char *module_name, const char *fmt, VA_LIST Args) {
-
         // Emit level prefix (restore levelling)
         const CHAR8* levelPrefix = "";
         switch (level) {
@@ -189,14 +197,14 @@ namespace Printk {
         // ketika masih ada karakter *fmt, kita akan masuk ke case
         // *fmt, lalu kita mulai iterasi 1 1 karakternya untuk di printf
         while(*fmt) {
-            // Jika FMT ada persenan, maka itu adalah format, maka
+            // Jika FMT ada persenan, make itu adalah format, make
             // kita harus masuk ke iterasi pemrosesan
             if(*fmt == '%') {
                 // Skip persenan, naikan fmt
                 fmt++;
 
                 BOOL ZeroPadding = FALSE;
-                // Kalo FMT formatting awalan punya %0 padding, maka
+                // Kalo FMT formatting awalan punya %0 padding, make
                 // aktifkan padding
                 if(*fmt == '0') {
                     ZeroPadding = TRUE;

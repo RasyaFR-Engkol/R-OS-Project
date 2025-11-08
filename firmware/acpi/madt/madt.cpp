@@ -113,6 +113,12 @@ namespace ACPI {
             ioapic[4] = val;  // IOWIN (offset 0x10)
         }
 
+        U32 IOAPICRead(uint8_t reg) {
+            volatile uint32_t* ioapic = reinterpret_cast<volatile uint32_t*>(g_IoApicVirtualBase);
+            ioapic[0] = reg; // select
+            return ioapic[4]; // read data
+        }
+
         VOID IOApicRedirect(U8 GSI, U8 Vector, IOAPICFLAGS Flags){
             U32 Low32 = (U32)Vector | Flags;
             U32 High32 = (0 << 24);
@@ -120,6 +126,18 @@ namespace ACPI {
             U8 RegOffset = REDTBL_ENTRY_FOR_GSI(GSI);
             IOAPIC::IOAPICWrite(RegOffset, Low32);
             IOAPIC::IOAPICWrite(RegOffset + 1, High32);
+        }
+
+        VOID IOApicRedirectToCPU(U8 GSI, U8 Vector, IOAPICFLAGS Flags, U8 destApicId){
+            U32 Low32 = (U32)Vector | Flags;
+            U32 High32 = ((U32)destApicId << 24);
+
+            U8 RegOffset = REDTBL_ENTRY_FOR_GSI(GSI);
+            IOAPIC::IOAPICWrite(RegOffset, Low32);
+            IOAPIC::IOAPICWrite(RegOffset + 1, High32);
+
+            Printk::Write(Printk::Level::LOG_INFO, " IOAPIC: redirected GSI %u -> vector 0x%02x dest APIC %u\n",
+                (unsigned)GSI, (unsigned)Vector, (unsigned)destApicId);
         }
 
         VOID InitializeIOAPIC(){
@@ -151,6 +169,10 @@ namespace ACPI {
             
             // Contoh: Redirect GSI 12 (PS/2 Mouse, IRQ 12) ke vector 0x2C
             IOApicRedirect(12, 0x2C, IOAPIC_FLAGS_DEFAULT);
+
+            // Redirect COM1 (serial) GSI 4 -> vector 0x24 so serial works
+            // after legacy PIC is masked. Many systems route COM1 at GSI4.
+            IOApicRedirect(4, 0x24, IOAPIC_FLAGS_DEFAULT);
 
             // PENTING: Mask/tutup IRQ 0 (PIT Timer) dan IRQ 2 (PIC Cascade)
             // karena kita tidak membutuhkannya lagi.

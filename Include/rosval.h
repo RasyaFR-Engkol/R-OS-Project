@@ -45,8 +45,12 @@ typedef ptrdiff_t PTRDIFF_T;
 
 /* Boolean */
 typedef bool      BOOL;
+#ifndef TRUE
 #define TRUE      true
+#endif
+#ifndef FALSE
 #define FALSE     false
+#endif
 
 /* Likely/unlikely helpers (and keep RosTrust/RosDoubt semantics) */
 #if defined(__GNUC__) || defined(__clang__)

@@ -5,6 +5,7 @@
 #include "port.hpp"
 #include "smp.hpp"
 #include <mm.hpp>
+#define PRINTK_MODULE_NAME "ACPI_SMP"
 #include <logging.hpp>
 
 extern "C" void ap_main_entry(U32 apic_id); // Provided below stub; user replace later
@@ -48,9 +49,11 @@ namespace {
     }
 
     UPTR AllocatePageForTrampoline() {
+        // Allocate from low memory first
         UPTR phys = PageAlloc::PhysicalAllocLowPages(1);
         if (phys) return phys;
 
+        // Fallback in case low memory is exhausted
         phys = PageAlloc::PhysicalAllocPages(1);
         if (phys && phys >= 0x100000000ULL) {
             PageAlloc::PhysicalFreePages(phys, 1);

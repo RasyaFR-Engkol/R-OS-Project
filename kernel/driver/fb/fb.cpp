@@ -8,10 +8,12 @@
 #include "../../mm/mm.hpp"
 #include "../../mm/kmalloc/kmalloc.hpp"
 #include <string.hpp>
+#include <spinlock/simple.hpp>
 
 /* module name provided via PRINTK_MODULE_NAME */
 
 namespace FB {
+    static Arch::Spinlock::Spinlock g_fb_lock;
     // Cached framebuffer state to avoid repeated BootInfo/HHDM lookups
     static struct {
         U8 *fb_base;        // HHDM-mapped framebuffer base (frontbuffer)
@@ -24,6 +26,9 @@ namespace FB {
         U32 bytes_per_pixel;
         BOOL initialized;
     } state = {};
+
+    // Public Info view exposed via FB::Get()
+    static FB::Info g_fb_info = {};
 
     VOID Init(){
         const BootInfo *bi = BootInfoGet();
@@ -117,12 +122,27 @@ namespace FB {
         }
         state.initialized = TRUE;
 
+    // Populate public info structure
+    g_fb_info.base = (volatile U8*)state.fb_base;
+    g_fb_info.width = state.width;
+    g_fb_info.height = state.height;
+    g_fb_info.pitch = state.pitch;
+    g_fb_info.bpp = state.bpp;
+    g_fb_info.type = 1; // RGB
+    g_fb_info.rpos = 16; g_fb_info.rsize = 8;
+    g_fb_info.gpos = 8;  g_fb_info.gsize = 8;
+    g_fb_info.bpos = 0;  g_fb_info.bsize = 8;
+
         Printk::Write(Printk::Level::LOG_INFO, "[GOPFB] Framebuffer initialized: %ux%u %u bpp at phys %p (HHDM virt %p)\n",
             (unsigned)FBWidth, (unsigned)FBHeight, (unsigned)FBBitsPerPixel,
             (void*)(UPTR)phys, fb_virt);
     }
 
-    void PutPixel(U32 x, U32 y, U32 rgb){
+    const Info* Get(){
+        return &g_fb_info;
+    }
+
+    static void PutPixel_NoLock(U32 x, U32 y, U32 rgb){
         if (!state.initialized) return;
         if (x >= state.width || y >= state.height) return;
 
@@ -149,6 +169,11 @@ namespace FB {
             U16 v16 = (U16)(rgb & 0xFFFF);
             String::Memcpy(pixel, &v16, sizeof(v16));
         }
+    }
+
+    void PutPixel(U32 x, U32 y, U32 rgb){
+        Arch::Spinlock::SpinlockGuard GuardMePLSS(g_fb_lock);
+        PutPixel_NoLock(x, y, rgb);
     }
 
     // Faster rectangle fill using per-scanline stores.
@@ -188,7 +213,7 @@ namespace FB {
     }
 
     // Copy a rectangle from backbuffer to framebuffer (frontbuffer).
-    void Flush(U32 x, U32 y, U32 w, U32 h) {
+    static void Flush_NoLock(U32 x, U32 y, U32 w, U32 h) {
         if (!state.initialized) return;
         if (!state.backbuffer) return; // nothing to flush
         if (x >= state.width || y >= state.height) return;
@@ -201,6 +226,11 @@ namespace FB {
             U8* dst = state.fb_base + (U64)(y + row) * state.pitch + (U64)x * state.bytes_per_pixel;
             String::Memcpy(dst, src, bytes);
         }
+    }
+
+    void Flush(U32 x, U32 y, U32 w, U32 h) {
+        Arch::Spinlock::SpinlockGuard FlushGuard(g_fb_lock);
+        Flush_NoLock(x, y, w, h);
     }
 
     // Copy region within surface (backbuffer if present, else frontbuffer), overlap-safe

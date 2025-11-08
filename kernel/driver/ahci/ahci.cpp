@@ -10,6 +10,9 @@
 #include "../pic/timer/pit.hpp"
 #include "../pci/capatibility/msixmsi/msixmsi.hpp"
 #include "ahci_internal.hpp"
+// Access IOAPIC helpers
+#include "../../../firmware/acpi/madt/madt.hpp"
+#include "../../../firmware/acpi/madt/madt.hpp"
 
     /* module name provided via PRINTK_MODULE_NAME */
 
@@ -57,6 +60,8 @@ namespace AHCI {
             U8 Vector = MSI::EnableMSI(Bus, Device, Function, MSICapOffset, MyHandler);
             if(Vector != 0){
                 DRV.IntVector = Vector;
+                DRV.using_msi = TRUE;
+                DRV.msi_cap_offset = MSICapOffset;
                 Printk::Write(Printk::Level::LOG_INFO, " Enabled MSI on AHCI Controller %02X:%02X:%02X with vector 0x%02x\n",
                     (unsigned)Bus, (unsigned)Device, (unsigned)Function, (unsigned)Vector);
             } else {
@@ -69,6 +74,8 @@ namespace AHCI {
             U8 irq = PCI::EnableLegacyINTxForDevice(Bus, Device, Function, (void(*)())MyHandler);
             if (irq != 0) {
                 DRV.IntVector = (U8)(0x20 + irq);
+                DRV.using_msi = FALSE;
+                DRV.legacy_irq = irq;
                 Printk::Write(Printk::Level::LOG_INFO, " Enabled legacy INTx IRQ %u for AHCI Controller %02X:%02X:%02X (vector 0x%02x)\n",
                     (unsigned)irq, (unsigned)Bus, (unsigned)Device, (unsigned)Function, (unsigned)DRV.IntVector);
             } else {
@@ -84,6 +91,121 @@ namespace AHCI {
         Printk::Write(Printk::Level::LOG_INFO, " Registered AHCI Controller at %02X:%02X:%02X, ABAR phys=%p virt=%p\n",
             (unsigned)Bus, (unsigned)Device, (unsigned)Function,
             (void*)(uintptr_t)ABAR_Phys, VirtAddr);
+    }
+
+    BOOL RerouteControllerInterrupt(U8 Index, U8 apicId){
+        if((int)Index >= g_ahci_controller_count) return FALSE;
+        AHCIDriver &DRV = g_ahci_controllers[Index];
+
+        if(DRV.using_msi){
+            if(DRV.msi_cap_offset == 0) return FALSE;
+            // Program MSI address to target APIC ID
+            return MSI::SetMSIDestination(DRV.bus, DRV.dev, DRV.func, DRV.msi_cap_offset, apicId);
+        } else {
+            // Legacy IRQ via IOAPIC: DRV.legacy_irq holds IRQ (GSI)
+            if(DRV.legacy_irq == 0) return FALSE;
+            // Vector is already stored in DRV.IntVector (0x20 + irq)
+            ACPI::IOAPIC::IOApicRedirectToCPU(DRV.legacy_irq, DRV.IntVector, IOAPIC_FLAGS_DEFAULT, apicId);
+            return TRUE;
+        }
+    }
+
+    BOOL MoveControllerInterruptToCPU(U8 Index, U8 apicId){
+        if((int)Index >= g_ahci_controller_count) return FALSE;
+        AHCIDriver &DRV = g_ahci_controllers[Index];
+
+        // Save device IE/GHC state and clear them so device won't fire during change
+        DRV.saved_ghc = DRV.regs->ghc;
+        for(int p = 0; p < 32; ++p){
+            DRV.saved_port_ie[p] = DRV.regs->ports[p].ie;
+            DRV.regs->ports[p].ie = 0;
+        }
+        // global
+        DRV.regs->ghc &= ~(1 << 1);
+
+        // Save routing details and program new destination
+        if(DRV.using_msi){
+            if(DRV.msi_cap_offset == 0) goto restore_and_fail;
+            // Read current MSI message address low dword (cap offset+4)
+            DRV.saved_msi_addr_lo = PCI::ReadDword(DRV.bus, DRV.dev, DRV.func, DRV.msi_cap_offset + 0x04);
+            // If 64-bit, read upper dword as well (Message Address upper)
+            U32 reg0 = PCI::ReadDword(DRV.bus, DRV.dev, DRV.func, DRV.msi_cap_offset);
+            U16 mc = (U16)(reg0 >> 16);
+            if (mc & (1u << 7)) {
+                DRV.saved_msi_addr_hi = PCI::ReadDword(DRV.bus, DRV.dev, DRV.func, DRV.msi_cap_offset + 0x08);
+            } else {
+                DRV.saved_msi_addr_hi = 0;
+            }
+
+            if(!MSI::SetMSIDestination(DRV.bus, DRV.dev, DRV.func, DRV.msi_cap_offset, apicId)) goto restore_and_fail;
+        } else {
+            if(DRV.legacy_irq == 0) goto restore_and_fail;
+            // Save IOAPIC redirection high dword
+            U8 regOff = REDTBL_ENTRY_FOR_GSI(DRV.legacy_irq) + 1;
+            DRV.saved_ioapic_redt_high = ACPI::IOAPIC::IOAPICRead(regOff);
+            // Redirect to chosen APIC
+            ACPI::IOAPIC::IOApicRedirectToCPU(DRV.legacy_irq, DRV.IntVector, IOAPIC_FLAGS_DEFAULT, apicId);
+        }
+
+        DRV.saved_valid = TRUE;
+        // Re-enable device interrupt enables
+        DRV.regs->ghc = DRV.saved_ghc;
+        for(int p = 0; p < 32; ++p){
+            DRV.regs->ports[p].ie = DRV.saved_port_ie[p];
+        }
+
+        return TRUE;
+
+    restore_and_fail:
+        // restore what we cleared
+        DRV.regs->ghc = DRV.saved_ghc;
+        for(int p = 0; p < 32; ++p){
+            DRV.regs->ports[p].ie = DRV.saved_port_ie[p];
+        }
+        return FALSE;
+    }
+
+    BOOL RestoreControllerInterrupt(U8 Index){
+        if((int)Index >= g_ahci_controller_count) return FALSE;
+        AHCIDriver &DRV = g_ahci_controllers[Index];
+        if(!DRV.saved_valid) return FALSE;
+
+        // Disable device interrupts while we restore
+        UNUSED__ U32 cur_ghc = DRV.regs->ghc;
+        DRV.regs->ghc &= ~(1 << 1);
+        for(int p = 0; p < 32; ++p){
+            DRV.regs->ports[p].ie = 0;
+        }
+
+        if(DRV.using_msi){
+            if(DRV.msi_cap_offset != 0){
+                // Restore message address low and possibly high
+                PCI::WriteDword(DRV.bus, DRV.dev, DRV.func, DRV.msi_cap_offset + 0x04, DRV.saved_msi_addr_lo);
+                U32 reg0 = PCI::ReadDword(DRV.bus, DRV.dev, DRV.func, DRV.msi_cap_offset);
+                U16 mc = (U16)(reg0 >> 16);
+                if (mc & (1u << 7)) {
+                    PCI::WriteDword(DRV.bus, DRV.dev, DRV.func, DRV.msi_cap_offset + 0x08, DRV.saved_msi_addr_hi);
+                }
+            }
+        } else {
+            // Restore IOAPIC redirection high dword
+            if(DRV.legacy_irq != 0){
+                U8 regOff = REDTBL_ENTRY_FOR_GSI(DRV.legacy_irq) + 1;
+                // Re-write low dword to keep vector/flags, then restore high
+                U32 low = ACPI::IOAPIC::IOAPICRead(regOff - 1);
+                ACPI::IOAPIC::IOAPICWrite(regOff - 1, low);
+                ACPI::IOAPIC::IOAPICWrite(regOff, DRV.saved_ioapic_redt_high);
+            }
+        }
+
+        // restore device IE state
+        DRV.regs->ghc = DRV.saved_ghc;
+        for(int p = 0; p < 32; ++p){
+            DRV.regs->ports[p].ie = DRV.saved_port_ie[p];
+        }
+
+        DRV.saved_valid = FALSE;
+        return TRUE;
     }
 
     VOID InitializeAllControllers() {

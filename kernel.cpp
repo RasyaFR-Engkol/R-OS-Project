@@ -23,21 +23,12 @@
 
 ABI_C void KernelMain()
 {
-    Serial::Init();
-    Serial::Write("[ROS] Inside Kernel\n");
-
-    BootInfoPrint();
-
     IDT::InitializeIDT();
-    FB::Init();
-    FBConsole::Init();
-
     // Initialize PIC and PIT early so we can use PIT as a calibration
     // source for APIC timer calibration when ACPI brings up LAPIC.
     PIC::InitializePIC();
     PIC::Keyboard::InitializeKeyboardPIC();
     PIT::InitializePIT(100); // set PIT to 100 Hz (calibration/reference)
-
     // Enable IRQ-driven serial input (COM1 IRQ4)
     Serial::EnableIRQInput();
 
@@ -61,6 +52,11 @@ ABI_C void KernelMain()
     // Now that LAPIC timer calibrated, PIT ticks flowing, interrupts enabled,
     // and IOAPIC/LAPIC initialized, start Application Processors.
     ACPI::LAPIC::SMP::InitSMP();
+
+    BootInfoPrint();
+
+    FB::Init();
+    Printk::Init();
 
     // Initialize PCI and its drivers
     PCI::IntializePCIDrivers();

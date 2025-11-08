@@ -8,5 +8,9 @@ namespace MSI {
 
     U8 EnableMSI(U8 bus, U8 dev, U8 func, U8 msi_cap_offset, void (*handler)(void));
     
+    // Set MSI message address to target APIC ID (xAPIC dest in bits 19:12).
+    // Returns TRUE on success.
+    BOOL SetMSIDestination(U8 bus, U8 dev, U8 func, U8 msi_cap_offset, U8 apic_id);
+    
     // TODO: Tambahkan EnableMSIX nanti
 }

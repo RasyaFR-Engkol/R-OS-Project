@@ -110,20 +110,33 @@ namespace ACPI{
 
     } __attribute__((packed));
 
+    struct HpetHeader {
+        SDTHeader Header;
+        uint32_t EventTimerBlockId;
+        GenericAddressStructure BaseAddress; // Alamat FISIK dari HPET
+        uint8_t  HpetNumber;
+        uint16_t MainCounterMinimumClockTick;
+        uint8_t  PageProtection;
+    } __attribute__((packed));
+
     #define MAX_CPU_COUNT 16
 
     VOID Initialize();
     VOID ParseROOTSDT();
     VOID ParseMADT();
     VOID ParseFADT();
+    VOID ParseHPET();
 
     /* Globals exposed for modular parsers (defined in initialize.cpp) */
     extern const void* g_FADT;
     extern const void* g_MADT;
+    extern const void* g_HPET; 
     extern U8 g_CpuApicIds[];
     extern U32 g_CpuCount;
     extern U32 g_IoApicAddress;
     extern U32 g_LocalApicAddress;
+    extern U64 g_HpetBaseAddress;
+    extern volatile U8* g_HpetVirtAddress;
     extern GenericAddressStructure g_ResetRegister;
     extern U8 g_ResetValue;
     extern U32 g_SmiCommandPort;

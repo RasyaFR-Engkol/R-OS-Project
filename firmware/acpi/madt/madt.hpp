@@ -40,5 +40,10 @@ namespace ACPI {
     namespace IOAPIC {
         VOID InitializeIOAPIC();
         VOID IOApicRedirect(U8 GSI, U8 Vector, IOAPICFLAGS Flags);
+        // Redirect GSI to a specific destination APIC ID (dest in high dword bits 31:24)
+        VOID IOApicRedirectToCPU(U8 GSI, U8 Vector, IOAPICFLAGS Flags, U8 destApicId);
+        // Read/Write an IOAPIC register (data window access)
+        VOID IOAPICWrite(U8 RegOffset, U32 Value);
+        U32 IOAPICRead(U8 RegOffset);
     }
 }

@@ -109,7 +109,9 @@ namespace PIC{
             }
 
             // Acknowledge to PIC as soon as possible
-            PIC::SendEOI(1); // IRQ1 for keyboard
+            // EOI is handled by the central IRQ dispatcher (IrqDispatch).
+            // Do not call PIC::SendEOI here to avoid unsafe I/O from IRQ handlers
+            // and to allow LAPIC-based delivery to work correctly.
         }
 
         // Consumer: process queued scancodes. Call this periodically from the

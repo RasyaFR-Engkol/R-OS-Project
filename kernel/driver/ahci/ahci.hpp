@@ -21,6 +21,20 @@ namespace AHCI {
         U8 bus, dev, func;
         bool initialized;
         U8 IntVector;
+        // Interrupt routing bookkeeping
+        bool using_msi;
+        U8 msi_cap_offset; // 0 if none
+        U8 legacy_irq;     // legacy IRQ number (0..15) if used, 0 if none
+
+    // Saved routing/interrupt enable state for temporary reroute
+    bool saved_valid;
+    U32 saved_ghc;
+    U32 saved_port_ie[32];
+    // For MSI saved message address (low dword) and optionally high
+    U32 saved_msi_addr_lo;
+    U32 saved_msi_addr_hi;
+    // For IOAPIC saved high dword of redirection entry
+    U32 saved_ioapic_redt_high;
 
         // Per-port device type (NONE if no device present)
         DeviceType port_device[32];
@@ -44,6 +58,19 @@ namespace AHCI {
 
     // Fungsi inilah yang akan dipanggil oleh ScanBus
     VOID RegisterAHCIController(U8 Bus, U8 Device, U8 Function, U8 MSICapOffset);
+
+    // Reroute the interrupt for controller `Index` to APIC ID `apicId`.
+    // Returns TRUE on success.
+    BOOL RerouteControllerInterrupt(U8 Index, U8 apicId);
+    
+    // Temporarily move interrupts for controller `Index` to `apicId`.
+    // This will disable the device interrupt source(s), change routing,
+    // then re-enable the device. The original routing and device IE bits
+    // are saved so `RestoreControllerInterrupt` can reapply them.
+    BOOL MoveControllerInterruptToCPU(U8 Index, U8 apicId);
+
+    // Restore a previous temporary move performed by MoveControllerInterruptToCPU.
+    BOOL RestoreControllerInterrupt(U8 Index);
     
     // Nanti, fungsi ini akan menginisialisasi SEMUA controller yg terdaftar
     VOID InitializeAllControllers();

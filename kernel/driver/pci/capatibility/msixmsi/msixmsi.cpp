@@ -54,4 +54,30 @@ namespace MSI{
 
         return Vector;
     }
+
+        BOOL SetMSIDestination(U8 bus, U8 dev, U8 func, U8 msi_cap_offset, U8 apic_id){
+            if(msi_cap_offset == 0) return FALSE;
+
+            U32 reg0 = PCI::ReadDword(bus, dev, func, msi_cap_offset);
+            U16 mc = (U16)(reg0 >> 16);
+            bool is64 = (mc & (1u << 7)) != 0; // 64-bit capable?
+
+            // xAPIC message address base
+            U32 msg_addr_lo = MSI_MSG_ADDRESS | ((U32)apic_id << 12);
+
+            // Write Address and Data based on 32/64-bit capability
+            PCI::WriteDword(bus, dev, func, msi_cap_offset + 0x04, msg_addr_lo);
+            if (is64) {
+                // Upper 32 bits of address (we use 0 for xAPIC 32-bit address)
+                PCI::WriteDword(bus, dev, func, msi_cap_offset + 0x08, 0);
+                // Message Data at +0x0C remains unchanged (do not touch vector)
+            } else {
+                // 32-bit address: Message Data at +0x08 remains unchanged
+            }
+
+            Printk::Write(Printk::Level::LOG_INFO, " MSI destination for %02x:%02x:%02x set to APIC ID %u\n",
+                (unsigned)bus, (unsigned)dev, (unsigned)func, (unsigned)apic_id);
+
+            return TRUE;
+        }
 }

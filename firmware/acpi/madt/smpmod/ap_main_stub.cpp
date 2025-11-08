@@ -1,5 +1,6 @@
 #include <rosval.h>
 #include <rossys.hpp>
+#define PRINTK_MODULE_NAME "AppProcStub"
 #include <logging.hpp>
 #include <mm.hpp>
 #include "smp.hpp"

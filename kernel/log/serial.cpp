@@ -213,8 +213,8 @@ namespace Serial {
             ch = (char)Inb(port + 0);
             EchoCharToConsoles(ch);
         }
-        // Acknowledge PIC for IRQ4
-        PIC::SendEOI(4);
+        // EOI is handled by the central IRQ dispatcher (IrqDispatch),
+        // which sends either PIC or LAPIC EOI depending on controller.
     }
 
     // Enable IRQ-driven serial input: unmask IRQ4 and register handler

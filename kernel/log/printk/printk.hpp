@@ -1,5 +1,6 @@
 #pragma once
 
+#include "spinlock/simple.hpp"
 #include <rosval.h>
 
 /* Per-translation-unit module name provider.
@@ -50,12 +51,17 @@ namespace Printk {
     /* InternalWrite now accepts a VA_LIST so callers can forward va_list
        directly. Use the variadic `Write` helper to build the va_list. */
     BOOL InternalWrite(Level level, const char *module_name, const char *fmt, VA_LIST args);
+    extern SPINLOCK_T PrintkLock;
     static inline BOOL Write(Level level, const char *fmt, ...) {
+        Arch::Spinlock::SpinLockAcquire(&PrintkLock);
         VA_LIST Args;
         VA_STRT(Args, fmt);
         const char *module = __printk_module_name_impl();
         BOOL ret = InternalWrite(level, module, fmt, Args);
         VA_END(Args);
+        Arch::Spinlock::SpinLockRelease(&PrintkLock);
         return ret;
     }
+
+    VOID Init();
 }
