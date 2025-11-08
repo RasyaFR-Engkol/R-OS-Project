@@ -1,0 +1,3 @@
+[submodule "firmware/acpica"]
+	path = firmware/acpica
+	url = https://github.com/acpica/acpica
