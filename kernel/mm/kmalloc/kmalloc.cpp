@@ -4,6 +4,9 @@
 #include <string.hpp>
 #include <serial.hpp>
 
+#define PRINTK_MODULE_NAME "kmalloc"
+#include <logging.hpp>
+
 namespace Kmalloc {
 
     // Block header stored at the start of each free block.
@@ -242,13 +245,14 @@ namespace Kmalloc {
             return;
         }
         if (block->magic != MAGIC_ALLOC) {
-            Serial::Printf("[kmalloc] invalid or double free at %p (magic=0x%x)\n", ptr, block->magic);
+            Printk::Write(Printk::Level::LOG_EMERG, "[kmalloc] invalid or double free at %p (magic=0x%x)\n", ptr, block->magic);
             Arch::RestoreInterrupts(Kmallock);
             return;
         }
         block->magic = MAGIC_FREE;
 
         insert_and_coalesce(block);
+
 
         Arch::RestoreInterrupts(Kmallock);
     }

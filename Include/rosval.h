@@ -51,6 +51,12 @@ typedef bool      BOOL;
 #ifndef FALSE
 #define FALSE     false
 #endif
+typedef bool     FLAGS;
+
+/* Untuk flags */
+typedef VAL32 FLAGS32;
+typedef U32 UFLAGS32;
+
 
 /* Likely/unlikely helpers (and keep RosTrust/RosDoubt semantics) */
 #if defined(__GNUC__) || defined(__clang__)
@@ -96,5 +102,8 @@ typedef va_list VA_LIST;
 
 // MISC Macro
 #define UNUSED__ [[maybe_unused]] 
+#define ARRAY_SIZE(x) (sizeof(x) / sizeof((x)[0]))
+#define OFFSET_OF(type, member) ((SIZE_T)&(((type *)0)->member))
+#define PACKSTRUCT __attribute__((packed))
 
 #endif

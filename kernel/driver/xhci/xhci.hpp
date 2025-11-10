@@ -41,6 +41,8 @@ namespace xHCI{
         U32 CmdRingEnqueueIndex;
         BOOL CmdRingCycleState;
         U32 EventRingDequeueIndex;
+    // Counter for spurious interrupts observed on this controller
+    U32 SpuriousInterruptCount;
 
         // Simple state to avoid double-issuing Enable Slot on repeated PSC
         struct xHCIPortState {

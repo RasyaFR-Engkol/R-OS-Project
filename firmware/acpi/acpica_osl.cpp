@@ -292,14 +292,29 @@ ACPI_STATUS AcpiOsExecute(ACPI_EXECUTE_TYPE Type, ACPI_OSD_EXEC_CALLBACK Functio
 void AcpiOsWaitEventsComplete(void) { }
 
 // Debug print bridge
+// ACPICA may pass varargs that contain pointers into ACPI/AML space. Those
+// pointers can be small/invalid (in some virtualization environments) and
+// dereferencing them in the kernel print routines can cause page faults
+// (observed as derefs to addresses like 0x3). To avoid crashing the system
+// during ACPI table/method evaluation, make the OSL debug bridge conservative
+// and avoid forwarding raw varargs directly into the kernel formatter.
+//
+// Short-term safe behavior: print the format string itself (literal) and do
+// not attempt to expand the varargs. This preserves a minimal amount of
+// debug information while preventing crashes. If you need full formatted
+// ACPI debug output later, implement a safe formatter that validates any
+// pointer arguments before dereferencing.
 void ACPI_INTERNAL_VAR_XFACE AcpiOsPrintf(const char *Format, ...) {
-    VA_LIST ap; VA_STRT(ap, Format);
-    Printk::InternalWrite(Printk::Level::LOG_INFO, "ACPICA", Format, ap);
-    VA_END(ap);
+    (void)Format;
+    // Print the format string only (safe). If Format is NULL, show a marker.
+    const char* fmt = Format ? Format : "(null)";
+    Printk::Write(Printk::Level::LOG_INFO, "[ACPICA] %s", fmt);
 }
 
 void AcpiOsVprintf(const char *Format, va_list Args) {
-    Printk::InternalWrite(Printk::Level::LOG_INFO, "ACPICA", Format, Args);
+    (void)Args;
+    const char* fmt = Format ? Format : "(null)";
+    Printk::Write(Printk::Level::LOG_INFO, "[ACPICA] %s", fmt);
 }
 
 void AcpiOsRedirectOutput(void *Destination) { (void)Destination; }

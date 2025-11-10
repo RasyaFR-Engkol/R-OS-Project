@@ -21,5 +21,7 @@ namespace Debug {
 
 	// PTE audit tool: scan a region and flag non-present, user bits, NX, large pages etc.
 	void AuditPTE(UPTR vstart, SIZE_T pages);
+
+	VOID TestReadPartition(const char* path);
 }
 

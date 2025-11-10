@@ -172,8 +172,8 @@ namespace FBConsole {
         if (col >= g_cols || row >= g_rows) return;
         U32 px = col * g_cell_w;
         U32 py = row * g_cell_h;
+        // Draw the cell glyph without flushing; batching flush improves performance
         PutCharAt(px, py, g_grid[row * g_cols + col], g_fg);
-        FB::Flush(px, py, g_cell_w, g_cell_h);
     }
 
     static inline void RenderAll() {
@@ -271,6 +271,15 @@ namespace FBConsole {
 
         HideCursor();
 
+        // Track touched rows for a single batched flush at end of write.
+        // This drastically reduces the number of small flushes during heavy logging.
+        U32 min_changed_row = g_rows; // sentinel (no change yet)
+        U32 max_changed_row = 0;
+        auto note_row_change = [&](U32 row){
+            if(row < min_changed_row) min_changed_row = row;
+            if(row > max_changed_row) max_changed_row = row;
+        };
+
         for (const CHAR8* p = s; *p; ++p) {
             CHAR8 ch = *p;
             if (ch == '\b') {
@@ -286,6 +295,7 @@ namespace FBConsole {
                 }
                 g_grid[g_cur_row * g_cols + g_cur_col] = ' ';
                 RenderCell(g_cur_col, g_cur_row);
+                note_row_change(g_cur_row);
                 continue;
             }
             if (ch == '\r') {
@@ -305,6 +315,7 @@ namespace FBConsole {
                     }
                     g_grid[g_cur_row * g_cols + g_cur_col] = ' ';
                     RenderCell(g_cur_col, g_cur_row);
+                    note_row_change(g_cur_row);
                     ++g_cur_col;
                 }
                 continue;
@@ -316,7 +327,15 @@ namespace FBConsole {
             // store char and render cell
             g_grid[g_cur_row * g_cols + g_cur_col] = ch;
             RenderCell(g_cur_col, g_cur_row);
+            note_row_change(g_cur_row);
             ++g_cur_col;
+        }
+
+        // Perform a single flush for all changed rows (if any)
+        if(min_changed_row < g_rows) {
+            U32 flush_y = min_changed_row * g_cell_h;
+            U32 flush_h = (max_changed_row - min_changed_row + 1) * g_cell_h;
+            FB::Flush(0, flush_y, g_scr_w, flush_h);
         }
 
         ShowCursor();

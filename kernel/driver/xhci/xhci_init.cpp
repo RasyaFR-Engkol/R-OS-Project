@@ -283,13 +283,13 @@ namespace xHCI{
                 (unsigned)i, (unsigned)DRV.op_regs->usb_cmd, (unsigned)DRV.op_regs->usb_sts);
 
             // Diagnostic dump before NOOP
-            DumpXHCIState(DRV, "pre-noop");
+            //DumpXHCIState(DRV, "pre-noop");
             SendNOOPCommand(DRV);
             // Immediate dump after doorbell to capture state and possible pending IP
-            DumpXHCIState(DRV, "post-noop");
+            //DumpXHCIState(DRV, "post-noop");
             // Give controller a short moment and dump again to catch late updates (1ms)
             Arch::Time::Sleep(1);
-            DumpXHCIState(DRV, "post-noop-1ms");
+            //DumpXHCIState(DRV, "post-noop-1ms");
 
             // Enable Slot will now be issued upon Port Status Change (PSC) when a device connects
 

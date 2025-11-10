@@ -51,6 +51,12 @@ namespace AHCI {
         volatile HBA_CMD_HEADER* v_cmd_lists[32];
         volatile U8* v_cmd_tables[32]; // (Kita pakai U8* biar gampang di-offset)
     };
+
+    struct AHCIPortInfo {
+        U8 controller_index;
+        U8 port_number;
+        AHCIDriver AhciDRV;
+    };
     
     // Ini daftarnya
     extern AHCIDriver g_ahci_controllers[MAX_AHCI_CONTROLLERS];
@@ -88,4 +94,16 @@ namespace AHCI {
                       PageAlloc::DMAAlloc::DMABuffer *buf);
 
     VOID HandleInterrupt(VAL32 Controller_ID);
+
+    // Mengambil AHCI Controller berdasarkan index (0 .. g_ahci_controller_count-1)
+    // Nilai kembali adalah salinan (copy) dari struct AHCIDriver.
+    // Jika index tidak valid, 'regs' akan bernilai nullptr dan 'initialized' = false.
+    AHCIDriver GetController(int index);
+
+    // Mencari nomor port pertama yang aktif (device terdeteksi) pada sebuah controller.
+    // Kriteria saat ini: port_device[port] == DeviceType::SATA.
+    // Nilai kembali: index port (0..31) atau -1 jika tidak ada.
+    VAL32 FindActivePortNum(const AHCIDriver &Driver);
+
+    AHCIPortInfo GetPortInfo(int ConIndex = 0);
 }

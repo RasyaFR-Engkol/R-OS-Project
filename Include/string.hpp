@@ -19,6 +19,7 @@ namespace String{
 	int   Strncmp(const char* a, const char* b, unsigned long long n);
 	char* Strcpy(char* dst, const char* src);
 	char* Strncpy(char* dst, const char* src, unsigned long long n);
+	char* Strcat(char* dst, const char* src);
 	const char* Strchr(const char* s, int ch);
 	const char* Strrchr(const char* s, int ch);
 	const char* Strstr(const char* haystack, const char* needle);

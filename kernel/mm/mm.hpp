@@ -84,10 +84,16 @@ namespace PageAlloc{
         };
         void InitializeDMA();
         DMABuffer *AllocateDMAPages(SIZE_T count);
+        // Convenience: allocate by byte size (rounded up to pages)
+        DMABuffer *AllocateDMABytes(SIZE_T bytes);
         void FreeDMAPages(UPTR addr, SIZE_T count);
         // Prefer this overload when AllocateDMAPages() returned a DMABuffer*;
         // frees both the pages (bitmap) and the metadata struct.
         void FreeDMABuffer(DMABuffer* b);
+
+        // Debug/statistics helper for runtime inspection
+        void GetStats(SIZE_T *poolPages, SIZE_T *freePages, SIZE_T *allocCalls,
+                      SIZE_T *fallbacks, SIZE_T *failed, SIZE_T *freed);
     }
 
 }

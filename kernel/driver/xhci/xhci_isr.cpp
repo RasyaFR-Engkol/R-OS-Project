@@ -65,8 +65,11 @@ namespace xHCI{
                         DRV.PortStates[idx].State = xHCIDriver::PORT_STATE_EMPTY;
                     } else if (ccs && !ped) {
                         // Connected but not enabled: initiate Port Reset first (do NOT sleep in ISR)
-                        Write(Level::LOG_INFO, " Controller %u - Port%u connected but disabled, issuing Port Reset\n",
-                              (unsigned)Controller_ID, (unsigned)portId);
+                Write(Level::LOG_INFO, " Controller %u - Port%u connected but disabled, issuing Port Reset\n",
+                    (unsigned)Controller_ID, (unsigned)portId);
+                // Extra debug: log raw PORTSC value when device is plugged in
+                Write(Level::LOG_INFO, " Controller %u - Port%u PORTSC raw=0x%08x (ccs=%u ped=%u)\n",
+                    (unsigned)Controller_ID, (unsigned)portId, (unsigned)portsc_val, (unsigned)ccs, (unsigned)ped);
                         // Mark port as resetting
                         DRV.PortStates[idx].State = xHCIDriver::PORT_STATE_RESETTING;
                         NewVAL |= (1u << 4); // Set PR (bit4) to initiate Port Reset
@@ -77,6 +80,9 @@ namespace xHCI{
                         if (DRV.PortStates[idx].State != xHCIDriver::PORT_STATE_ENABLE_SENT) {
                             Write(Level::LOG_INFO, " Controller %u - Port%u enabled, issuing Enable Slot\n",
                                   (unsigned)Controller_ID, (unsigned)portId);
+                            // Extra debug: log raw PORTSC value when device is enabled
+                            Write(Level::LOG_INFO, " Controller %u - Port%u PORTSC raw=0x%08x (ccs=%u ped=%u)\n",
+                                  (unsigned)Controller_ID, (unsigned)portId, (unsigned)portsc_val, (unsigned)ccs, (unsigned)ped);
                             SendEnableSlotCommand(DRV);
                             DRV.PortStates[idx].State = xHCIDriver::PORT_STATE_ENABLE_SENT;
                         }
@@ -120,7 +126,84 @@ namespace xHCI{
         xHCIDriver &DRV = g_xhci_controllers[Controller_ID];
         U32 Status = DRV.op_regs->usb_sts;
         if(!(Status & (1u << 3))){
+            // Spurious interrupt: provide extra debug info to help diagnose IRQ races
+            volatile xHCIInterrupterRegs *IR0 = &DRV.rt_regs->interrupter_regs[0];
+            U32 iman = IR0->iman;
             Write(Level::LOG_WARNING, " Spurious interrupt on controller %u\n", (unsigned)Controller_ID);
+            Write(Level::LOG_INFO, " usb_sts=0x%08x IMAN=0x%08x ERDP=0x%016llx dequeue_idx=%u ring_size=%u\n",
+                  (unsigned)Status,
+                  (unsigned)iman,
+                  (unsigned long long)IR0->erdp,
+                  (unsigned)DRV.EventRingDequeueIndex,
+                  (unsigned)DRV.EventRingSize);
+
+            // If there are event TRBs present, dump the next couple for inspection
+            if (DRV.VEventRing && DRV.EventRingSize) {
+                U32 idx = DRV.EventRingDequeueIndex;
+                for (int i = 0; i < 2; ++i) {
+                    volatile xHCITRB *e = &DRV.VEventRing[idx];
+                    Write(Level::LOG_INFO, " EventTRB[%u] param=0x%016llx status=0x%08x ctl=0x%08x\n",
+                          (unsigned)idx,
+                          (unsigned long long)e->parameter,
+                          (unsigned)e->status,
+                          (unsigned)e->control);
+                    idx++;
+                    if (idx == DRV.EventRingSize) idx = 0;
+                }
+            }
+
+            // Increment spurious counter and, if no events are pending, attempt to clear
+            // the interrupter pending bit to avoid IRQ storms.
+            DRV.SpuriousInterruptCount++;
+
+            // If IMAN.IP is set but Event Ring appears empty (next TRBs are zero), clear IP.
+            // This is low-risk: it's an ack of an empty interrupt.
+            if ( (iman & (1u << 1)) ) {
+                bool ring_empty = true;
+                if (DRV.VEventRing && DRV.EventRingSize) {
+                    U32 idx2 = DRV.EventRingDequeueIndex;
+                    // Check a few TRBs to see if non-zero
+                    for (int i = 0; i < 4; ++i) {
+                        volatile xHCITRB *et = &DRV.VEventRing[idx2];
+                        if (et->control || et->status || et->parameter) { ring_empty = false; break; }
+                        idx2++;
+                        if (idx2 == DRV.EventRingSize) idx2 = 0;
+                    }
+                }
+
+                if (ring_empty) {
+                    // Re-arm the Event Ring Dequeue Pointer (ERDP) like the normal path does.
+                    U64 newDequeuePhys = DRV.DMA_EventRing->PhysAddr + ((U64)DRV.EventRingDequeueIndex * sizeof(xHCITRB));
+                    IR0->erdp = newDequeuePhys | (1u << 3);
+                    asm volatile ("mfence" ::: "memory");
+
+                    // Clear IP and ensure IE stays enabled (write 1 to IP, 1 to IE)
+                    IR0->iman = (1u << 0) | (1u << 1);
+                    U32 iman_after = IR0->iman;
+                    Write(Level::LOG_INFO, " Re-armed ERDP and attempted clear IMAN.IP (before=0x%08x after=0x%08x)\n", (unsigned)iman, (unsigned)iman_after);
+
+                    // If IMAN did not clear, try toggle IE fallback: disable IE then re-enable.
+                    if (iman_after == iman) {
+                        Write(Level::LOG_WARNING, " Controller %u - IMAN.IP did not clear, attempting IE toggle fallback (bus %u:%u:%u vector=0x%02x)\n",
+                              (unsigned)Controller_ID, (unsigned)DRV.bus, (unsigned)DRV.dev, (unsigned)DRV.func, (unsigned)DRV.IntVector);
+                        // Clear IE (write IMAN with IE=0, IP left alone)
+                        IR0->iman = (0u << 0) | (0u << 1);
+                        asm volatile ("mfence" ::: "memory");
+                        // Re-enable IE and IP clear bit in case controller accepted it now
+                        IR0->iman = (1u << 0) | (1u << 1);
+                        asm volatile ("mfence" ::: "memory");
+                        U32 iman_after2 = IR0->iman;
+                        Write(Level::LOG_INFO, " IE toggle result IMAN before=0x%08x after_toggle=0x%08x\n", (unsigned)iman, (unsigned)iman_after2);
+                    }
+                }
+            }
+
+            // Warn if spurious interrupts accumulate
+            const U32 SPURIOUS_WARN_THRESHOLD = 50;
+            if (DRV.SpuriousInterruptCount && (DRV.SpuriousInterruptCount % SPURIOUS_WARN_THRESHOLD) == 0) {
+                Write(Level::LOG_WARNING, " Controller %u - Spurious interrupts seen: %u\n", (unsigned)Controller_ID, (unsigned)DRV.SpuriousInterruptCount);
+            }
+
             return;
         }
         ProcessPendingEvents(DRV, Controller_ID);

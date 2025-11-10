@@ -37,6 +37,17 @@ namespace {
 namespace PageAlloc {
 namespace DMAAlloc {
 
+    struct DMAStats {
+        SIZE_T pool_pages;
+        SIZE_T pool_free_pages;
+        SIZE_T alloc_calls;
+        SIZE_T fallback_allocs;
+        SIZE_T failed_allocs;
+        SIZE_T freed_buffers;
+    };
+
+    static DMAStats g_stats{};
+
     void InitializeDMA() {
         if (g_poolPages != 0) return; // already initialized
 
@@ -110,17 +121,29 @@ namespace DMAAlloc {
         String::Memset((void*)g_poolVirt, 0, (unsigned long long)g_poolPages * PAGE_SIZE);
         mfence();
 
+        g_stats.pool_pages = g_poolPages;
         Serial::Printf("[DMA] Pool ready: phys=%p virt=%p pages=%u (bitmap=%u bytes)\n",
             (void*)(uintptr_t)g_poolPhys, (void*)(uintptr_t)g_poolVirt, (unsigned)g_poolPages, (unsigned)bytes);
     }
 
     // First-fit contiguous allocation of 'count' pages
+    static inline SIZE_T FreePagesUnsafe() {
+        // Count free bits; O(n). For debugging only (not used on hot path except stats).
+        SIZE_T freeCount = 0;
+        for (SIZE_T i = 0; i < g_poolPages; ++i) {
+            if (!bmp_test(i)) ++freeCount;
+        }
+        return freeCount;
+    }
+
     DMABuffer *AllocateDMAPages(SIZE_T count) {
-        if (count == 0 || count > g_poolPages) return nullptr;
+        if (count == 0) return nullptr;
+        ++g_stats.alloc_calls;
 
         // If pool hasn't been initialized (possible if called early or init failed),
-        // attempt to initialize lazily and continue.
-            if (g_poolPages == 0 || !g_bitmap) {
+        // attempt to initialize lazily and continue. This must happen before
+        // checking `count > g_poolPages` so callers can trigger initialization.
+        if (g_poolPages == 0 || !g_bitmap) {
             Serial::Write("[DMA] AllocateDMAPages: pool not initialized, attempting InitializeDMA()\n");
             PageAlloc::DMAAlloc::InitializeDMA();
             if (g_poolPages == 0 || !g_bitmap) {
@@ -160,9 +183,12 @@ namespace DMAAlloc {
                 // Zero and fence
                 String::Memset((void*)fb->VirtAddr, 0, (unsigned long long)fb->Size);
                 mfence();
+                ++g_stats.fallback_allocs;
                 return fb;
             }
         }
+
+        if (count > g_poolPages) { ++g_stats.failed_allocs; return nullptr; }
 
         // We must disable interrupts while scanning and marking the bitmap so an
         // IRQ handler cannot concurrently allocate/free from the same bitmap and
@@ -210,7 +236,40 @@ namespace DMAAlloc {
         }
 
         Arch::RestoreInterrupts(lock);
+        // As a refinement, attempt a dedicated fallback allocation even when the pool
+        // is initialized but fragmented or simply lacks a large enough contiguous run.
+        {
+            UPTR phys = PageAlloc::PhysicalAllocPages(count);
+            if (phys) {
+                void* v = PageAlloc::VirtualAllocPages(count);
+                if (v && PageAlloc::MapPages(KernelPML4, phys, (UPTR)v, count, PAGE_PRESENT | PAGE_RW)) {
+                    DMABuffer* fb = (DMABuffer*)kmalloc(sizeof(DMABuffer));
+                    if (fb) {
+                        fb->FirstIndex = (SIZE_T)-1;
+                        fb->Pages = count;
+                        fb->Size = count * PAGE_SIZE;
+                        fb->PhysAddr = phys;
+                        fb->VirtAddr = (UPTR)v;
+                        String::Memset((void*)fb->VirtAddr, 0, (unsigned long long)fb->Size);
+                        mfence();
+                        ++g_stats.fallback_allocs;
+                        return fb;
+                    }
+                    // metadata alloc failed; tear down mapping
+                    PageAlloc::VirtualFreePages(v, count);
+                }
+                // mapping failed; free phys
+                PageAlloc::PhysicalFreePages(phys, count);
+            }
+        }
+        ++g_stats.failed_allocs;
         return nullptr; // no space
+    }
+
+    DMABuffer *AllocateDMABytes(SIZE_T bytes) {
+        if (bytes == 0) return nullptr;
+        SIZE_T pages = (bytes + PAGE_SIZE - 1) / PAGE_SIZE;
+        return AllocateDMAPages(pages);
     }
 
     void FreeDMAPages(UPTR addr, SIZE_T count) {
@@ -263,6 +322,7 @@ namespace DMAAlloc {
                 PageAlloc::PhysicalFreePages(b->PhysAddr, count);
             }
             kfree(b);
+            ++g_stats.freed_buffers;
             return;
         }
 
@@ -301,6 +361,18 @@ namespace DMAAlloc {
 
         // Free the metadata allocated at allocation time
         kfree(b);
+        ++g_stats.freed_buffers;
+    }
+
+    // Debug: snapshot stats (counts free pages with O(n) scan)
+    void GetStats(SIZE_T *poolPages, SIZE_T *freePages, SIZE_T *allocCalls,
+                  SIZE_T *fallbacks, SIZE_T *failed, SIZE_T *freed) {
+        if (poolPages) *poolPages = g_stats.pool_pages;
+        if (freePages) *freePages = (g_poolPages ? FreePagesUnsafe() : 0);
+        if (allocCalls) *allocCalls = g_stats.alloc_calls;
+        if (fallbacks) *fallbacks = g_stats.fallback_allocs;
+        if (failed) *failed = g_stats.failed_allocs;
+        if (freed) *freed = g_stats.freed_buffers;
     }
 
 } // namespace DMAAlloc

@@ -1,5 +1,6 @@
 # Makefile for ROS (Rasya OS)
 # Automatically compiles all .c, .cpp, and .asm files in the project
+# Modified for Linux-style "pretty" output
 
 AS := nasm
 CXX := x86_64-elf-g++
@@ -45,17 +46,17 @@ CXX = /home/rasya/cross/bin/x86_64-elf-g++
 
 # Temukan semua file sumber (exclude build directory to avoid generated files)
 C_SRCS := $(shell find . -path ./$(BUILD_DIR) -prune -o -type f -name "*.c" -print | \
-		  grep -v "firmware/acpica/source/")
+          grep -v "firmware/acpica/source/")
 ACPICA_SRCS := \
-	$(shell find firmware/acpica/source/components -type f -name "*.c" \
-		| grep -v "/debugger/" \
-		| grep -v "/disassembler/" \
-		| grep -v "nsdumpdv.c")
+    $(shell find firmware/acpica/source/components -type f -name "*.c" \
+        | grep -v "/debugger/" \
+        | grep -v "/disassembler/" \
+        | grep -v "nsdumpdv.c")
 
 CPP_SRCS := $(shell find . -path ./$(BUILD_DIR) -prune -o -type f -name "*.cpp" -print)
 # All ASM sources except the AP trampoline which is a flat binary
 ASM_SRCS := $(shell find . -path ./$(BUILD_DIR) -prune -o -type f -name "*.asm" -print | \
-			grep -v "firmware/acpi/madt/smpmod/rmpmlmtramp.asm")
+            grep -v "firmware/acpi/madt/smpmod/rmpmlmtramp.asm")
 
 # Ubah jadi object file path di build/
 C_OBJS := $(patsubst ./%, $(BUILD_DIR)/%, $(C_SRCS:.c=.o))
@@ -78,57 +79,64 @@ all: $(TRAMP_BIN) $(TRAMP_OBJ) $(TARGET)
 # Linking
 $(TARGET): $(OBJS)
 	@mkdir -p $(dir $@)
-	$(LD) $(LDFLAGS) -o $@ $^
-	@echo "Linked $@"
+	@echo "  [LD]     $@"
+	@$(LD) $(LDFLAGS) -o $@ $^
 	# Generate kernel symbol table from the linked ELF and relink with it
+	@echo "  [GEN]     $(BUILD_DIR)/kernsym.c"
 	@python3 tools/gen-kernsym.py $@ $(BUILD_DIR)/kernsym.c || true
 	@if [ -f $(BUILD_DIR)/kernsym.c ]; then \
+		echo "  [G++]     $(BUILD_DIR)/kernsym.c"; \
 		$(CXX) $(CXXFLAGS) -c $(BUILD_DIR)/kernsym.c -o $(BUILD_DIR)/kernsym.o && \
-		$(LD) $(LDFLAGS) -o $@ $^ $(BUILD_DIR)/kernsym.o && \
-		echo "Relinked $@ with kernsym"; \
+		echo "  [LD]      $@ (relink w/ kernsym)"; \
+		$(LD) $(LDFLAGS) -o $@ $^ $(BUILD_DIR)/kernsym.o; \
 	fi
 
 # Compile rules
 $(BUILD_DIR)/%.o: %.c
 	@mkdir -p $(dir $@)
-	$(CXX) $(CXXFLAGS) -x c++ -c $< -o $@
+	@echo "  [G++]     $<"
+	@$(CXX) $(CXXFLAGS) -x c++ -c $< -o $@
 
 # ACPICA C objects (pure C, different flags) — use C compiler
 $(BUILD_DIR)/firmware/acpica/%.o: firmware/acpica/%.c
 	@mkdir -p $(dir $@)
-	$(CC) $(ACPICA_CFLAGS) -c $< -o $@
+	@echo "  [CC]      $<"
+	@$(CC) $(ACPICA_CFLAGS) -c $< -o $@
 
 # Loosen warnings for C++ files under firmware/acpi/** that include ACPICA headers
 $(BUILD_DIR)/firmware/acpi/%.o: firmware/acpi/%.cpp
 	@mkdir -p $(dir $@)
-	$(CXX) $(CXXFLAGS) -Wno-pedantic -Wno-error=pedantic -c $< -o $@
+	@echo "  [G++]     $<"
+	@$(CXX) $(CXXFLAGS) -Wno-pedantic -Wno-error=pedantic -c $< -o $@
 
 $(BUILD_DIR)/%.o: %.cpp
 	@mkdir -p $(dir $@)
-	$(CXX) $(CXXFLAGS) -c $< -o $@
+	@echo "  [G++]     $<"
+	@$(CXX) $(CXXFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/%.o: %.asm
 	@mkdir -p $(dir $@)
-	$(AS) $(ASFLAGS) $< -o $@
+	@echo "  [AS]      $<"
+	@$(AS) $(ASFLAGS) $< -o $@
 
 # Build AP trampoline as a flat binary to honor ORG 0x8000 in the ASM
 $(TRAMP_BIN): $(TRAMP_SRC)
 	@mkdir -p $(dir $@)
-	$(AS) -f bin $< -o $@
-	@echo "Built AP trampoline binary: $@"
+	@echo "  [AS-BIN]  $<"
+	@$(AS) -f bin $< -o $@
 
 $(TRAMP_OBJ): $(TRAMP_BIN)
 	@mkdir -p $(dir $@)
-	$(LD) -r -b binary -o $@ $<
-	@echo "Embedded AP trampoline object: $@"
+	@echo "  [EMBED]   $< -> $@"
+	@$(LD) -r -b binary -o $@ $<
 
 # (Optional) To wrap the binary into an ELF for debugging/tools, run manually:
 #   $(LD) -r -b binary -o $(TRAMP_BIN:.bin=.o) $(TRAMP_BIN)
 #   $(LD) -T x86_64/ap_trampoline.ld -o $(TRAMP_BIN:.bin=.elf) $(TRAMP_BIN:.bin=.o)
 
 clean:
-	rm -rf $(BUILD_DIR)
-	# Also remove generated symbol C so next build regenerates cleanly
-	if [ -f $(BUILD_DIR)/kernsym.c ]; then rm -f $(BUILD_DIR)/kernsym.c $(BUILD_DIR)/kernsym.o; fi
+	@echo "  [CLEAN]   Removing build directory ($(BUILD_DIR))"
+	@rm -rf $(BUILD_DIR)
+	# kernsym files are inside BUILD_DIR, so they are removed automatically.
 
 .PHONY: all clean

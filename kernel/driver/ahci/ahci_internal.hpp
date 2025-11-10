@@ -1,5 +1,6 @@
 #pragma once
 #include "ahci.hpp"
+#include "string.hpp"
 
 namespace AHCI {
     // Globals shared across AHCI compilation units
@@ -21,4 +22,5 @@ namespace AHCI {
                      PageAlloc::DMAAlloc::DMABuffer **outBuf);
     BOOL WriteSectors(AHCIDriver &Driver, VAL32 PortNum, U64 lba, U32 count,
                       PageAlloc::DMAAlloc::DMABuffer *buf);
+    VOID TestReadLBA0();
 }

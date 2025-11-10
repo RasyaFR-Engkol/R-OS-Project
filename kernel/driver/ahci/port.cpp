@@ -1,3 +1,4 @@
+#include "debug.hpp"
 #define PRINTK_MODULE_NAME "AHCIPORT"
 #include <rosval.h>
 #include "ahci.hpp"
@@ -106,6 +107,41 @@ namespace AHCI {
                 Printk::Write(Printk::Level::LOG_INFO, " Port %d: Unknown device signature: 0x%08X\n", (unsigned)PortNum, (unsigned)Sign);
                 return DeviceType::NONE;
         }
+    }
+
+    VOID TestReadLBA0(){
+        for (int i = 0; i < AHCI::g_ahci_controller_count; ++i) {
+        AHCI::AHCIDriver &drv = AHCI::g_ahci_controllers[i];
+        if (!drv.regs) continue;
+        U32 pi = drv.regs->pi;
+        for (int port = 0; port < 32; ++port) {
+            if ((pi & (1u << port)) == 0) continue;
+            Serial::Printf("[AHCI TEST] Trying READ LBA0 on ctrl %d port %d...\n", i, port);
+            PageAlloc::DMAAlloc::DMABuffer *buf = nullptr;
+            if (AHCI::ReadSectors(drv, port, /*lba*/1, /*count*/1, &buf)) {
+                Serial::Write("[AHCI TEST] READ LBA0 OK, dumping 512B (phys+virt views):\n");
+                // Sanity: verify virt->phys translation matches the DMA phys address
+                UPTR chkPhys=0; U64 chkFlags=0; SIZE_T lvl=0;
+                if (Debug::VirtToPhys((UPTR)buf->VirtAddr, &chkPhys, &chkFlags, &lvl)) {
+                    Serial::Printf("[AHCI TEST] DMA buf virt=%p -> phys=%p flags=%llx lvl=%u\n",
+                                   (void*)(uintptr_t)buf->VirtAddr, (void*)(uintptr_t)chkPhys,
+                                   (unsigned long long)chkFlags, (unsigned)lvl);
+                } else {
+                    Serial::Printf("[AHCI TEST] VirtToPhys FAILED for %p\n", (void*)(uintptr_t)buf->VirtAddr);
+                }
+                // View 1: base printed as physical address
+                Debug::HexDump((void*)(uintptr_t)buf->VirtAddr, 512, 16, buf->PhysAddr, true);
+                // View 2: base printed as the virtual pointer
+                Debug::HexDump((void*)(uintptr_t)buf->VirtAddr, 512, 16, 0, true);
+                PageAlloc::DMAAlloc::FreeDMABuffer(buf);
+                // Only test first successful port
+                i = AHCI::g_ahci_controller_count; // break outer
+                break;
+            } else {
+                Serial::Write("[AHCI TEST] READ LBA0 failed\n");
+            }
+        }
+    }
     }
 
 }

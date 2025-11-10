@@ -363,6 +363,95 @@ namespace Printk {
                         }
                         break;
                     }
+                    case 'f': {
+#if defined(__SSE__) || defined(__AVX__) || defined(__SSE2__)
+                        /* Minimal floating-point formatting: support precision (default 6), sign,
+                           integer part and fractional part with rounding. Uses only existing
+                           Itoa/Utoa helpers and integer arithmetic for the fractional digits. */
+                        double fval = va_arg(Args, double);
+                        bool neg = false;
+                        if (fval < 0.0) { neg = true; fval = -fval; }
+
+                        int prec = HasPrecision ? (int)Precision : 6; // default precision 6
+                        if (prec < 0) prec = 6;
+
+                        // Extract integer part
+                        long long intpart = (long long)fval;
+                        double frac = fval - (double)intpart;
+
+                        // Prepare multiplier = 10^prec
+                        unsigned long long mul = 1ULL;
+                        for (int i = 0; i < prec; ++i) mul *= 10ULL;
+
+                        // Compute fractional digits as integer with rounding
+                        unsigned long long frac_digits = 0ULL;
+                        {
+                            double tmp = frac * (double)mul;
+                            unsigned long long rounded = (unsigned long long)(tmp + 0.5);
+                            if (rounded >= mul) {
+                                intpart += 1;
+                                rounded -= mul;
+                            }
+                            frac_digits = rounded;
+                        }
+
+                        // Convert integer part
+                        CHAR8 intbuf[48];
+                        Utoa((unsigned long long)intpart, intbuf, 10);
+
+                        // Build fractional string with leading zeros if needed
+                        CHAR8 fracbuf[64];
+                        if (prec > 0) {
+                            for (int i = prec - 1; i >= 0; --i) {
+                                fracbuf[i] = (CHAR8)('0' + (frac_digits % 10ULL));
+                                frac_digits /= 10ULL;
+                            }
+                            fracbuf[prec] = '\0';
+                        } else {
+                            fracbuf[0] = '\0';
+                        }
+
+                        /* Build the whole representation into a temporary buffer then apply padding */
+                        CHAR8 whole[128];
+                        size_t pos = 0;
+                        if (neg) whole[pos++] = '-';
+                        for (size_t i = 0; intbuf[i]; ++i) whole[pos++] = intbuf[i];
+                        if (prec > 0) {
+                            whole[pos++] = '.';
+                            for (int i = 0; i < prec; ++i) whole[pos++] = fracbuf[i];
+                        }
+                        whole[pos] = '\0';
+
+                        unsigned long long wlen = Strlen(whole);
+                        int pad = (Width > (int)wlen) ? (Width - (int)wlen) : 0;
+                        if (!LeftJustify) {
+                            if (ZeroPadding && !HasPrecision) {
+                                for (int i = 0; i < pad; ++i) Printk::WriteToLogBufferChar('0');
+                            } else {
+                                for (int i = 0; i < pad; ++i) Printk::WriteToLogBufferChar(' ');
+                            }
+                        }
+                        Printk::WriteToLogBuffer(whole);
+                        if (LeftJustify) {
+                            for (int i = 0; i < pad; ++i) Printk::WriteToLogBufferChar(' ');
+                        }
+#else
+                        /* Floating-point varargs are not supported under the current
+                           compiler flags (SSE disabled). Print a fallback marker while
+                           keeping width/left-justify behavior. */
+                        CHAR8 whole_fallback[] = "<float>";
+                        unsigned long long wlen = Strlen(whole_fallback);
+                        int pad = (Width > (int)wlen) ? (Width - (int)wlen) : 0;
+                        if (!LeftJustify) {
+                            for (int i = 0; i < pad; ++i) Printk::WriteToLogBufferChar(' ');
+                        }
+                        Printk::WriteToLogBuffer(whole_fallback);
+                        if (LeftJustify) {
+                            for (int i = 0; i < pad; ++i) Printk::WriteToLogBufferChar(' ');
+                        }
+#endif
+                        break;
+                    }
                     case 'p': {
                         void* ptr = va_arg(Args, void*);
                         unsigned long long pv = (unsigned long long)ptr;

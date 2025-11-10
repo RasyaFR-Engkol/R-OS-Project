@@ -234,6 +234,8 @@ namespace AHCI {
                                 port->ie = (1u << 0) | (1u << 30); // D2H + Fatal Error
                             }
                             SendIdentify(DRV, portnum);
+
+                            Printk::Write(Printk::Level::LOG_INFO, " Controller %d Port %d initialized as SATA drive\n", i, portnum);
                         }
                         DRV.port_device[portnum] = DevType;
                     } else {
@@ -250,5 +252,51 @@ namespace AHCI {
             }
             // -------------------------
         }
+    }
+
+    // Ambil AHCI controller berdasarkan index dan kembalikan sebagai struct (by value)
+    // Jika index tidak valid, kembalikan struct default dengan regs=nullptr dan initialized=false
+    AHCIDriver GetController(int index) {
+        AHCIDriver ret{};
+        ret.regs = nullptr;
+        ret.initialized = false;
+        ret.IntVector = 0;
+        ret.using_msi = false;
+        ret.msi_cap_offset = 0;
+        ret.legacy_irq = 0;
+        ret.saved_valid = false;
+        // Jika valid, salin data dari tabel global
+        if (index >= 0 && index < g_ahci_controller_count) {
+            ret = g_ahci_controllers[index];
+        }
+        return ret;
+    }
+
+    // Mengembalikan nomor port aktif pertama (SATA) atau -1 jika tidak ada.
+    VAL32 FindActivePortNum(const AHCIDriver &Driver) {
+        // Jika register belum dipetakan atau belum diinisialisasi, aman kembalikan -1
+        if (!Driver.regs || !Driver.initialized) {
+            return (VAL32)-1;
+        }
+
+        // Port yang diimplementasikan ditandai pada bitfield PI
+        U32 implemented = Driver.regs->pi;
+        for (VAL32 port = 0; port < 32; ++port) {
+            if ((implemented & (1u << port)) == 0)
+                continue; // port tidak diimplementasikan
+
+            if (Driver.port_device[port] == DeviceType::SATA) {
+                return port;
+            }
+        }
+        return (VAL32)-1;
+    }
+
+    AHCIPortInfo GetPortInfo(int ConIndex){
+        AHCIPortInfo TheInfo{};
+        TheInfo.AhciDRV = GetController(ConIndex);
+        TheInfo.controller_index = 0;
+        TheInfo.port_number = FindActivePortNum(TheInfo.AhciDRV);
+        return TheInfo;
     }
 }

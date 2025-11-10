@@ -13,6 +13,9 @@
 #include "kernel/driver/xhci/xhci.hpp"
 #include "kernel/driver/pic/pic.hpp"
 #include "kernel/driver/pic/timer/pit.hpp"
+#include "kernel/filesys/gpt/gpt.hpp"
+#include "kernel/filesys/vfs/vfs.hpp"
+#include "kernel/filesys/fat32/fat32.hpp"
 #include "kernel/intidt/idt.hpp"
 #include "kernel/log/fbcon/fbcon.hpp"
 #include "kernel/log/printk/printk.hpp"
@@ -21,6 +24,9 @@
 #include "firmware/acpi/madt/smpmod/smp.hpp"
 #include "debug.hpp"
 #include "rossys.hpp"
+#include <filesystem/filesystem.hpp>
+#include "kernel/filesys/pmos/partition_manager.hpp"
+#include <string.hpp>
 
 ABI_C void KernelMain()
 {
@@ -63,39 +69,28 @@ ABI_C void KernelMain()
     PCI::IntializePCIDrivers();
 
     // xHCI test: send multiple Enable Slot commands (no NOOP, no polling) to verify repeated MSIs.
-    xHCI::InterruptBurstTest(5);
+    //xHCI::InterruptBurstTest(5); Disable this for now to reduce noise.
 
     // AHCI read test: try LBA0 from first available SATA port and hex dump
-    for (int i = 0; i < AHCI::g_ahci_controller_count; ++i) {
-        AHCI::AHCIDriver &drv = AHCI::g_ahci_controllers[i];
-        if (!drv.regs) continue;
-        U32 pi = drv.regs->pi;
-        for (int port = 0; port < 32; ++port) {
-            if ((pi & (1u << port)) == 0) continue;
-            Serial::Printf("[AHCI TEST] Trying READ LBA0 on ctrl %d port %d...\n", i, port);
-            PageAlloc::DMAAlloc::DMABuffer *buf = nullptr;
-            if (AHCI::ReadSectors(drv, port, /*lba*/0, /*count*/1, &buf)) {
-                Serial::Write("[AHCI TEST] READ LBA0 OK, dumping 512B (phys+virt views):\n");
-                // Sanity: verify virt->phys translation matches the DMA phys address
-                UPTR chkPhys=0; U64 chkFlags=0; SIZE_T lvl=0;
-                if (Debug::VirtToPhys((UPTR)buf->VirtAddr, &chkPhys, &chkFlags, &lvl)) {
-                    Serial::Printf("[AHCI TEST] DMA buf virt=%p -> phys=%p flags=%llx lvl=%u\n",
-                                   (void*)(uintptr_t)buf->VirtAddr, (void*)(uintptr_t)chkPhys,
-                                   (unsigned long long)chkFlags, (unsigned)lvl);
-                } else {
-                    Serial::Printf("[AHCI TEST] VirtToPhys FAILED for %p\n", (void*)(uintptr_t)buf->VirtAddr);
-                }
-                // View 1: base printed as physical address
-                Debug::HexDump((void*)(uintptr_t)buf->VirtAddr, 512, 16, buf->PhysAddr, true);
-                // View 2: base printed as the virtual pointer
-                Debug::HexDump((void*)(uintptr_t)buf->VirtAddr, 512, 16, 0, true);
-                PageAlloc::DMAAlloc::FreeDMABuffer(buf);
-                // Only test first successful port
-                i = AHCI::g_ahci_controller_count; // break outer
-                break;
-            } else {
-                Serial::Write("[AHCI TEST] READ LBA0 failed\n");
-            }
+    AHCI::TestReadLBA0();
+
+    // Register filesystem drivers BEFORE initializing GPT/partitions
+    VFSManager::RegisterFileSystem("FAT32", []()->FileSystem* { return new FAT32FileSystem(); });
+
+    GPTFS::InitFs();
+
+    // Demo 2: create and write a small test file "/test.txt" with Virtual File System
+    {
+        const char *TestVFSPath = "/mnt/part0/testVFS.txt";
+        File *F = VFSManager::Create(TestVFSPath);
+        if(F){
+            const char *TestingDATA = "Hello from R-OS kernel VFS!\nThis is a test file created using VFS and FAT32 driver.\n";
+            SIZE_T ToWrite = String::Strlen(TestingDATA);
+            U32 ByteWritten = VFSManager::Write(F, (U8*)TestingDATA, (U32)ToWrite);
+            Printk::Write(Printk::Level::LOG_INFO, "Wrote %u/%llu bytes to %s\n", ByteWritten, ToWrite, TestVFSPath);
+            VFSManager::Close(F);
+        } else {
+            Printk::Write(Printk::Level::LOG_ERR, "Failed to create test file %s\n", TestVFSPath);
         }
     }
 
@@ -109,7 +104,7 @@ ABI_C void KernelMain()
         // Process queued keyboard scancodes and echo them to consoles
         PIC::Keyboard::Poll();
         // Halt until next interrupt to reduce CPU usage
-        asm volatile ("hlt");
+        Arch::ASM::HaltCPU();
     }
     
 }

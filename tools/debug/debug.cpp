@@ -4,6 +4,7 @@
 #include <mm.hpp>
 #include <serial.hpp>
 #include "../../Include/debug.hpp"
+#include <filesystem/filesystem.hpp>
 
 namespace Debug {
 	static inline void printLineAddr(UPTR addr) {
@@ -180,4 +181,33 @@ namespace Debug {
 		}
 		Serial::Write("[PTE] Audit done\n");
 	}
+
+	VOID TestReadPartition(const char* path){
+        U32 pcount = PartitionManager::GetPartitionCount();
+        for(U32 pi = 0; pi < pcount; ++pi){
+            Partition* part = PartitionManager::GetPartitionByIndex(pi);
+            if(!part) continue;
+            FileSystem* fs = part->GetFilesystem();
+            if(!fs) continue;
+            Printk::Write(Printk::Level::LOG_INFO, "FAT32 Demo: trying to open /EFI/BOOT/grub.cfg on partition %u\n", pi);
+            File* f = fs->Open(path);
+            if(!f){
+                Printk::Write(Printk::Level::LOG_INFO, "FAT32 Demo: grub.cfg not found on partition %u\n", pi);
+                continue;
+            }
+            U32 size = (U32)f->FileSize;
+            void* buf = Kmalloc::Alloc(size ? size : 1);
+            if(!buf){
+                Printk::Write(Printk::Level::LOG_ERR, "FAT32 Demo: allocation failed for size %u\n", size);
+                fs->Close(f);
+                continue;
+            }
+            U32 got = fs->Read(f, (U8*)buf, size);
+            Printk::Write(Printk::Level::LOG_INFO, "FAT32 Demo: read %u/%u bytes from grub.cfg\n", got, size);
+            if(got) Debug::HexDump(buf, got, 16, 0, true);
+            fs->Close(f);
+            Kmalloc::Free(buf);
+            break; // only first fs
+        }
+    }
 }

@@ -198,6 +198,16 @@ char* Strncpy(char* dst, const char* src, unsigned long long n) {
     return dst;
 }
 
+char* Strcat(char* dst, const char* src) {
+    if (!dst) return nullptr;
+    if (!src) return dst;
+    // Find end of destination string
+    unsigned long long len = Strlen(dst);
+    // Append source (including terminating NUL)
+    Strcpy(dst + len, src);
+    return dst;
+}
+
 const char* Strchr(const char* s, int ch) {
     if (!s) return nullptr;
     char c = (char)ch;
