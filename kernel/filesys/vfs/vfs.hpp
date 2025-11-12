@@ -30,6 +30,8 @@ namespace VFSManager{
     void Close(File* file);
     U32 Read(File* file, U8* buffer, U32 size); 
     U32 Write(File *File, U8 *Buffer, U32 Size);
+    // Debug wrapper to trace write calls (see implementation in vfs.cpp)
+    U32 DebugWrite(File *File, U8 *Buffer, U32 Size);
     U32 Append(const char* path, U8* Buffer, U32 Size);
     BOOL Delete(const char* path);
     BOOL Rename(const char* oldPath, const char* newPath);

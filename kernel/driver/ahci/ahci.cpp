@@ -10,6 +10,9 @@
 #include "../pic/timer/pit.hpp"
 #include "../pci/capatibility/msixmsi/msixmsi.hpp"
 #include "ahci_internal.hpp"
+#include "ahci_disk.hpp"
+#include "../../filesys/iblockdevice.hpp"
+#include "../../dev/devicemanager.hpp"
 // Access IOAPIC helpers
 #include "../../../firmware/acpi/madt/madt.hpp"
 #include "../../../firmware/acpi/madt/madt.hpp"
@@ -236,6 +239,15 @@ namespace AHCI {
                             SendIdentify(DRV, portnum);
 
                             Printk::Write(Printk::Level::LOG_INFO, " Controller %d Port %d initialized as SATA drive\n", i, portnum);
+
+                            IBlockDevice *NewDisk = new AHCIBlockDevice(DRV, (U8)portnum);
+
+                            if(DeviceManager::RegisterBlockDevice(NewDisk)){
+                                Printk::Write(Printk::Level::LOG_INFO, " AHCI: Registered block device for Controller %d Port %d\n", i, portnum);
+                            } else {
+                                Printk::Write(Printk::Level::LOG_ERR, " AHCI: Failed to register block device for Controller %d Port %d\n", i, portnum);
+                                delete NewDisk;
+                            }
                         }
                         DRV.port_device[portnum] = DevType;
                     } else {

@@ -3,6 +3,7 @@
 #define PRINTK_MODULE_NAME "Partition"
 #include <logging.hpp>
 #include "vfs/vfs.hpp"
+#include "ext2/ext2.hpp"
 
 
 BOOL Partition::Mount(){
@@ -31,6 +32,25 @@ BOOL Partition::Mount(){
     }
 
     PageAlloc::DMAAlloc::FreeDMABuffer(BootSectorBuffer);
+    BootSectorBuffer = nullptr;
+
+    if(!DetectedFSType){
+        Printk::Write(Printk::Level::LOG_WARNING, " NOT FAT32. Trying attempt to detect another partition..\n");
+        if(!this->ReadSectors(2, 1, &BootSectorBuffer)){
+            Printk::Write(Printk::Level::LOG_ERR, " Partition: Failed to read sector 2 for mounting.\n");
+            return FALSE;
+        }
+
+        EXT2::SuperBlock *SB = (EXT2::SuperBlock*)BootSectorBuffer->VirtAddr;
+
+        if(SB->s_magic == EXT2_SUPER_MAGIC){
+            Printk::Write(Printk::Level::LOG_INFO, "  Detected EXT2 filesystem.\n");
+            DetectedFSType = "EXT2";
+        }
+
+        PageAlloc::DMAAlloc::FreeDMABuffer(BootSectorBuffer);
+        BootSectorBuffer = nullptr;
+    }
 
     if(!DetectedFSType){
         Printk::Write(Printk::Level::LOG_WARNING, " Partition: Unable to detect filesystem type.\n");

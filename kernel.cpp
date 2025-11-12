@@ -72,27 +72,12 @@ ABI_C void KernelMain()
     //xHCI::InterruptBurstTest(5); Disable this for now to reduce noise.
 
     // AHCI read test: try LBA0 from first available SATA port and hex dump
-    AHCI::TestReadLBA0();
+    //AHCI::TestReadLBA0();
 
     // Register filesystem drivers BEFORE initializing GPT/partitions
     VFSManager::RegisterFileSystem("FAT32", []()->FileSystem* { return new FAT32FileSystem(); });
 
     GPTFS::InitFs();
-
-    // Demo 2: create and write a small test file "/test.txt" with Virtual File System
-    {
-        const char *TestVFSPath = "/mnt/part0/testVFS.txt";
-        File *F = VFSManager::Create(TestVFSPath);
-        if(F){
-            const char *TestingDATA = "Hello from R-OS kernel VFS!\nThis is a test file created using VFS and FAT32 driver.\n";
-            SIZE_T ToWrite = String::Strlen(TestingDATA);
-            U32 ByteWritten = VFSManager::Write(F, (U8*)TestingDATA, (U32)ToWrite);
-            Printk::Write(Printk::Level::LOG_INFO, "Wrote %u/%llu bytes to %s\n", ByteWritten, ToWrite, TestVFSPath);
-            VFSManager::Close(F);
-        } else {
-            Printk::Write(Printk::Level::LOG_ERR, "Failed to create test file %s\n", TestVFSPath);
-        }
-    }
 
     // Main idle loop: poll serial and keyboard consumers so IRQ-driven
     // producers are serviced. This keeps IRQ handlers minimal (they only

@@ -23,7 +23,7 @@ namespace AHCI {
     };
 
     VOID HandleInterrupt(VAL32 Controller_ID){
-        Printk::Write(Printk::Level::LOG_CRIT, " Interrupt received from controller %u\n", (unsigned)Controller_ID);
+        //Printk::Write(Printk::Level::LOG_CRIT, " Interrupt received from controller %u\n", (unsigned)Controller_ID);
 
         AHCIDriver &Driver = g_ahci_controllers[Controller_ID];
         volatile HBA_MEM* regs = Driver.regs;
@@ -35,8 +35,8 @@ namespace AHCI {
             return;
         }
 
-        Printk::Write(Printk::Level::LOG_INFO, " Controller %u - Ports with IRQ: 0x%08x\n",
-            (unsigned)Controller_ID, (unsigned)PortsWithIRQ);
+        //Printk::Write(Printk::Level::LOG_INFO, " Controller %u - Ports with IRQ: 0x%08x\n",
+            //(unsigned)Controller_ID, (unsigned)PortsWithIRQ);
 
         U32 handled_ports_mask = 0;
         for(U32 PortNum = 0; PortNum < 32; PortNum++){
@@ -60,8 +60,8 @@ namespace AHCI {
 
             port->is = interesting;
 
-            Printk::Write(Printk::Level::LOG_INFO, " Controller %u Port %u - Port Status: 0x%08x\n",
-                (unsigned)Controller_ID, (unsigned)PortNum, (unsigned)interesting);
+            //Printk::Write(Printk::Level::LOG_INFO, " Controller %u Port %u - Port Status: 0x%08x\n",
+              //  (unsigned)Controller_ID, (unsigned)PortNum, (unsigned)interesting);
         }
 
         if (handled_ports_mask) regs->is = handled_ports_mask;

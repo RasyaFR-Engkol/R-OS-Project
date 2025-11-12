@@ -1,6 +1,7 @@
 #pragma once
 
 #include "rosval.h"
+#include "../iblockdevice.hpp"
 
 namespace GPTFS{
     struct GPTGuid{
@@ -45,9 +46,9 @@ namespace GPTFS{
         U16  PartitionName[36];
     };
 
-    BOOL InitializeGPT();
+    BOOL InitializeGPT(IBlockDevice *Device, GPTFS::GPTHeader **OutHeader);
 
-    BOOL ParsePartitionEntries();
+    BOOL ParsePartitionEntries(IBlockDevice* Device, GPTFS::GPTHeader* GPTHeader0);
 
     BOOL InitFs();
 }

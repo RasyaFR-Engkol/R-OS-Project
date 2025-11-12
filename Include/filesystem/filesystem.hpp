@@ -15,4 +15,8 @@
 
 #include "../../kernel/filesys/fat32/fat32.hpp"
 
+// Untuk EXT2
+#include "../../kernel/filesys/ext2/ext2.hpp"
+#include "../../kernel/filesys/ext2/ext2_driver.hpp"
+
 // TODO: nanti disini kita bisa tambah driver NVMe juga

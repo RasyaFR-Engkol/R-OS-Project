@@ -197,6 +197,7 @@ void FAT32FileSystem::Close(File* file){
 }
 
 U32 FAT32FileSystem::Read(File* file, U8* buffer, U32 size){
+    Printk::Write(Printk::Level::LOG_INFO, "FAT32: Read requested, size %u bytes\n", size);
     if(!file || !buffer || size == 0) return 0;
     if(file->CurrentPosition >= file->FileSize) return 0;
 
@@ -248,6 +249,7 @@ U32 FAT32FileSystem::Read(File* file, U8* buffer, U32 size){
 }
 
 U32 FAT32FileSystem::Write(File* file, U8* buffer, U32 size){
+    Printk::Write(Printk::Level::LOG_INFO, "FAT32: Write requested, size %u bytes\n", size);
     if(!file || !buffer || size == 0) return 0;
 
     // Only write to existing files. If the file has no directory entry (Internal_DirEntryLBA==0)
@@ -378,11 +380,14 @@ U32 FAT32FileSystem::Write(File* file, U8* buffer, U32 size){
         Printk::Write(Printk::Level::LOG_WARNING, "FAT32: UpdateDirectoryEntry failed after write\n");
     }
 
+    Printk::Write(Printk::Level::LOG_INFO, "FAT32: Write completed, %u bytes written\n", totalWritten);
+
     return totalWritten;
 }
 
 File *FAT32FileSystem::Create(const char *path){
     if(!path || path[0] != '/') return nullptr; // Hanya support full path
+    Printk::Write(Printk::Level::LOG_DEBUG, "FAT32: Create called for '%s'\n", path);
     
     // 1. Cek dulu apakah file sudah ada
     // Open() akan mengembalikan non-null jika ada
@@ -445,9 +450,11 @@ File *FAT32FileSystem::Create(const char *path){
     Close(parentDir); // Selesai dengan direktori induk
 
     if(!created){
-        Printk::Write(Printk::Level::LOG_ERR, "FAT32: CreateDirectoryEntry gagal untuk '%s'", newName);
+        Printk::Write(Printk::Level::LOG_ERR, "FAT32: CreateDirectoryEntry gagal untuk '%s' (parentCluster=%u)\n", newName, parentCluster);
         return nullptr;
     }
+
+    Printk::Write(Printk::Level::LOG_INFO, "FAT32: File '%s' created successfully\n", path);
 
     // 5. Sukses! Entri sudah ada di disk.
     // Cara termudah dan teraman untuk dapat File* adalah... panggil Open() lagi.

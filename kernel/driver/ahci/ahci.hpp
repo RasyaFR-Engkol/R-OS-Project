@@ -26,15 +26,15 @@ namespace AHCI {
         U8 msi_cap_offset; // 0 if none
         U8 legacy_irq;     // legacy IRQ number (0..15) if used, 0 if none
 
-    // Saved routing/interrupt enable state for temporary reroute
-    bool saved_valid;
-    U32 saved_ghc;
-    U32 saved_port_ie[32];
-    // For MSI saved message address (low dword) and optionally high
-    U32 saved_msi_addr_lo;
-    U32 saved_msi_addr_hi;
-    // For IOAPIC saved high dword of redirection entry
-    U32 saved_ioapic_redt_high;
+        // Saved routing/interrupt enable state for temporary reroute
+        bool saved_valid;
+        U32 saved_ghc;
+        U32 saved_port_ie[32];
+        // For MSI saved message address (low dword) and optionally high
+        U32 saved_msi_addr_lo;
+        U32 saved_msi_addr_hi;
+        // For IOAPIC saved high dword of redirection entry
+        U32 saved_ioapic_redt_high;
 
         // Per-port device type (NONE if no device present)
         DeviceType port_device[32];
@@ -101,7 +101,7 @@ namespace AHCI {
     AHCIDriver GetController(int index);
 
     // Mencari nomor port pertama yang aktif (device terdeteksi) pada sebuah controller.
-    // Kriteria saat ini: port_device[port] == DeviceType::SATA.
+    // Kriteria sfaat ini: port_device[port] == DeviceType::SATA.
     // Nilai kembali: index port (0..31) atau -1 jika tidak ada.
     VAL32 FindActivePortNum(const AHCIDriver &Driver);
 

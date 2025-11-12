@@ -222,6 +222,7 @@ BOOL FAT32FileSystem::ReadDirectory(U32 dirStartCluster,
     char lfn_buf[520]; // ample space for LFN
     lfn_buf[0] = '\0';
     BOOL have_lfn = FALSE;
+    int lfn_chars_filled = 0;
 
     U32 bytesPerSector = (U32)m_BPB.BytesPerSector;
 
@@ -252,46 +253,63 @@ BOOL FAT32FileSystem::ReadDirectory(U32 dirStartCluster,
             }
             U8 attr = data[off + 11];
             if(attr == 0x0F){
-                // LFN entry: extract its part (UTF-16LE) and prepend to lfn_buf
+                U8 seqByte = data[off];
+                int seqIndex = seqByte & 0x1F; // 1..20
+                BOOL isLast = (seqByte & 0x40) != 0;
+
+                if(seqIndex == 0 || seqIndex > 20){
+                    // invalid sequence number; drop accumulated LFN state
+                    lfn_buf[0] = '\0';
+                    have_lfn = FALSE;
+                    lfn_chars_filled = 0;
+                    continue;
+                }
+
+                if(isLast){
+                    String::Memset(lfn_buf, 0, sizeof(lfn_buf));
+                    lfn_chars_filled = 0;
+                }
+
+                // LFN entry: extract its part (UTF-16LE) and map into final buffer based on sequence index
                 U16 utf16_part[13]; int utf16_count = 0;
-                // Name1: offsets 1..10 (5 UTF-16 chars)
                 for(int i=0;i<5;i++){
                     U16 ch = (U16)data[off + 1 + i*2] | ((U16)data[off + 1 + i*2 + 1] << 8);
                     if(ch == 0x0000 || ch == 0xFFFF) break;
                     utf16_part[utf16_count++] = ch;
                 }
-                // Name2: offsets 14..25 (6 chars)
                 for(int i=0;i<6;i++){
                     U16 ch = (U16)data[off + 14 + i*2] | ((U16)data[off + 14 + i*2 + 1] << 8);
                     if(ch == 0x0000 || ch == 0xFFFF) break;
                     utf16_part[utf16_count++] = ch;
                 }
-                // Name3: offsets 28..31 (2 chars)
                 for(int i=0;i<2;i++){
                     U16 ch = (U16)data[off + 28 + i*2] | ((U16)data[off + 28 + i*2 + 1] << 8);
                     if(ch == 0x0000 || ch == 0xFFFF) break;
                     utf16_part[utf16_count++] = ch;
                 }
-                // Convert utf16_part to UTF-8 string
+
                 char part_utf8[128];
                 int res = UTF16LE_To_UTF8(utf16_part, utf16_count, part_utf8, (int)sizeof(part_utf8));
                 if(res < 0) part_utf8[0] = '\0';
-                // Prepend part_utf8 to lfn_buf (LFN entries appear in reverse order)
+
                 int partlen = (int)String::Strlen(part_utf8);
-                int existing = (int)String::Strlen(lfn_buf);
-                if(existing > 0){
-                    for(int i=existing; i>=0; i--){
-                        lfn_buf[i+partlen] = lfn_buf[i];
+                int startPos = (seqIndex - 1) * 13;
+                if(startPos < (int)sizeof(lfn_buf) - 1){
+                    int room = (int)sizeof(lfn_buf) - 1 - startPos;
+                    int toCopy = partlen < room ? partlen : room;
+                    for(int i = 0; i < toCopy; ++i){
+                        lfn_buf[startPos + i] = part_utf8[i];
                     }
+                    int endPos = startPos + toCopy;
+                    if(endPos > lfn_chars_filled) lfn_chars_filled = endPos;
+                    lfn_buf[lfn_chars_filled] = '\0';
                 }
-                for(int i=0;i<partlen;i++) lfn_buf[i] = part_utf8[i];
-                lfn_buf[partlen + existing] = '\0';
                 have_lfn = TRUE;
                 continue;
             }
             if(first == 0xE5) {
                 // deleted entry; reset LFN buffer
-                lfn_buf[0] = '\0'; have_lfn = FALSE; continue;
+                lfn_buf[0] = '\0'; have_lfn = FALSE; lfn_chars_filled = 0; continue;
             }
 
             // Regular SFN entry
@@ -337,7 +355,7 @@ BOOL FAT32FileSystem::ReadDirectory(U32 dirStartCluster,
             }
 
             // reset LFN buffer for next
-            lfn_buf[0] = '\0'; have_lfn = FALSE;
+            lfn_buf[0] = '\0'; have_lfn = FALSE; lfn_chars_filled = 0;
 
             // --- INI BAGIAN UTAMA YANG BERUBAH ---
             // Hitung LBA dan offset dari entri ini untuk callback
@@ -464,8 +482,17 @@ BOOL FAT32FileSystem::FindFreeDirSlots(U32 dirStartCluster, U32 needed, U64* out
     U32 cluster = dirStartCluster;
     U32 bytesPerSector = (U32)m_BPB.BytesPerSector;
     U32 sectorsPerCluster = m_BPB.SectorsPerCluster;
-
+    // guard to avoid infinite loops on corrupted FAT chains
+    U32 guard = 0;
     while(cluster < 0x0FFFFFF8){
+        if(cluster < 2){
+            Printk::Write(Printk::Level::LOG_ERR, "FAT32: FindFreeDirSlots encountered invalid cluster %u in chain (dirStart=%u)\n", cluster, dirStartCluster);
+            return FALSE;
+        }
+        if(++guard > (m_TotalClusters + 2)){
+            Printk::Write(Printk::Level::LOG_ERR, "FAT32: FindFreeDirSlots aborted after excessive iterations (dirStart=%u)\n", dirStartCluster);
+            return FALSE;
+        }
         U64 lbaCluster = ClusterToLBA(cluster);
         for(U32 s = 0; s < sectorsPerCluster; ++s){
             U64 sectorLBA = lbaCluster + s;
@@ -493,7 +520,7 @@ BOOL FAT32FileSystem::FindFreeDirSlots(U32 dirStartCluster, U32 needed, U64* out
             }
             PageAlloc::DMAAlloc::FreeDMABuffer(buf);
         }
-        cluster = GetNextCluster(cluster);
+            cluster = GetNextCluster(cluster);
     }
     return FALSE;
 }
@@ -512,15 +539,70 @@ BOOL FAT32FileSystem::CreateDirectoryEntry(U32 dirStartCluster, const char* name
     }
     utf16[utf16_count] = 0;
 
+    if (utf16_count > 255) {
+        Printk::Write(Printk::Level::LOG_ERR, "FAT32: Filename too long: '%s' (%u chars > 255)\n", name, utf16_count);
+        return FALSE; 
+    }
+
     // number of LFN entries required: 13 UTF16 chars per LFN entry
     unsigned int lfn_entries = (utf16_count + 12) / 13;
     unsigned int total_needed = lfn_entries + 1; // +1 for SFN
 
-    // Find free contiguous slots
+    // Find free contiguous slots. If not found, try expanding the directory by
+    // allocating+zeroing a new cluster and retrying up to a few times. This
+    // handles fragmented directories and transient allocation/write failures.
     U64 foundLBA = 0; U32 foundOffset = 0;
-    if(!FindFreeDirSlots(dirStartCluster, total_needed, &foundLBA, &foundOffset)){
-        Printk::Write(Printk::Level::LOG_ERR, "FAT32: No contiguous free directory slots for creating file '%s'\n", name);
-        return FALSE;
+    const int maxExpandAttempts = 4;
+    int attempt = 0;
+    while(true){
+        if(FindFreeDirSlots(dirStartCluster, total_needed, &foundLBA, &foundOffset)){
+            break; // found slots
+        }
+
+        if(++attempt > maxExpandAttempts){
+            Printk::Write(Printk::Level::LOG_ERR, "FAT32: No contiguous free directory slots after %d expansion attempts for '%s'\n", attempt-1, name);
+            return FALSE;
+        }
+
+        Printk::Write(Printk::Level::LOG_INFO, "FAT32: No contiguous slots found; expansion attempt %d for '%s'\n", attempt, name);
+
+        // Find last cluster in chain
+        U32 last = dirStartCluster;
+        U32 guard = 0;
+        while(true){
+            U32 next = GetNextCluster(last);
+            if(next >= 0x0FFFFFF8) break;
+            if(next == 0) break; // corrupted chain
+            last = next;
+            if(++guard > m_TotalClusters + 2) break;
+        }
+
+        U32 newc = AllocateCluster(last == 0 ? 0 : last);
+        if(newc == 0){
+            Printk::Write(Printk::Level::LOG_ERR, "FAT32: Failed to allocate new cluster to expand directory for '%s' (attempt %d)\n", name, attempt);
+            return FALSE;
+        }
+        Printk::Write(Printk::Level::LOG_INFO, "FAT32: Allocated new cluster %u to expand directory for '%s'\n", newc, name);
+
+        // Zero the newly allocated cluster on disk so it appears as free entries
+        U64 newLBA = ClusterToLBA(newc);
+        U32 sectors = m_BPB.SectorsPerCluster;
+        U32 pages = (sectors * m_BPB.BytesPerSector + PAGE_SIZE - 1) / PAGE_SIZE;
+        PageAlloc::DMAAlloc::DMABuffer* zbuf = PageAlloc::DMAAlloc::AllocateDMAPages(pages);
+        if(!zbuf){
+            Printk::Write(Printk::Level::LOG_ERR, "FAT32: Failed to allocate DMA buffer to zero new directory cluster for '%s'\n", name);
+            return FALSE;
+        }
+        // zero and write exactly sectors worth of bytes
+        String::Memset((void*)zbuf->VirtAddr, 0, (U32)sectors * m_BPB.BytesPerSector);
+        if(!m_Partition->WriteSectors(newLBA, sectors, zbuf)){
+            Printk::Write(Printk::Level::LOG_ERR, "FAT32: Failed to write zeroed new directory cluster LBA %llu for '%s'\n", newLBA, name);
+            PageAlloc::DMAAlloc::FreeDMABuffer(zbuf);
+            return FALSE;
+        }
+        PageAlloc::DMAAlloc::FreeDMABuffer(zbuf);
+
+        // loop and try FindFreeDirSlots again
     }
 
     // Generate SFN
@@ -541,6 +623,7 @@ BOOL FAT32FileSystem::CreateDirectoryEntry(U32 dirStartCluster, const char* name
 
     auto flushSector = [&](){ if(curBuf){ BOOL ok = m_Partition->WriteSectors(curSectorLBA, 1, curBuf); PageAlloc::DMAAlloc::FreeDMABuffer(curBuf); curBuf = nullptr; curSectorLBA = (U64)-1; return ok; } return TRUE; };
 
+    bool insertedTerminator = false; // ensure exactly one UTF-16 terminator is written after the name
     // fill LFN entries
     for(unsigned int idx = 0; idx < lfn_entries; ++idx){
         unsigned int part = lfn_entries - idx; // sequence number: lfn_entries .. 1
@@ -558,18 +641,16 @@ BOOL FAT32FileSystem::CreateDirectoryEntry(U32 dirStartCluster, const char* name
         // first cluster always 0
         entry32[26] = 0x00; entry32[27] = 0x00;
 
-        // Fill name parts (13 UTF16 chars) from utf16 buffer
-        // Correct mapping: entry with LAST flag (highest sequence number) holds the FIRST 13 chars.
-        // So starting index is 13*(lfn_entries - part).
-        int startChar = (int)((lfn_entries - part) * 13);
-        bool isLast = (part == lfn_entries);
-        bool placedTerm = false; // place a single 0x0000 terminator in the LAST entry
+        // Fill name parts (13 UTF16 chars) from utf16 buffer.
+        // Sequence index 1 (closest to SFN) stores the first 13 characters, so
+        // the start offset is (part-1)*13 when counting backwards.
+        int startChar = (int)((part - 1) * 13);
         // Name1: 5 chars -> offsets 1..10 (little endian)
         for(int i=0;i<5;i++){
             int ci = startChar + i;
             U16 wc;
             if(ci < (int)utf16_count){ wc = utf16[ci]; }
-            else if(isLast && !placedTerm){ wc = 0x0000; placedTerm = true; }
+            else if(!insertedTerminator){ wc = 0x0000; insertedTerminator = true; }
             else { wc = 0xFFFF; }
             entry32[1 + i*2] = (U8)(wc & 0xFF);
             entry32[1 + i*2 + 1] = (U8)((wc >> 8) & 0xFF);
@@ -579,7 +660,7 @@ BOOL FAT32FileSystem::CreateDirectoryEntry(U32 dirStartCluster, const char* name
             int ci = startChar + 5 + i;
             U16 wc;
             if(ci < (int)utf16_count){ wc = utf16[ci]; }
-            else if(isLast && !placedTerm){ wc = 0x0000; placedTerm = true; }
+            else if(!insertedTerminator){ wc = 0x0000; insertedTerminator = true; }
             else { wc = 0xFFFF; }
             entry32[14 + i*2] = (U8)(wc & 0xFF);
             entry32[14 + i*2 + 1] = (U8)((wc >> 8) & 0xFF);
@@ -589,7 +670,7 @@ BOOL FAT32FileSystem::CreateDirectoryEntry(U32 dirStartCluster, const char* name
             int ci = startChar + 11 + i;
             U16 wc;
             if(ci < (int)utf16_count){ wc = utf16[ci]; }
-            else if(isLast && !placedTerm){ wc = 0x0000; placedTerm = true; }
+            else if(!insertedTerminator){ wc = 0x0000; insertedTerminator = true; }
             else { wc = 0xFFFF; }
             entry32[28 + i*2] = (U8)(wc & 0xFF);
             entry32[28 + i*2 + 1] = (U8)((wc >> 8) & 0xFF);

@@ -6,6 +6,8 @@
 #include "rossys.hpp"
 #include "logging.hpp"
 #include "ahci_internal.hpp"
+#include "ahci_disk.hpp"
+#include "../../filesys/gpt/gpt.hpp"
 
 /* module name provided via PRINTK_MODULE_NAME */
 

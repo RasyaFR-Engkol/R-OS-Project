@@ -120,13 +120,21 @@ namespace VFSManager{
 
     File* Open(const char* path){
         FileSystem* fs = nullptr; char rel[256];
-        if(!ResolvePath(path, &fs, rel)) return nullptr;
+        if(!ResolvePath(path, &fs, rel)) {
+            Printk::Write(Printk::Level::LOG_DEBUG, "VFS: Open - ResolvePath failed for '%s'\n", path);
+            return nullptr;
+        }
+        Printk::Write(Printk::Level::LOG_DEBUG, "VFS: Open - path='%s' rel='%s' fs=%p\n", path, rel, (void*)fs);
         return fs->Open(rel);
     }
 
     File* Create(const char *Path){
         FileSystem* fs = nullptr; char rel[256];
-        if(!ResolvePath(Path, &fs, rel)) return nullptr;
+        if(!ResolvePath(Path, &fs, rel)){
+            Printk::Write(Printk::Level::LOG_DEBUG, "VFS: Create - ResolvePath failed for '%s'\n", Path);
+            return nullptr;
+        }
+        Printk::Write(Printk::Level::LOG_DEBUG, "VFS: Create - path='%s' rel='%s' fs=%p\n", Path, rel, (void*)fs);
         return fs->Create(rel);
     }
 
@@ -140,6 +148,14 @@ namespace VFSManager{
 
     U32 Read(File* file, U8* buffer, U32 size){ if(!file || !file->FSOwner) return 0; return file->FSOwner->Read(file, buffer, size); }
     U32 Write(File *FileObj, U8 *Buffer, U32 Size){ if(!FileObj || !FileObj->FSOwner) return 0; return FileObj->FSOwner->Write(FileObj, Buffer, Size); }
+
+    // Debug wrapper to trace VFS write calls (helps ensure caller passes proper File* and FSOwner)
+    U32 DebugWrite(File *FileObj, U8 *Buffer, U32 Size){
+        if(!FileObj){ Printk::Write(Printk::Level::LOG_DEBUG, "VFS: DebugWrite called with NULL FileObj\n"); return 0; }
+        Printk::Write(Printk::Level::LOG_DEBUG, "VFS: DebugWrite FileObj=%p FSOwner=%p Size=%u\n", (void*)FileObj, (void*)FileObj->FSOwner, Size);
+        if(!FileObj->FSOwner){ Printk::Write(Printk::Level::LOG_ERR, "VFS: DebugWrite - FileObj has no FSOwner\n"); return 0; }
+        return FileObj->FSOwner->Write(FileObj, Buffer, Size);
+    }
 
     U32 Append(const char* path, U8* Buffer, U32 Size){
         if(!path || !Buffer || Size == 0) return 0;
