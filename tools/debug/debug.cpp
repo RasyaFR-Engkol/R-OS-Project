@@ -3,7 +3,7 @@
 #include <string.hpp>
 #include <mm.hpp>
 #include <serial.hpp>
-#include "../../Include/debug.hpp"
+#include <debug.hpp>
 #include <filesystem/filesystem.hpp>
 
 namespace Debug {
@@ -210,4 +210,72 @@ namespace Debug {
             break; // only first fs
         }
     }
+}
+
+namespace ExpectedCrash{
+	ExpectCrash_T Instance[128] = {};
+	VAL32 InstanceCount = 0;
+
+	ExpectCrash_T* Create(U64 ReportMustBeCalled, const char* functionName){
+		if (!functionName) return nullptr;
+
+		// If an entry for this function name already exists, reuse it
+		for (VAL32 i = 0; i < InstanceCount; i++){
+			if (String::Strcmp(Instance[i].NameFunction, functionName) == 0){
+				Instance[i].ReportMustBeCalled = ReportMustBeCalled;
+				Instance[i].Counter = 0; // reset previous counter when reconfiguring
+				return &Instance[i];
+			}
+		}
+
+		if (InstanceCount >= 128) return nullptr;
+
+		ExpectCrash_T* exp = &Instance[InstanceCount++];
+		exp->Counter = 0;
+		exp->ReportMustBeCalled = ReportMustBeCalled;
+		// copy name safely and ensure null-termination
+		String::Strncpy(exp->NameFunction, functionName, sizeof(exp->NameFunction));
+		exp->NameFunction[sizeof(exp->NameFunction) - 1] = '\0';
+		return exp;
+	}
+
+	VOID Report(ExpectCrash_T *Exp){
+		if(!Exp) return;
+		if(Exp->ReportMustBeCalled == 0) return; // nothing to track
+
+		// Prefer validating the pointer belongs to our Instance array.
+		ExpectCrash_T* target = nullptr;
+		for (VAL32 i = 0; i < InstanceCount; i++){
+			if (&Instance[i] == Exp){ target = &Instance[i]; break; }
+		}
+		// Fallback: try to match by name if pointer not found (backwards compatibility)
+		if (!target){
+			for (VAL32 i = 0; i < InstanceCount; i++){
+				if (String::Strcmp(Instance[i].NameFunction, Exp->NameFunction) == 0){ target = &Instance[i]; break; }
+			}
+		}
+		if (!target) return; // unknown/invalid Exp pointer
+
+		target->Counter++;
+		if (target->Counter >= target->ReportMustBeCalled){
+			Serial::Printf("EXPECTED CRASH: Function %s expected to crash after %llu calls. (called %llu times)\n",
+				target->NameFunction,
+				target->ReportMustBeCalled,
+				target->Counter
+			);
+			// reset counter so we don't repeatedly trigger
+			target->Counter = 0;
+		}
+	}
+
+	VOID FunctionDone(ExpectCrash_T *Exp){
+		if(!Exp) return;
+		// Find the instance by pointer first, fallback to name match
+		for(VAL32 i = 0; i < InstanceCount; i++){
+			if (&Instance[i] == Exp || String::Strcmp(Instance[i].NameFunction, Exp->NameFunction) == 0){
+				Instance[i].Counter = 0;
+				return;
+			}
+		}
+	}
 }
