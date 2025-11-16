@@ -50,6 +50,9 @@ namespace IDT {
     void RegisterInterruptHandler(U8 vector, InterruptHandler GHandler) {
         // vector is U8 (0..255) so the range check is unnecessary
         G_Handlers[vector] = GHandler;
+        Printk::Write(Printk::Level::LOG_INFO,
+                      "IDT: Registered handler for vector 0x%02X at %p\n",
+                      vector, (void*)GHandler.handler);
     }
 
     // Back-compat for earlier misspelling
