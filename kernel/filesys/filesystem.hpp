@@ -35,5 +35,11 @@ class FileSystem{
         virtual BOOL UpdateDirectoryEntry(File* file){ return FALSE; } // default no-op
         virtual BOOL Delete(const char* path) = 0;
         virtual BOOL Rename(const char* oldPath, const char* newPath) = 0;
-    virtual BOOL Seek(File* file, U64 position) = 0; // allow seeking within regular files
+        virtual BOOL Seek(File* file, U64 position) = 0; // allow seeking within regular files
+        virtual BOOL Truncate(File* file, U64 size) = 0;
+        virtual BOOL MKDir(const char* path) = 0;
+        virtual BOOL RMDir(const char* path) = 0;
+        virtual BOOL Flush(File* file) = 0;
+        virtual BOOL Append(File* file, U8* buffer, U32 size) = 0;
+        virtual BOOL Cp(const char* srcPath, const char* destPath) = 0;
 };

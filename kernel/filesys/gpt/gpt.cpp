@@ -1,9 +1,9 @@
+#define PRINTK_MODULE_NAME "GPTFS"
 #include "gpt.hpp"
 #include <rosval.h>
 #include <rossys.hpp>
 #include <filesystem/filesystem.hpp>
 #include <mm.hpp>
-#define PRINTK_MODULE_NAME "GPTFS"
 #include <logging.hpp>
 #include <string.hpp>
 #include "../pmos/partition_manager.hpp"

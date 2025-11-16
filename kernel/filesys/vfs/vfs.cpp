@@ -138,6 +138,77 @@ namespace VFSManager{
         return fs->Create(rel);
     }
 
+    // Ensure parent directories exist inside the filesystem for the given relative path.
+    // This is a conservative, debug-friendly helper that implements mkdir -p semantics.
+    static BOOL EnsureParentDirs(FileSystem* fs, const char* relPath){
+        if(!fs || !relPath) return FALSE;
+        // relPath expected to start with '/'
+        U32 len = (U32)String::Strlen(relPath);
+        if(len == 0) return TRUE;
+        // find parent portion (strip trailing component)
+        // e.g. relPath = "/a/b/c.txt" -> parent = "/a/b"
+        const char* last = nullptr;
+        for(U32 i=0;i<len;i++) if(relPath[i] == '/') last = &relPath[i];
+        // If only root or no slash, nothing to do
+        // But relPath always begins with '/', so if last == &relPath[0], parent is root
+        if(!last || last == &relPath[0]) return TRUE;
+        // Copy parent path
+        CHAR8 parent[256]; U32 pLen = (U32)(last - relPath);
+        if(pLen >= sizeof(parent)) return FALSE;
+        String::Memcpy(parent, relPath, pLen); parent[pLen] = '\0';
+
+        // Iterate path components from top to bottom, creating as needed
+        CHAR8 accum[256]; accum[0] = '/'; accum[1] = '\0';
+        U32 pos = 1;
+        U32 i = 1; // skip initial '/'
+        while(i <= pLen){
+            // find next slash or end
+            U32 j = i;
+            while(j < pLen && parent[j] != '/') j++;
+            U32 compLen = j - i;
+            if(compLen == 0){ i = j+1; continue; }
+            if(pos + 1 + compLen >= sizeof(accum)) return FALSE;
+            // append component
+            if(accum[pos-1] != '/') { accum[pos++] = '/'; accum[pos] = '\0'; }
+            String::Memcpy(accum + pos, parent + i, compLen);
+            pos += compLen; accum[pos] = '\0';
+
+            // Check if exists by trying to open
+            File* f = fs->Open(accum);
+            if(f){
+                // exists; ensure it's a directory
+                if(!f->IsDirectory){ fs->Close(f); return FALSE; }
+                fs->Close(f);
+            } else {
+                // try to create directory
+                if(!fs->MKDir(accum)){
+                    // If MKDir failed, maybe it now exists (race) -> try Open again
+                    File* f2 = fs->Open(accum);
+                    if(!f2) return FALSE;
+                    if(!f2->IsDirectory){ fs->Close(f2); return FALSE; }
+                    fs->Close(f2);
+                }
+            }
+
+            i = j + 1;
+        }
+        return TRUE;
+    }
+
+    // Create with parent directories created as needed
+    File* CreateWithParents(const char *Path){
+        FileSystem* fs = nullptr; char rel[256];
+        if(!ResolvePath(Path, &fs, rel)){
+            Printk::Write(Printk::Level::LOG_DEBUG, "VFS: CreateWithParents - ResolvePath failed for '%s'\n", Path);
+            return nullptr;
+        }
+        if(!EnsureParentDirs(fs, rel)){
+            Printk::Write(Printk::Level::LOG_WARNING, "VFS: CreateWithParents - failed to ensure parents for '%s'\n", rel);
+            return nullptr;
+        }
+        return fs->Create(rel);
+    }
+
     void Close(File* file){
         if(!file) return;
         if(!file->FSOwner) {
@@ -197,6 +268,28 @@ namespace VFSManager{
         if(!file || !file->FSOwner) return FALSE;
         // Delegate to filesystem so it can update cluster cursor/state correctly
         return file->FSOwner->Seek(file, position);
+    }
+
+    BOOL Truncate(File* file, U64 size){
+        if(!file || !file->FSOwner) return FALSE;
+        return file->FSOwner->Truncate(file, size);
+    }
+
+    BOOL MKDir(const char* path){
+        FileSystem* fs = nullptr; char rel[256];
+        if(!ResolvePath(path, &fs, rel)) return FALSE;
+        return fs->MKDir(rel);
+    }
+
+    BOOL RMDir(const char* path){
+        FileSystem* fs = nullptr; char rel[256];
+        if(!ResolvePath(path, &fs, rel)) return FALSE;
+        return fs->RMDir(rel);
+    }
+
+    BOOL Flush(File* file){
+        if(!file || !file->FSOwner) return FALSE;
+        return file->FSOwner->Flush(file);
     }
 
 

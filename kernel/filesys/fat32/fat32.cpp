@@ -462,6 +462,34 @@ File *FAT32FileSystem::Create(const char *path){
     return Open(path);
 }
 
+// Copy a file within FAT32 filesystem. srcPath and destPath should be absolute within FS (start with '/')
+BOOL FAT32FileSystem::Cp(const char* srcPath, const char* destPath){
+    if(!srcPath || !destPath) return FALSE;
+    File* src = Open(srcPath);
+    if(!src) return FALSE;
+    if(src->IsDirectory){ Close(src); return FALSE; }
+
+    File* dst = Create(destPath);
+    if(!dst){ Close(src); return FALSE; }
+
+    // buffer size: use cluster size if available, else 4096
+    U32 clusterBytes = (U32)m_BPB.BytesPerSector * (U32)m_BPB.SectorsPerCluster;
+    U32 bufSize = (clusterBytes > 0 && clusterBytes <= 65536) ? clusterBytes : 4096;
+    U8* buf = (U8*)Kmalloc::Alloc(bufSize);
+    if(!buf){ Close(src); Close(dst); return FALSE; }
+
+    U32 r;
+    while((r = Read(src, buf, bufSize)) > 0){
+        U32 w = Write(dst, buf, r);
+        if(w != r){ Kmalloc::Free(buf); Close(src); Close(dst); return FALSE; }
+    }
+
+    Kmalloc::Free(buf);
+    Close(src);
+    Close(dst);
+    return TRUE;
+}
+
 // helper functions moved to fat32_helper.cpp
 
 BOOL FAT32FileSystem::Delete(const char* path){
@@ -530,7 +558,6 @@ BOOL FAT32FileSystem::Delete(const char* path){
     // 6) Also mark any preceding LFN entries as deleted
     // Build the ordered list of sector LBAs that make up this directory
     U32 sectorsPerCluster = m_BPB.SectorsPerCluster;
-    U32 bytesPerSector = m_BPB.BytesPerSector;
 
     // First pass: count clusters and sectors
     U32 clCount = 0;
@@ -587,7 +614,7 @@ BOOL FAT32FileSystem::Delete(const char* path){
                 else {
                     if(secIdx == 0) break; // reached start of directory
                     if(!flushSector()) break;
-                    secIdx -= 1; offs = bytesPerSector - 32;
+                    secIdx -= 1; offs = (U32)m_BPB.BytesPerSector - 32;
                     if(!loadSector(sectorLBAs[secIdx])) break;
                 }
 
@@ -757,4 +784,339 @@ BOOL FAT32FileSystem::Seek(File* file, U64 position){
     file->Internal_CurrentCluster = cluster;
     (void)offsetInCluster; // stored implicitly via CurrentPosition
     return TRUE;
+}
+
+BOOL FAT32FileSystem::Truncate(File* file, U64 size){
+    if(!file) return FALSE;
+    if(file->IsDirectory) return FALSE;
+
+    U64 clusterBytes = (U64)m_BPB.BytesPerSector * (U64)m_BPB.SectorsPerCluster;
+    if(clusterBytes == 0) return FALSE;
+
+    U64 oldSize = file->FileSize;
+    if(size == oldSize) return TRUE;
+
+    // Shrink
+    if(size < oldSize){
+        U32 keepClusters = (size == 0) ? 0 : (U32)((size + clusterBytes - 1) / clusterBytes);
+
+        U32 start = file->Internal_StartCluster;
+        if(keepClusters == 0){
+            if(start >= 2){
+                FreeClusterChain(start);
+            }
+            file->Internal_StartCluster = 0;
+            file->Internal_CurrentCluster = 0;
+            file->FileSize = (U32)size;
+            if((U64)file->CurrentPosition > size) file->CurrentPosition = (U32)size;
+            UpdateDirectoryEntry(file);
+            return TRUE;
+        }
+
+        // walk to the last cluster to keep
+        U32 cur = start;
+        if(cur < 2) return FALSE; // inconsistent
+        for(U32 i = 0; i < keepClusters - 1; ++i){
+            U32 nxt = GetNextCluster(cur);
+            if(nxt >= 0x0FFFFFF8) break;
+            cur = nxt;
+        }
+
+        U32 toFree = GetNextCluster(cur);
+        if(toFree >= 2 && toFree < 0x0FFFFFF8){
+            FreeClusterChain(toFree);
+        }
+
+        // mark cur as end-of-chain
+        SetNextCluster(cur, 0x0FFFFFFF);
+
+        file->FileSize = (U32)size;
+        if((U64)file->CurrentPosition > size) file->CurrentPosition = (U32)size;
+        file->Internal_CurrentCluster = cur;
+        UpdateDirectoryEntry(file);
+        return TRUE;
+    }
+
+    // Extend: allocate clusters and zero them
+    U32 oldClusters = (oldSize == 0) ? 0 : (U32)((oldSize + clusterBytes - 1) / clusterBytes);
+    U32 newClusters = (size == 0) ? 0 : (U32)((size + clusterBytes - 1) / clusterBytes);
+    if(newClusters <= oldClusters){
+        // file size grows within existing cluster
+        file->FileSize = (U32)size;
+        UpdateDirectoryEntry(file);
+        return TRUE;
+    }
+
+    U32 need = newClusters - oldClusters;
+    U32 last = file->Internal_StartCluster;
+
+    // If no start cluster, allocate first
+    if(last < 2){
+        U32 nc = AllocateCluster(0);
+        if(nc == 0) return FALSE;
+        // ensure chain termination
+        SetNextCluster(nc, 0x0FFFFFFF);
+        last = nc;
+
+        // zero new cluster
+        U32 bytes = (U32)clusterBytes;
+        U32 pages = (bytes + PAGE_SIZE - 1) / PAGE_SIZE;
+        PageAlloc::DMAAlloc::DMABuffer* zbuf = PageAlloc::DMAAlloc::AllocateDMAPages(pages);
+        if(!zbuf) return FALSE;
+        String::Memset((U8*)zbuf->VirtAddr, 0, bytes);
+        WriteCluster(nc, (U8*)zbuf->VirtAddr);
+        PageAlloc::DMAAlloc::FreeDMABuffer(zbuf);
+
+        need--;
+    }
+
+    // walk to end of chain
+    U32 guard = 0;
+    U32 cur = last;
+    while(true){
+        U32 nxt = GetNextCluster(cur);
+        if(nxt >= 0x0FFFFFF8) break;
+        cur = nxt;
+        if(++guard > m_TotalClusters + 2) break;
+    }
+    last = cur;
+
+    for(U32 i = 0; i < need; ++i){
+        U32 nc = AllocateCluster(last);
+        if(nc == 0) return FALSE;
+        // mark new cluster EOC
+        SetNextCluster(nc, 0x0FFFFFFF);
+
+        // write zeroes
+        U32 bytes = (U32)clusterBytes;
+        U32 pages = (bytes + PAGE_SIZE - 1) / PAGE_SIZE;
+        PageAlloc::DMAAlloc::DMABuffer* zbuf = PageAlloc::DMAAlloc::AllocateDMAPages(pages);
+        if(!zbuf) return FALSE;
+        String::Memset((U8*)zbuf->VirtAddr, 0, bytes);
+        WriteCluster(nc, (U8*)zbuf->VirtAddr);
+        PageAlloc::DMAAlloc::FreeDMABuffer(zbuf);
+
+        // link from last to nc
+        SetNextCluster(last, nc);
+        last = nc;
+    }
+
+    file->FileSize = (U32)size;
+    if((U64)file->CurrentPosition > size) file->CurrentPosition = (U32)size;
+    file->Internal_CurrentCluster = last;
+    if(file->Internal_StartCluster == 0) file->Internal_StartCluster = last; // safety
+    UpdateDirectoryEntry(file);
+    return TRUE;
+}
+
+BOOL FAT32FileSystem::MKDir(const char* path){
+    if(!path || path[0] != '/') return FALSE;
+
+    // Check existence
+    File* existing = Open(path);
+    if(existing){ Close(existing); return FALSE; }
+
+    // split parent and name
+    char parentPath[256]; const char* newName = nullptr;
+    size_t len = String::Strlen(path);
+    int lastSlash = -1;
+    if(len > 0){ for(size_t ui = len; ui > 0; ){ ui--; if(path[ui] == '/') { lastSlash = (int)ui; break; } } }
+    if(lastSlash == -1) return FALSE;
+    if(lastSlash == 0){ String::Strcpy(parentPath, "/"); newName = path + 1; }
+    else { if((size_t)lastSlash >= sizeof(parentPath)) return FALSE; String::Memcpy(parentPath, path, (U64)lastSlash); parentPath[lastSlash] = '\0'; newName = path + lastSlash + 1; }
+    if(!newName || String::Strlen(newName) == 0) return FALSE;
+
+    File* parentDir = Open(parentPath);
+    if(!parentDir){ return FALSE; }
+    if(!parentDir->IsDirectory){ Close(parentDir); return FALSE; }
+
+    U32 parentCl = parentDir->Internal_StartCluster;
+
+    // Allocate a cluster for the new directory
+    U32 newCl = AllocateCluster(0);
+    if(newCl == 0){ Close(parentDir); return FALSE; }
+    // ensure marked EOC
+    SetNextCluster(newCl, 0x0FFFFFFF);
+
+    // Initialize cluster contents with '.' and '..'
+    U32 clusterBytes = (U32)m_BPB.BytesPerSector * m_BPB.SectorsPerCluster;
+    U32 pages = (clusterBytes + PAGE_SIZE - 1) / PAGE_SIZE;
+    PageAlloc::DMAAlloc::DMABuffer* buf = PageAlloc::DMAAlloc::AllocateDMAPages(pages);
+    if(!buf){ Close(parentDir); return FALSE; }
+    String::Memset((U8*)buf->VirtAddr, 0, clusterBytes);
+
+    // Build '.' entry
+    U8* s = (U8*)buf->VirtAddr;
+    // first entry: '.' in SFN form
+    for(int i=0;i<11;i++) s[i] = (i==0) ? (U8)'.' : (U8)' ';
+    s[11] = 0x10; // directory attribute
+    s[12] = 0; // NTReserved
+    // cluster high/low
+    s[20] = (U8)((newCl >> 16) & 0xFF);
+    s[21] = (U8)((newCl >> 24) & 0xFF);
+    s[26] = (U8)(newCl & 0xFF);
+    s[27] = (U8)((newCl >> 8) & 0xFF);
+    // filesize 0 already zero
+
+    // second entry: '..'
+    U8* t = s + 32;
+    for(int i=0;i<11;i++) t[i] = (i<2) ? (U8)'.' : (U8)' ';
+    t[11] = 0x10; // directory
+    t[12] = 0;
+    U32 parentCluster = parentDir->Internal_StartCluster;
+    if(parentCluster < 2) parentCluster = 0;
+    t[20] = (U8)((parentCluster >> 16) & 0xFF);
+    t[21] = (U8)((parentCluster >> 24) & 0xFF);
+    t[26] = (U8)(parentCluster & 0xFF);
+    t[27] = (U8)((parentCluster >> 8) & 0xFF);
+
+    // write cluster
+    BOOL ok = WriteCluster(newCl, (U8*)buf->VirtAddr);
+    PageAlloc::DMAAlloc::FreeDMABuffer(buf);
+    if(!ok){ Close(parentDir); return FALSE; }
+
+    // Create directory entry in parent and fix attribute to directory
+    U64 entryLBA = 0; U32 entryOffset = 0;
+    if(!CreateDirectoryEntry(parentCl, newName, newCl, 0, &entryLBA, &entryOffset)){
+        // free cluster we just created
+        FreeClusterChain(newCl);
+        Close(parentDir);
+        return FALSE;
+    }
+
+    // adjust SFN attribute byte to directory (0x10)
+    PageAlloc::DMAAlloc::DMABuffer* sbuf = nullptr;
+    if(!m_Partition->ReadSectors(entryLBA, 1, &sbuf)){
+        Close(parentDir);
+        return FALSE;
+    }
+    U8* sdat = (U8*)sbuf->VirtAddr;
+    sdat[entryOffset + 11] = 0x10;
+    m_Partition->WriteSectors(entryLBA, 1, sbuf);
+    PageAlloc::DMAAlloc::FreeDMABuffer(sbuf);
+
+    Close(parentDir);
+    return TRUE;
+}
+
+BOOL FAT32FileSystem::RMDir(const char* path){
+    if(!m_Partition || !path || path[0] != '/') return FALSE;
+
+    // Split parent and name
+    char parentPath[256]; const char* name = nullptr;
+    size_t len = String::Strlen(path);
+    int lastSlash = -1;
+    if(len > 0){ for(size_t ui = len; ui > 0; ){ ui--; if(path[ui] == '/') { lastSlash = (int)ui; break; } } }
+    if(lastSlash < 0) return FALSE;
+    if(lastSlash == 0){ String::Strcpy(parentPath, "/"); name = path + 1; }
+    else { if((size_t)lastSlash >= sizeof(parentPath)) return FALSE; String::Memcpy(parentPath, path, (U64)lastSlash); parentPath[lastSlash] = '\0'; name = path + lastSlash + 1; }
+    if(!name || String::Strlen(name) == 0) return FALSE;
+
+    File* parentDir = Open(parentPath);
+    if(!parentDir || !parentDir->IsDirectory){ if(parentDir) Close(parentDir); return FALSE; }
+
+    U32 dirStartCluster = parentDir->Internal_StartCluster;
+
+    FAT32_DirectoryEntry de; U64 entryLBA = 0; U32 entryOffset = 0;
+    if(!FindFileInDir(name, dirStartCluster, &de, nullptr, 0, &entryLBA, &entryOffset)){
+        Close(parentDir); return FALSE;
+    }
+
+    if(!(de.Attributes & 0x10)) { Close(parentDir); return FALSE; }
+
+    // Ensure directory is empty (only '.' and '..')
+    struct Ctx { int count; } ctx; ctx.count = 0;
+    auto cb = [](const char* fname, FAT32_DirectoryEntry* de2, void* vctx, U64 lba, U32 off)->BOOL{
+        (void)lba; (void)off; Ctx* c = (Ctx*)vctx;
+        if(String::Strcmp(fname, ".") == 0) return TRUE;
+        if(String::Strcmp(fname, "..") == 0) return TRUE;
+        // found a real entry: mark and stop
+        c->count = 1;
+        return FALSE;
+    };
+
+    if(!ReadDirectory(((U32)de.ClusterHigh << 16) | (U32)de.ClusterLow, cb, &ctx)){
+        Close(parentDir); return FALSE;
+    }
+    if(ctx.count > 0){ Close(parentDir); return FALSE; }
+
+    // free clusters of the directory
+    U32 startCluster = ((U32)de.ClusterHigh << 16) | (U32)de.ClusterLow;
+    if(startCluster >= 2) FreeClusterChain(startCluster);
+
+    // mark SFN deleted
+    PageAlloc::DMAAlloc::DMABuffer* sbuf = nullptr;
+    if(!m_Partition->ReadSectors(entryLBA, 1, &sbuf)){ Close(parentDir); return FALSE; }
+    U8* sdata = (U8*)sbuf->VirtAddr;
+    sdata[entryOffset + 0] = 0xE5;
+    BOOL wrote = m_Partition->WriteSectors(entryLBA, 1, sbuf);
+    PageAlloc::DMAAlloc::FreeDMABuffer(sbuf);
+    if(!wrote){ Close(parentDir); return FALSE; }
+
+    // delete preceding LFN entries similar to Delete()
+    U32 sectorsPerCluster = m_BPB.SectorsPerCluster;
+
+    // Build list of sector LBAs that make up this directory
+    U32 clCount = 0;
+    {
+        U32 c = dirStartCluster; U32 guard2 = 0;
+        while(c >= 2 && c < 0x0FFFFFF8){ clCount++; c = GetNextCluster(c); if(++guard2 > m_TotalClusters + 2) break; }
+    }
+    U64 totalSectors = (U64)clCount * (U64)sectorsPerCluster;
+    if(totalSectors == 0){ Close(parentDir); return TRUE; }
+
+    U64* sectorLBAs = (U64*)Kmalloc::Alloc((U32)(totalSectors * sizeof(U64)));
+    if(!sectorLBAs){ Close(parentDir); return TRUE; }
+
+    {
+        U32 c = dirStartCluster; U64 idx = 0; U32 guard3 = 0;
+        while(c >= 2 && c < 0x0FFFFFF8 && idx < totalSectors){ sectorLBAs[idx++] = ClusterToLBA(c); c = GetNextCluster(c); if(++guard3 > m_TotalClusters + 2) break; }
+    }
+
+    long long sfnIdx = -1;
+    for(U64 i=0;i<totalSectors;i++){
+        if(sectorLBAs[i] == entryLBA){ sfnIdx = (long long)i; break; }
+    }
+
+    if(sfnIdx >= 0){
+        // scan backwards and delete LFN entries
+        PageAlloc::DMAAlloc::DMABuffer* curBuf = nullptr;
+        for(long long secIdx = sfnIdx; secIdx >= 0; --secIdx){
+            if(!m_Partition->ReadSectors(sectorLBAs[secIdx], 1, &curBuf)) break;
+            U8* data = (U8*)curBuf->VirtAddr;
+            U32 bps = (U32)m_BPB.BytesPerSector;
+            BOOL dirty = FALSE;
+            for(U32 offs = bps - 32; ; offs -= 32){
+                U8 first = data[offs + 0]; U8 attr = data[offs + 11];
+                if(first == 0x00) break; // end
+                if(attr != 0x0F) break; // stop
+                data[offs + 0] = 0xE5; dirty = TRUE;
+                if(offs < 32) break;
+            }
+            if(dirty) m_Partition->WriteSectors(sectorLBAs[secIdx], 1, curBuf);
+            if(curBuf) PageAlloc::DMAAlloc::FreeDMABuffer(curBuf);
+        }
+    }
+
+    Kmalloc::Free(sectorLBAs);
+    Close(parentDir);
+    return TRUE;
+}
+
+BOOL FAT32FileSystem::Flush(File* file){
+    if(!file) return FALSE;
+    // Flush directory entry metadata to disk
+    return UpdateDirectoryEntry(file);
+}
+
+// Append: move to EOF and write the buffer. Returns TRUE if all bytes written.
+BOOL FAT32FileSystem::Append(File* file, U8* buffer, U32 size){
+    if(!file || !buffer || size == 0) return FALSE;
+    if(file->IsDirectory) return FALSE;
+
+    // seek to end
+    if(!Seek(file, file->FileSize)) return FALSE;
+
+    U32 written = Write(file, buffer, size);
+    return (written == size) ? TRUE : FALSE;
 }

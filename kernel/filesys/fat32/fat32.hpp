@@ -74,8 +74,14 @@ class FAT32FileSystem : public FileSystem{
         virtual U32 Write(File *File, U8 *Buffer, U32 Size) override;
         virtual BOOL UpdateDirectoryEntry(File* file) override; // <-- TAMBAHKAN INI
         virtual BOOL Delete(const char* path) override; // Hapus file (non-direktori)
-    virtual BOOL Rename(const char* oldPath, const char* newPath) override; // Rename/move file within FAT32
+        virtual BOOL Rename(const char* oldPath, const char* newPath) override; // Rename/move file within FAT32
         virtual BOOL Seek(File* file, U64 position) override; // Adjust file position for subsequent Read/Write
+        virtual BOOL Truncate(File* file, U64 size) override;
+        virtual BOOL MKDir(const char* path) override;
+        virtual BOOL RMDir(const char* path) override;
+        virtual BOOL Flush(File* file) override;
+    virtual BOOL Append(File* file, U8* buffer, U32 size) override;
+    virtual BOOL Cp(const char* srcPath, const char* destPath) override;
 
         Partition* GetPartition() { return m_Partition; }
         U32 GetSectorsPerCluster() { return m_BPB.SectorsPerCluster; }
