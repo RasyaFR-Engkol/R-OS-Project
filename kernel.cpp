@@ -27,8 +27,12 @@
 #include <filesystem/filesystem.hpp>
 #include "kernel/filesys/pmos/partition_manager.hpp"
 #include <string.hpp>
+#include <userland/syscall.hpp>
 
-ABI_C void KernelMain()
+// Debug stress test entry (implemented in tools/debug/ext2_stress.cpp)
+extern "C" int main_debug_ext2_stress(int argc, char** argv);
+
+ABI_C NORET void KernelMain()
 {
     IDT::InitializeIDT();
     // Initialize PIC and PIT early so we can use PIT as a calibration
@@ -48,7 +52,9 @@ ABI_C void KernelMain()
     Arch::Sti();
 
     // Calibrate and start LAPIC timer at 100 Hz (uses PIT ticks)
-    ACPI::Timer::InitializeLapicTimer(0x20, 100, TRUE);
+    // Use a distinct vector for LAPIC timer (not IRQ0/PIT vector 0x20)
+    // to avoid conflicts with the PIT handler while calibration runs.
+    ACPI::Timer::InitializeLapicTimer(0xEE, 100, TRUE);
 
     // Now mask and disable legacy PIC hardware while interrupts are briefly
     // disabled inside the call. After that, re-enable interrupts so LAPIC
@@ -78,6 +84,10 @@ ABI_C void KernelMain()
     VFSManager::RegisterFileSystem("FAT32", []()->FileSystem* { return new FAT32FileSystem(); });
 
     GPTFS::InitFs();
+
+    Userland::Syscall_Init();
+
+    UNUSED__ halt:
 
     // Main idle loop: poll serial and keyboard consumers so IRQ-driven
     // producers are serviced. This keeps IRQ handlers minimal (they only
