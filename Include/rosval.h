@@ -106,4 +106,10 @@ typedef va_list VA_LIST;
 #define OFFSET_OF(type, member) ((SIZE_T)&(((type *)0)->member))
 #define PACKSTRUCT __attribute__((packed))
 
+#define NORET __attribute__((noreturn))
+#define ONLYASM __attribute__((naked))
+#define WEAK __attribute__((weak))
+#define ALIGNED(x) __attribute__((aligned(x)))
+
+
 #endif

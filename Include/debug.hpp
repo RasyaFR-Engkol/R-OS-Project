@@ -25,3 +25,21 @@ namespace Debug {
 	VOID TestReadPartition(const char* path);
 }
 
+namespace ExpectedCrash{
+	struct ExpectCrash_T{
+		char NameFunction[128];
+		U64 Counter;
+		U64 ReportMustBeCalled;
+	};
+
+	extern ExpectCrash_T Instance[128];
+	extern VAL32 InstanceCount;
+
+	ExpectCrash_T *Create(U64 ReportMustBeCalled, const char* functionName);
+
+	VOID Report(ExpectCrash_T *Exp);
+
+	VOID FunctionDone(ExpectCrash_T *Exp);
+}
+
+ABI_C VAL32 main_debug_ext2_stress(int argc, char** argv);

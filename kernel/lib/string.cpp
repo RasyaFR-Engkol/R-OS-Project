@@ -235,6 +235,56 @@ const char* Strstr(const char* haystack, const char* needle) {
     return nullptr;
 }
 
+// ---------------------- Tokenization ----------------------
+// Simple strtok implementation (not reentrant). Modifies the input string by
+// replacing delimiter characters with '\0' and returns pointers to tokens.
+char* Strtok(char* s, const char* delim) {
+    static char* next = nullptr;
+    if (!delim) return nullptr;
+    // If s is null, continue from previous position
+    if (s == nullptr) s = next;
+    if (s == nullptr) return nullptr;
+
+    // Skip leading delimiters
+    char* p = s;
+    bool any = true;
+    while (*p != '\0') {
+        // check if *p is one of delimiters
+        const char* d = delim;
+        any = false;
+        while (*d) {
+            if (*p == *d) { any = true; break; }
+            ++d;
+        }
+        if (!any) break;
+        ++p;
+    }
+    if (*p == '\0') { next = nullptr; return nullptr; }
+
+    // p now at start of token
+    char* token = p;
+
+    // Find end of token
+    while (*p != '\0') {
+        const char* d = delim;
+        bool is_del = false;
+        while (*d) {
+            if (*p == *d) { is_del = true; break; }
+            ++d;
+        }
+        if (is_del) {
+            *p = '\0';
+            next = p + 1;
+            return token;
+        }
+        ++p;
+    }
+
+    // Reached end of string
+    next = nullptr;
+    return token;
+}
+
 // ---------------------- Integer to ASCII ----------------------
 static char digit_of(unsigned v) {
     return (v < 10) ? (char)('0' + v) : (char)('a' + (v - 10));

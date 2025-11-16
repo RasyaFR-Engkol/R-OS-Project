@@ -19,4 +19,7 @@
 #include "../../kernel/filesys/ext2/ext2.hpp"
 #include "../../kernel/filesys/ext2/ext2_driver.hpp"
 
+// VFS
+#include "../../kernel/filesys/vfs/vfs.hpp"
+
 // TODO: nanti disini kita bisa tambah driver NVMe juga

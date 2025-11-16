@@ -24,6 +24,11 @@ namespace String{
 	const char* Strrchr(const char* s, int ch);
 	const char* Strstr(const char* haystack, const char* needle);
 
+	// Tokenize string using delimiters. Behaves like C's strtok: on first call
+	// pass the string to tokenize in `s`, subsequent calls pass `nullptr` to
+	// continue tokenizing the same string. Not reentrant.
+	char* Strtok(char* s, const char* delim);
+
 	// Simple integer to string (no allocation, returns buffer)
 	// Base supported: 2..16. Buffer must be large enough.
 	// Returns pointer to buffer for convenience.

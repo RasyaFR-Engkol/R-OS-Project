@@ -20,6 +20,8 @@ namespace Printk {
     // Index of the earliest byte not yet flushed to serial
     static size_t LogBufferFlushIndex = 0;
     SPINLOCK_T PrintkLock;
+    // Stores the last flushed message for use by emergency handler
+    static CHAR8 LastFlushedMessage[sizeof(LogBuffer) + 1];
 
     VOID Init(){
         Arch::Spinlock::SpinlockInit(&PrintkLock);
@@ -88,6 +90,9 @@ namespace Printk {
             for (size_t k = 0; k < seglen; ++k) tmp[k] = LogBuffer[LogBufferFlushIndex + k];
             tmp[seglen] = '\0';
             Serial::Write(tmp);
+            if (FBConsole::IsReady()) FBConsole::WriteString(tmp);
+            // store last flushed message copy for emergency reporting
+            for (size_t k = 0; k <= seglen; ++k) LastFlushedMessage[k] = tmp[k];
             LogBufferFlushIndex = LogBufferIndex;
         } else if (force && LogBufferFlushIndex > LogBufferIndex) {
             // wrapped: flush [flushIndex, end) then [0, LogBufferIndex)
@@ -99,6 +104,8 @@ namespace Printk {
             tmp[pos] = '\0';
                 Serial::Write(tmp);
                 if (FBConsole::IsReady()) FBConsole::WriteString(tmp);
+                // store last flushed message copy for emergency reporting
+                for (size_t k = 0; k <= pos; ++k) LastFlushedMessage[k] = tmp[k];
             LogBufferFlushIndex = LogBufferIndex;
         }
     }
@@ -159,7 +166,7 @@ namespace Printk {
     }
 
     // Handle EMERG: disable interrupts, flush logs, dump stack and halt
-    static VOID HandleEmergAndHalt() {
+    static VOID HandleEmergAndHalt(const char *msg) {
         // ensure prefix and pending data flushed
         FlushLogBufferToSerial(TRUE);
         // disable interrupts
@@ -167,7 +174,9 @@ namespace Printk {
         // dump stack trace to serial
         DumpStackTrace();
         // final message
-        Serial::Write("[PANIC] System halted due to EMERG\n");
+        // Prefer the explicit last-flushed message if provided, otherwise fall back
+        const CHAR8 *to_print = msg ? msg : LastFlushedMessage;
+        Serial::Printf("[kernel-emergency-mode]_[system_fully_stopped] %s (end of)\n", to_print);
         // halt forever
         while (1) Arch::HaltCPU();
     }
@@ -176,7 +185,7 @@ namespace Printk {
         // Emit level prefix (restore levelling)
         const CHAR8* levelPrefix = "";
         switch (level) {
-            case LOG_EMERG: levelPrefix = "[EMERG] "; break;
+            case LOG_EMERG: levelPrefix = "(start) [kernel-emergency-mode]_[system_fully_stopped] "; break;
             case LOG_ALERT: levelPrefix = "[ALERT] "; break;
             case LOG_CRIT:  levelPrefix = "[CRIT] "; break;
             case LOG_ERR:   levelPrefix = "[ERR] "; break;
@@ -477,7 +486,9 @@ namespace Printk {
 
         if (level == LOG_EMERG) {
             // This function will not return (halts)
-            HandleEmergAndHalt();
+            // After flushing, LastFlushedMessage contains the formatted output;
+            // pass that to the emergency handler so the final message is shown.
+            HandleEmergAndHalt(LastFlushedMessage);
         }
 
         return TRUE;
