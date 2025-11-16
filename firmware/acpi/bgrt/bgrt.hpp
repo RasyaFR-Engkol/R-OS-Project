@@ -2,9 +2,8 @@
 
 #include <rosval.h>
 
-extern "C" {
-    #include "../../acpica/source/include/acpi.h"
-}
+// Use our local lightweight ACPI header (no ACPICA dependency)
+#include "../acpi.hpp"
 
 namespace ACPI {
 namespace BGRT {

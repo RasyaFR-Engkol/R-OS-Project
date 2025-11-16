@@ -4,6 +4,10 @@
 
 namespace ACPI {
     namespace Timer {
+        // Lapic tick counter (incremented by the LAPIC timer IRQ handler)
+        extern volatile U64 LapicTicks;
+        extern U32 LapicHz;
+
         // Initialize the LAPIC timer to a target frequency in Hz.
         // Vector is the interrupt vector to deliver (typically 0x20 for
         // legacy IRQ0 replacement). desiredHz is the target tick frequency

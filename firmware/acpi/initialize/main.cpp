@@ -24,10 +24,8 @@
 // 3. Baca XSDT untuk mendapatkan daftar tabel ACPI lainnya.
 // 4. Inisialisasi perangkat-perangkat berdasarkan tabel ACPI yang ditemukan.
 
-extern "C" {
-    #include "../../acpica/source/include/acpi.h"
-    #include "../../acpica/source/include/acpixf.h"
-}
+// We removed ACPICA; implement a tiny table loader that reads RSDT/XSDT
+// directly from the RSDP (via BootInfo) and locates needed tables.
 
 namespace ACPI{
     using namespace String;
@@ -59,45 +57,36 @@ namespace ACPI{
         return (sum == 0);
     }
 
-    // Initialize ACPICA core; RSDP physical pointer is obtained via AcpiOsGetRootPointer.
-    // Parameter removed (was unused) for cleanliness.
-    static void InitializeACPICA(){
-        // Basic ACPICA early init
-        if (ACPI_FAILURE(AcpiInitializeSubsystem())) {
-            Printk::Write(Printk::Level::LOG_ERR, " ACPICA: InitializeSubsystem failed\n");
-            return;
-        }
-        // Install all tables from RSDP (physical addresses)
-        if (ACPI_FAILURE(AcpiInitializeTables(NULL, 16, FALSE))) {
-            Printk::Write(Printk::Level::LOG_ERR, " ACPICA: InitializeTables failed\n");
-            return;
-        }
-        if (ACPI_FAILURE(AcpiLoadTables())) {
-            Printk::Write(Printk::Level::LOG_ERR, " ACPICA: LoadTables failed\n");
-            return;
-        }
-        if (ACPI_FAILURE(AcpiEnableSubsystem(ACPI_NO_HANDLER_INIT | ACPI_NO_EVENT_INIT))) {
-            Printk::Write(Printk::Level::LOG_ERR, " ACPICA: EnableSubsystem failed\n");
-            return;
-        }
-        if (ACPI_FAILURE(AcpiInitializeObjects(ACPI_NO_HANDLER_INIT | ACPI_NO_EVENT_INIT))) {
-            Printk::Write(Printk::Level::LOG_ERR, " ACPICA: InitializeObjects failed\n");
-            return;
-        }
-        Printk::Write(Printk::Level::LOG_INFO, " ACPICA initialized (RSDT/XSDT loaded)\n");
+    // Minimal table loader helpers (no ACPICA)
+    static const ACPI::SDTHeader* FindTableBySig(const char sig[4]) {
+        const BootInfo* bi = BootInfoGet();
+        if (!bi || !bi->has_acpi || !bi->acpi.rsdp) return nullptr;
+        const ACPI::RsdpDescriptor* rsdp = nullptr;
+        UPTR ptr = (UPTR)bi->acpi.rsdp;
+        if (ptr >= (UPTR)HHDM_BASE) rsdp = (const ACPI::RsdpDescriptor*)ptr; else rsdp = (const ACPI::RsdpDescriptor*)HHDM_PhysToVirt(ptr);
 
-        // Minimal runtime sanity: fetch FADT via ACPICA and log a few fields
-        ACPI_TABLE_FADT *fadt = nullptr;
-    // Cast required: ACPICA's ACPI_STRING is (char*), macro expands to string literal (const char*)
-    ACPI_STATUS st = AcpiGetTable((ACPI_STRING)ACPI_SIG_FADT, 0, (ACPI_TABLE_HEADER **)&fadt);
-        if (ACPI_SUCCESS(st) && fadt) {
-            Printk::Write(Printk::Level::LOG_INFO, " FADT rev=%u, SMI_CMD=0x%08x, ACPI_EN=0x%02x, PM1a=0x%08x\n",
-                (unsigned)fadt->Header.Revision,
-                (unsigned)fadt->SmiCommand, (unsigned)fadt->AcpiEnable,
-                (unsigned)fadt->Pm1aControlBlock);
+        if (bi->acpi.is_xsdp) {
+            const ACPI::SDTHeader* xsdt = (const ACPI::SDTHeader*)HHDM_PhysToVirt((UPTR)rsdp->XsdtAddress);
+            if (!xsdt) return nullptr;
+            SIZE_T entries = (xsdt->Length - sizeof(ACPI::SDTHeader)) / 8;
+            const uint64_t* ent = (const uint64_t*)((const uint8_t*)xsdt + sizeof(ACPI::SDTHeader));
+            for (SIZE_T i = 0; i < entries; ++i) {
+                const ACPI::SDTHeader* h = (const ACPI::SDTHeader*)HHDM_PhysToVirt((UPTR)ent[i]);
+                if (!h) continue;
+                if (h->Signature[0] == sig[0] && h->Signature[1] == sig[1] && h->Signature[2] == sig[2] && h->Signature[3] == sig[3]) return h;
+            }
         } else {
-            Printk::Write(Printk::Level::LOG_WARNING, " ACPICA: FADT not available via AcpiGetTable (status=0x%x)\n", (unsigned)st);
+            const ACPI::SDTHeader* rsdt = (const ACPI::SDTHeader*)HHDM_PhysToVirt((UPTR)rsdp->RsdtAddress);
+            if (!rsdt) return nullptr;
+            SIZE_T entries = (rsdt->Length - sizeof(ACPI::SDTHeader)) / 4;
+            const uint32_t* ent = (const uint32_t*)((const uint8_t*)rsdt + sizeof(ACPI::SDTHeader));
+            for (SIZE_T i = 0; i < entries; ++i) {
+                const ACPI::SDTHeader* h = (const ACPI::SDTHeader*)HHDM_PhysToVirt((UPTR)ent[i]);
+                if (!h) continue;
+                if (h->Signature[0] == sig[0] && h->Signature[1] == sig[1] && h->Signature[2] == sig[2] && h->Signature[3] == sig[3]) return h;
+            }
         }
+        return nullptr;
     }
 
     VOID Initialize(){
@@ -167,92 +156,17 @@ namespace ACPI{
             g_IsXSDT = FALSE;
         }
 
-    /* Initialize ACPICA core and let it load tables. */
-    InitializeACPICA();
-
-    /* Prefer ACPICA to fetch core tables; fall back to legacy parser only if needed */
+    // No ACPICA: scan tables directly via Root SDT and call our parsers
     unsigned found = 0;
-    {
-        ACPI_TABLE_HEADER *hdr = nullptr;
-        if (ACPI_SUCCESS(AcpiGetTable((ACPI_STRING)ACPI_SIG_FADT, 0, &hdr)) && hdr) {
-            g_FADT = (const void*)hdr;
-            Printk::Write(Printk::Level::LOG_INFO, " Using ACPICA FADT @ %p\n", g_FADT);
-            ParseFADT();
-            found++;
-            // Optional: enable only if not already enabled; legacy Enable() checks bit
-            Enable();
-        }
-    }
-    {
-        // MADT signature historically is "APIC"
-        ACPI_TABLE_HEADER *hdr = nullptr;
-        if (ACPI_SUCCESS(AcpiGetTable((ACPI_STRING)"APIC", 0, &hdr)) && hdr) {
-            g_MADT = (const void*)hdr;
-            Printk::Write(Printk::Level::LOG_INFO, " Using ACPICA MADT/APIC @ %p\n", g_MADT);
-            ParseMADT();
-            found++;
-        }
-    }
-    {
-        ACPI_TABLE_HEADER *hdr = nullptr;
-        if (ACPI_SUCCESS(AcpiGetTable((ACPI_STRING)"HPET", 0, &hdr)) && hdr) {
-            g_HPET = (const void*)hdr;
-            Printk::Write(Printk::Level::LOG_INFO, " Using ACPICA HPET @ %p\n", g_HPET);
-            ParseHPET();
-            found++;
-        }
-    }
-
-    // Optional tables: MCFG (PCIe ECAM), WAET, BGRT — parse/log if present
-    {
-        ACPI_TABLE_MCFG *mcfg = nullptr;
-        if (ACPI_SUCCESS(AcpiGetTable((ACPI_STRING)ACPI_SIG_MCFG, 0, (ACPI_TABLE_HEADER **)&mcfg)) && mcfg) {
-            // Compute number of allocation entries
-            U32 count = 0;
-            if (mcfg->Header.Length > sizeof(ACPI_TABLE_MCFG)) {
-                count = (UINT32)((mcfg->Header.Length - sizeof(ACPI_TABLE_MCFG)) / sizeof(ACPI_MCFG_ALLOCATION));
-            }
-            Printk::Write(Printk::Level::LOG_INFO, " Using ACPICA MCFG @ %p, %u segment allocation(s)\n", mcfg, (unsigned)count);
-            ACPI_MCFG_ALLOCATION *alloc = (ACPI_MCFG_ALLOCATION *)((UINT8*)mcfg + sizeof(ACPI_TABLE_MCFG));
-            for (U32 i = 0; i < count; ++i) {
-                const ACPI_MCFG_ALLOCATION &a = alloc[i];
-                Printk::Write(Printk::Level::LOG_INFO,
-                    "  MCFG[%u]: seg=%u bus=[%u..%u] ECAM=0x%016lx\n",
-                    (unsigned)i,
-                    (unsigned)a.PciSegment,
-                    (unsigned)a.StartBusNumber,
-                    (unsigned)a.EndBusNumber,
-                    (unsigned long)a.Address);
-            }
-        } else {
-            // Not all platforms provide MCFG; this is optional.
-        }
-    }
-    {
-        ACPI_TABLE_WAET *waet = nullptr;
-        if (ACPI_SUCCESS(AcpiGetTable((ACPI_STRING)ACPI_SIG_WAET, 0, (ACPI_TABLE_HEADER **)&waet)) && waet) {
-            Printk::Write(Printk::Level::LOG_INFO, " Using ACPICA WAET @ %p Flags=0x%08x\n",
-                waet, (unsigned)waet->Flags);
-        }
-    }
-    {
-        ACPI_TABLE_BGRT *bgrt = nullptr;
-        if (ACPI_SUCCESS(AcpiGetTable((ACPI_STRING)ACPI_SIG_BGRT, 0, (ACPI_TABLE_HEADER **)&bgrt)) && bgrt) {
-            Printk::Write(Printk::Level::LOG_INFO,
-                " Using ACPICA BGRT @ %p ver=%u status=0x%02x type=%u addr=%p off=(%u,%u)\n",
-                bgrt,
-                (unsigned)bgrt->Version,
-                (unsigned)bgrt->Status,
-                (unsigned)bgrt->ImageType,
-                (void*)(uintptr_t)bgrt->ImageAddress,
-                (unsigned)bgrt->ImageOffsetX,
-                (unsigned)bgrt->ImageOffsetY);
-            // Attempt to draw the firmware boot logo via BGRT if available.
-            ACPI::BGRT::ShowLogoOnce();
-        }
-    }
+    const ACPI::SDTHeader* t = nullptr;
+    t = FindTableBySig("FACP"); if (!t) t = FindTableBySig("FADT");
+    if (t) { g_FADT = t; Printk::Write(Printk::Level::LOG_INFO, " Found FADT at %p\n", g_FADT); ParseFADT(); found++; Enable(); }
+    t = FindTableBySig("APIC"); if (!t) t = FindTableBySig("MADT");
+    if (t) { g_MADT = t; Printk::Write(Printk::Level::LOG_INFO, " Found MADT at %p\n", g_MADT); ParseMADT(); found++; }
+    t = FindTableBySig("HPET"); if (t) { g_HPET = t; Printk::Write(Printk::Level::LOG_INFO, " Found HPET at %p\n", g_HPET); ParseHPET(); found++; }
+    t = FindTableBySig("BGRT"); if (t) { Printk::Write(Printk::Level::LOG_INFO, " Found BGRT at %p\n", t); ACPI::BGRT::ShowLogoOnce(); }
     if (found == 0) {
-        // Fallback: legacy walk (should be rare)
+        // fallback: legacy ParseROOTSDT which walks Root SDT entries
         ParseROOTSDT();
     }
 

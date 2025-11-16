@@ -7,7 +7,13 @@ CXX := x86_64-elf-g++
 CC  := x86_64-elf-gcc
 LD := x86_64-elf-ld
 
+BUILD_ACPICA := 0
+
+ifeq ($(BUILD_ACPICA),1)
 INCLUDE_ACPICA := -Ifirmware/acpica/source/include -Ifirmware/acpica/source/components
+else
+INCLUDE_ACPICA :=
+endif
 
 CXXFLAGS := -g -std=gnu++20 -ffreestanding -fno-exceptions -fno-rtti -m64 -O2 \
  -Wall -Wextra -Wpedantic -Werror \
@@ -46,12 +52,17 @@ CXX = /home/rasya/cross/bin/x86_64-elf-g++
 
 # Temukan semua file sumber (exclude build directory to avoid generated files)
 C_SRCS := $(shell find . -path ./$(BUILD_DIR) -prune -o -type f -name "*.c" -print | \
-          grep -v "firmware/acpica/source/")
+		  grep -v "firmware/acpica/source/")
+
+ifeq ($(BUILD_ACPICA),1)
 ACPICA_SRCS := \
-    $(shell find firmware/acpica/source/components -type f -name "*.c" \
-        | grep -v "/debugger/" \
-        | grep -v "/disassembler/" \
-        | grep -v "nsdumpdv.c")
+	$(shell find firmware/acpica/source/components -type f -name "*.c" \
+		| grep -v "/debugger/" \
+		| grep -v "/disassembler/" \
+		| grep -v "nsdumpdv.c")
+else
+ACPICA_SRCS :=
+endif
 
 CPP_SRCS := $(shell find . -path ./$(BUILD_DIR) -prune -o -type f -name "*.cpp" -print)
 # All ASM sources except the AP trampoline which is a flat binary

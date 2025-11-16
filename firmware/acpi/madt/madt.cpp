@@ -80,6 +80,27 @@ namespace ACPI {
         VOID InitializeLAPIC(){
             if(g_LocalApicAddress == 0) return;
 
+            constexpr U64 APIC_MSR_ENABLE_BIT = (1ULL << 11);
+            constexpr U64 APIC_MSR_BASE_MASK = 0x00000000FFFFF000ULL;
+
+            U64 apicMsr = Arch::MSR::Read(Arch::MSR::IA32_APIC_BASE);
+            U64 msrPhysBase = apicMsr & APIC_MSR_BASE_MASK;
+            U64 desiredPhysBase = (U64)(g_LocalApicAddress & ~(PAGE_SIZE - 1));
+
+            if (msrPhysBase != desiredPhysBase) {
+                apicMsr &= ~APIC_MSR_BASE_MASK;
+                apicMsr |= desiredPhysBase;
+                Printk::Write(Printk::Level::LOG_INFO, " Adjusting IA32_APIC_BASE from phys 0x%p to 0x%p\n",
+                    (void*)(UPTR)msrPhysBase, (void*)(UPTR)desiredPhysBase);
+            }
+
+            if ((apicMsr & APIC_MSR_ENABLE_BIT) == 0) {
+                apicMsr |= APIC_MSR_ENABLE_BIT;
+                Printk::Write(Printk::Level::LOG_INFO, " Enabling Local APIC via IA32_APIC_BASE MSR\n");
+            }
+
+            Arch::MSR::Write(Arch::MSR::IA32_APIC_BASE, apicMsr);
+
             UPTR LapicPhysPage = g_LocalApicAddress & ~(PAGE_SIZE - 1);
             g_LapicVirtualBase = (volatile U8*)PageAlloc::VirtualAllocPages(1);
             if(!g_LapicVirtualBase){
@@ -93,6 +114,9 @@ namespace ACPI {
                 g_LapicVirtualBase = nullptr;
                 return;
             }
+
+            // Ensure task priority is clear so the LAPIC will accept all priorities
+            LapicWrite(0x080, 0);
 
             U32 SivVal = LapicRead(LAPIC_REG_SIVR);
             SivVal |= APIC_SOFTWARE_ENABLE;
@@ -174,10 +198,15 @@ namespace ACPI {
             // after legacy PIC is masked. Many systems route COM1 at GSI4.
             IOApicRedirect(4, 0x24, IOAPIC_FLAGS_DEFAULT);
 
-            // PENTING: Mask/tutup IRQ 0 (PIT Timer) dan IRQ 2 (PIC Cascade)
-            // karena kita tidak membutuhkannya lagi.
-            IOApicRedirect(0, 0x20, IOAPIC_FLAG_MASKED); // Mask GSI 0 (PIT)
-            IOApicRedirect(2, 0x22, IOAPIC_FLAG_MASKED); // Mask GSI 2 (Cascade)
+            // Ensure PIT (GSI 0) is redirected through the IOAPIC to the
+            // legacy vector 0x20 so PIT ticks continue after the legacy
+            // PIC is disabled later by the kernel. Without this redirection
+            // PIT::ticks will stop once the PIC is disabled and any code
+            // that depends on PIT ticks (Arch::Time::Sleep) will hang.
+            IOApicRedirect(0, 0x20, IOAPIC_FLAGS_DEFAULT); // GSI0 -> IRQ0 (vector 0x20)
+
+            // Leave the cascade (GSI 2) mapping alone — the PIC disable
+            // path in the kernel will mask the 8259 appropriately.
         }
     }
 }

@@ -6,7 +6,6 @@
 // Include minimal ACPICA public header. Define environment hints before include.
 extern "C" {
     #include "../acpica/source/include/acpi.h"
-    #include "../acpica/source/include/acpixf.h"
 }
 
 #include <rosval.h>
