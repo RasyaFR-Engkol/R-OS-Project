@@ -158,6 +158,10 @@ namespace Paging{
 
         // Relocate GDT into high memory before disabling the low-half
         RelocateGDTToHigh();
+    // Install user-space (ring3) code/data selectors into the GDT so
+    // processes can use user-mode selectors when we start creating
+    // user contexts.
+    AddUserGDTEntries();
 
         // Switch to a fresh kernel stack in HHDM (8 pages = 32 KiB) and then
         // continue initialization on the new stack in AfterStackSwitch().

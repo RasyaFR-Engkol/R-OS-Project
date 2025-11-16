@@ -18,6 +18,8 @@ namespace {
     constexpr SIZE_T DMA_POOL_PAGES_DEFAULT = 4096; // 16 MiB
     // Upper cap for DMA pool (pages) to avoid starving system; default 256 MiB
     constexpr SIZE_T DMA_POOL_PAGES_MAX = 65536; // 256 MiB
+    constexpr SIZE_T DMA_GUARD_PAGES_DEFAULT = 1; // add a guard page per allocation by default
+    constexpr U8 DMA_GUARD_PATTERN = 0xA5;
 
     // Pool state
     static UPTR   g_poolPhys = 0;
@@ -32,6 +34,27 @@ namespace {
     inline void bmp_set(SIZE_T idx)   { g_bitmap[idx >> 3] |=  (U8)(1u << (idx & 7)); }
     inline void bmp_clear(SIZE_T idx) { g_bitmap[idx >> 3] &= (U8)~(1u << (idx & 7)); }
     inline bool bmp_test(SIZE_T idx)  { return (g_bitmap[idx >> 3] >> (idx & 7)) & 1u; }
+
+    static inline SIZE_T guard_bytes(const PageAlloc::DMAAlloc::DMABuffer* buf) {
+        return (buf && buf->GuardPages) ? buf->GuardPages * PAGE_SIZE : 0;
+    }
+
+    static inline void fill_guard_region(PageAlloc::DMAAlloc::DMABuffer* buf) {
+        SIZE_T bytes = guard_bytes(buf);
+        if (!bytes) return;
+        void* guardPtr = (void*)(uintptr_t)(buf->VirtAddr + buf->Pages * PAGE_SIZE);
+        String::Memset(guardPtr, DMA_GUARD_PATTERN, (unsigned long long)bytes);
+    }
+
+    static inline bool guard_region_intact(const PageAlloc::DMAAlloc::DMABuffer* buf) {
+        SIZE_T bytes = guard_bytes(buf);
+        if (!bytes) return true;
+        const U8* guardPtr = (const U8*)(uintptr_t)(buf->VirtAddr + buf->Pages * PAGE_SIZE);
+        for (SIZE_T i = 0; i < bytes; ++i) {
+            if (guardPtr[i] != DMA_GUARD_PATTERN) return false;
+        }
+        return true;
+    }
 }
 
 namespace PageAlloc {
@@ -140,136 +163,119 @@ namespace DMAAlloc {
         if (count == 0) return nullptr;
         ++g_stats.alloc_calls;
 
-        // If pool hasn't been initialized (possible if called early or init failed),
-        // attempt to initialize lazily and continue. This must happen before
-        // checking `count > g_poolPages` so callers can trigger initialization.
+        // Lazily initialize the pool if needed.
         if (g_poolPages == 0 || !g_bitmap) {
             Serial::Write("[DMA] AllocateDMAPages: pool not initialized, attempting InitializeDMA()\n");
             PageAlloc::DMAAlloc::InitializeDMA();
-            if (g_poolPages == 0 || !g_bitmap) {
-                Serial::Printf("[DMA] AllocateDMAPages: pool still not ready (pages=%u) - attempting fallback\n", (unsigned)g_poolPages);
-                // Fallback: try to allocate dedicated physical+virtual pages and map them.
-                UPTR phys = PageAlloc::PhysicalAllocPages(count);
-                if (!phys) {
-                    Serial::Printf("[DMA] Fallback PhysicalAllocPages failed for %u pages\n", (unsigned)count);
-                    return nullptr;
-                }
-                void* v = PageAlloc::VirtualAllocPages(count);
-                if (!v) {
-                    Serial::Printf("[DMA] Fallback VirtualAllocPages failed for %u pages\n", (unsigned)count);
-                    PageAlloc::PhysicalFreePages(phys, count);
-                    return nullptr;
-                }
-                // Map the fallback range into kernel PML4
-                if (!PageAlloc::MapPages(KernelPML4, phys, (UPTR)v, count, PAGE_PRESENT | PAGE_RW)) {
-                    Serial::Printf("[DMA] Fallback MapPages failed for phys=%p virt=%p pages=%u\n", (void*)(uintptr_t)phys, v, (unsigned)count);
-                    PageAlloc::VirtualFreePages(v, count);
-                    PageAlloc::PhysicalFreePages(phys, count);
-                    return nullptr;
-                }
-
-                DMABuffer* fb = (DMABuffer*)kmalloc(sizeof(DMABuffer));
-                if (!fb) {
-                    Serial::Printf("[DMA] Fallback kmalloc DMABuffer metadata failed\n");
-                    PageAlloc::VirtualFreePages(v, count);
-                    PageAlloc::PhysicalFreePages(phys, count);
-                    return nullptr;
-                }
-                fb->FirstIndex = (SIZE_T)-1; // sentinel => fallback allocation
-                fb->Pages = count;
-                fb->Size = count * PAGE_SIZE;
-                fb->PhysAddr = phys;
-                fb->VirtAddr = (UPTR)v;
-                // Zero and fence
-                String::Memset((void*)fb->VirtAddr, 0, (unsigned long long)fb->Size);
-                mfence();
-                ++g_stats.fallback_allocs;
-                return fb;
-            }
         }
 
-        if (count > g_poolPages) { ++g_stats.failed_allocs; return nullptr; }
+        const SIZE_T guardOptions[2] = { DMA_GUARD_PAGES_DEFAULT, 0 };
 
-        // We must disable interrupts while scanning and marking the bitmap so an
-        // IRQ handler cannot concurrently allocate/free from the same bitmap and
-        // cause races/corruption. Keep the critical section as short as possible
-        // (we release before doing the possibly-large memset).
-        LOCKRFLAGS lock = Arch::SaveAndDisballeInterrupts();
+        // Primary attempt: try to satisfy from the pooled bitmap allocator.
+        if (g_poolPages != 0 && g_bitmap) {
+            for (SIZE_T attempt = 0; attempt < 2; ++attempt) {
+                SIZE_T guardPages = guardOptions[attempt];
+                if (guardPages && count > (((SIZE_T)-1) - guardPages)) guardPages = 0;
+                SIZE_T totalNeeded = count + guardPages;
+                if (totalNeeded == 0) continue;
+                if (totalNeeded > g_poolPages) continue;
 
-        SIZE_T run = 0;
-        SIZE_T start = 0;
-        for (SIZE_T i = 0; i < g_poolPages; ++i) {
-            if (!bmp_test(i)) {
-                if (run == 0) start = i;
-                ++run;
-                if (run == count) {
-                    // mark allocated
-                    for (SIZE_T j = 0; j < count; ++j) bmp_set(start + j);
+                LOCKRFLAGS lock = Arch::SaveAndDisballeInterrupts();
+                SIZE_T run = 0;
+                SIZE_T start = 0;
+                for (SIZE_T i = 0; i < g_poolPages; ++i) {
+                    if (!bmp_test(i)) {
+                        if (run == 0) start = i;
+                        ++run;
+                        if (run == totalNeeded) {
+                            for (SIZE_T j = 0; j < totalNeeded; ++j) bmp_set(start + j);
 
-                    // Allocate metadata while still in critical section to avoid
-                    // races where an IRQ path might observe inconsistent bitmap.
-                    DMABuffer* b = (DMABuffer*)kmalloc(sizeof(DMABuffer));
-                    if (!b) {
-                        // rollback
-                        for (SIZE_T j = 0; j < count; ++j) bmp_clear(start + j);
-                        Arch::RestoreInterrupts(lock);
-                        return nullptr;
+                            DMABuffer* b = (DMABuffer*)kmalloc(sizeof(DMABuffer));
+                            if (!b) {
+                                for (SIZE_T j = 0; j < totalNeeded; ++j) bmp_clear(start + j);
+                                Arch::RestoreInterrupts(lock);
+                                return nullptr;
+                            }
+
+                            b->FirstIndex = start;
+                            b->Pages = count;
+                            b->GuardPages = guardPages;
+                            b->TotalPages = totalNeeded;
+                            b->Size = count * PAGE_SIZE;
+                            b->RequestedBytes = b->Size;
+                            b->PhysAddr = g_poolPhys + start * PAGE_SIZE;
+                            b->VirtAddr = g_poolVirt + start * PAGE_SIZE;
+
+                            Arch::RestoreInterrupts(lock);
+
+                            String::Memset((void*)b->VirtAddr, 0, (unsigned long long)b->Size);
+                            fill_guard_region(b);
+                            mfence();
+                            return b;
+                        }
+                    } else {
+                        run = 0;
                     }
-                    b->FirstIndex = start;
-                    b->Pages = count;
-                    b->Size = count * PAGE_SIZE;
-                    b->PhysAddr = g_poolPhys + start * PAGE_SIZE;
-                    b->VirtAddr = g_poolVirt + start * PAGE_SIZE;
-
-                    // Release interrupts before performing the potentially large
-                    // zeroing of the buffer to avoid long IRQ-disabled windows.
-                    Arch::RestoreInterrupts(lock);
-
-                    // Zero the allocated slice and fence
-                    String::Memset((void*)b->VirtAddr, 0, (unsigned long long)b->Size);
-                    mfence();
-                    return b;
                 }
-            } else {
-                run = 0;
+                Arch::RestoreInterrupts(lock);
             }
         }
 
-        Arch::RestoreInterrupts(lock);
-        // As a refinement, attempt a dedicated fallback allocation even when the pool
-        // is initialized but fragmented or simply lacks a large enough contiguous run.
-        {
-            UPTR phys = PageAlloc::PhysicalAllocPages(count);
-            if (phys) {
-                void* v = PageAlloc::VirtualAllocPages(count);
-                if (v && PageAlloc::MapPages(KernelPML4, phys, (UPTR)v, count, PAGE_PRESENT | PAGE_RW)) {
-                    DMABuffer* fb = (DMABuffer*)kmalloc(sizeof(DMABuffer));
-                    if (fb) {
-                        fb->FirstIndex = (SIZE_T)-1;
-                        fb->Pages = count;
-                        fb->Size = count * PAGE_SIZE;
-                        fb->PhysAddr = phys;
-                        fb->VirtAddr = (UPTR)v;
-                        String::Memset((void*)fb->VirtAddr, 0, (unsigned long long)fb->Size);
-                        mfence();
-                        ++g_stats.fallback_allocs;
-                        return fb;
-                    }
-                    // metadata alloc failed; tear down mapping
-                    PageAlloc::VirtualFreePages(v, count);
-                }
-                // mapping failed; free phys
-                PageAlloc::PhysicalFreePages(phys, count);
+        // Fallback: allocate dedicated physical/virtual pages outside the pool.
+        for (SIZE_T attempt = 0; attempt < 2; ++attempt) {
+            SIZE_T guardPages = guardOptions[attempt];
+            if (guardPages && count > (((SIZE_T)-1) - guardPages)) guardPages = 0;
+            SIZE_T totalPages = count + guardPages;
+            if (totalPages == 0) continue;
+
+            UPTR phys = PageAlloc::PhysicalAllocPages(totalPages);
+            if (!phys) continue;
+
+            void* v = PageAlloc::VirtualAllocPages(totalPages);
+            if (!v) {
+                PageAlloc::PhysicalFreePages(phys, totalPages);
+                continue;
             }
+
+            if (!PageAlloc::MapPages(KernelPML4, phys, (UPTR)v, totalPages, PAGE_PRESENT | PAGE_RW)) {
+                PageAlloc::VirtualFreePages(v, totalPages);
+                PageAlloc::PhysicalFreePages(phys, totalPages);
+                continue;
+            }
+
+            DMABuffer* fb = (DMABuffer*)kmalloc(sizeof(DMABuffer));
+            if (!fb) {
+                PageAlloc::VirtualFreePages(v, totalPages);
+                PageAlloc::PhysicalFreePages(phys, totalPages);
+                continue;
+            }
+
+            fb->FirstIndex = (SIZE_T)-1;
+            fb->Pages = count;
+            fb->GuardPages = guardPages;
+            fb->TotalPages = totalPages;
+            fb->Size = count * PAGE_SIZE;
+            fb->RequestedBytes = fb->Size;
+            fb->PhysAddr = phys;
+            fb->VirtAddr = (UPTR)v;
+
+            String::Memset((void*)fb->VirtAddr, 0, (unsigned long long)fb->Size);
+            fill_guard_region(fb);
+            mfence();
+            ++g_stats.fallback_allocs;
+            return fb;
         }
+
         ++g_stats.failed_allocs;
-        return nullptr; // no space
+        return nullptr;
     }
 
     DMABuffer *AllocateDMABytes(SIZE_T bytes) {
         if (bytes == 0) return nullptr;
         SIZE_T pages = (bytes + PAGE_SIZE - 1) / PAGE_SIZE;
-        return AllocateDMAPages(pages);
+        DMABuffer* buf = AllocateDMAPages(pages);
+        if (buf) buf->RequestedBytes = bytes;
+        return buf;
     }
 
     void FreeDMAPages(UPTR addr, SIZE_T count) {
@@ -312,14 +318,49 @@ namespace DMAAlloc {
     void FreeDMABuffer(DMABuffer* b) {
         if (!b) return;
         UPTR addr = b->VirtAddr;
-        SIZE_T count = b->Pages;
-        // If this buffer came from fallback allocation (not the pool), free
-        // the mapped pages and metadata.
+        const SIZE_T usablePages = b->Pages;
+        const SIZE_T guardPages = b->GuardPages;
+        const SIZE_T totalPages = usablePages + guardPages;
+        const SIZE_T usableBytes = usablePages * PAGE_SIZE;
+        const SIZE_T guardBytes = guardPages * PAGE_SIZE;
+
+        //Serial::Printf("[DMA] Free meta=%p phys=%p virt=%p pages=%llu guard=%llu total=%llu req=%llu first=%lld\n",
+          //  (void*)b,
+          //  (void*)(uintptr_t)b->PhysAddr,
+          //  (void*)(uintptr_t)addr,
+          //  (unsigned long long)usablePages,
+          //  (unsigned long long)guardPages,
+           // (unsigned long long)totalPages,
+          //  (unsigned long long)b->RequestedBytes,
+          //  (long long)b->FirstIndex);
+
+        if (!guard_region_intact(b)) {
+            Printk::Write(Printk::Level::LOG_EMERG,
+                "[DMA] Guard corruption detected virt=%p phys=%p requested=%llu size=%llu guardPages=%llu\n",
+                (void*)(uintptr_t)addr,
+                (void*)(uintptr_t)b->PhysAddr,
+                (unsigned long long)b->RequestedBytes,
+                (unsigned long long)b->Size,
+                (unsigned long long)guardPages);
+            Serial::Printf("[DMA] Guard pattern corrupted for buffer %p (phys=%p, requested=%llu, guard=%llu pages)\n",
+                (void*)(uintptr_t)addr,
+                (void*)(uintptr_t)b->PhysAddr,
+                (unsigned long long)b->RequestedBytes,
+                (unsigned long long)guardPages);
+        }
+
         if (b->FirstIndex == (SIZE_T)-1) {
-            if (count) {
-                // Unmap/free the virtual and physical pages allocated in fallback
-                PageAlloc::VirtualFreePages((void*)b->VirtAddr, count);
-                PageAlloc::PhysicalFreePages(b->PhysAddr, count);
+            if (totalPages) {
+                if (usableBytes) {
+                    String::Memset((void*)addr, 0, (unsigned long long)usableBytes);
+                }
+                if (guardBytes) {
+                    void* guardPtr = (void*)(uintptr_t)(addr + usableBytes);
+                    String::Memset(guardPtr, 0, (unsigned long long)guardBytes);
+                }
+                mfence();
+                PageAlloc::VirtualFreePages((void*)addr, totalPages);
+                PageAlloc::PhysicalFreePages(b->PhysAddr, totalPages);
             }
             kfree(b);
             ++g_stats.freed_buffers;
@@ -327,13 +368,11 @@ namespace DMAAlloc {
         }
 
         if (g_poolPages == 0 || !g_bitmap) {
-            // Nothing to do for metadata (pool absent)
             kfree(b);
             return;
         }
 
-        if (count == 0) { kfree(b); return; }
-
+        if (totalPages == 0) { kfree(b); return; }
         if (addr < g_poolVirt) { kfree(b); return; }
 
         UPTR end = g_poolVirt + g_poolPages * PAGE_SIZE;
@@ -341,15 +380,20 @@ namespace DMAAlloc {
         if ((addr - g_poolVirt) % PAGE_SIZE != 0) { kfree(b); return; }
 
         SIZE_T idx = (SIZE_T)((addr - g_poolVirt) / PAGE_SIZE);
-        if (idx + count > g_poolPages) { kfree(b); return; }
+        if (idx + totalPages > g_poolPages) { kfree(b); return; }
 
         LOCKRFLAGS lock = Arch::SaveAndDisballeInterrupts();
 
-        // Zero memory and fence before clearing ownership bits
-        String::Memset((void*)addr, 0, (unsigned long long)count * PAGE_SIZE);
+        if (usableBytes) {
+            String::Memset((void*)addr, 0, (unsigned long long)usableBytes);
+        }
+        if (guardBytes) {
+            void* guardPtr = (void*)(uintptr_t)(addr + usableBytes);
+            String::Memset(guardPtr, 0, (unsigned long long)guardBytes);
+        }
         mfence();
 
-        for (SIZE_T i = 0; i < count; ++i) {
+        for (SIZE_T i = 0; i < totalPages; ++i) {
             if (!bmp_test(idx + i)) {
                 Serial::Printf("[DMA] Warning: freeing page %u which is not marked allocated\n", (unsigned)(idx + i));
             }
@@ -359,7 +403,6 @@ namespace DMAAlloc {
 
         Arch::RestoreInterrupts(lock);
 
-        // Free the metadata allocated at allocation time
         kfree(b);
         ++g_stats.freed_buffers;
     }

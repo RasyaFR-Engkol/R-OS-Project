@@ -42,6 +42,10 @@ namespace Paging {
 
     // New helpers
     void RelocateGDTToHigh();
+    // Install user-mode (ring3) code/data segment descriptors into the
+    // current GDT. This adds selectors for user code and user data so the
+    // kernel can switch to userland segments when creating processes.
+    void AddUserGDTEntries();
     void SwitchToKernelStack(SIZE_T pages /* default 8 pages allocated */);
     void DisableLowHalf();
     void AuditMappings();
@@ -74,12 +78,21 @@ namespace PageAlloc{
     void PhysicalReserveLow(UPTR addr, SIZE_T count);
 
     BOOL MapPages(U64 *PML4Virt, UPTR PhysAddr, UPTR VirtAddr, SIZE_T Count, U64 Flags);
+    BOOL UnMapPages(U64 *PML4Virt, UPTR VirtAddr);
+    // Safe user/kernel copy helpers. UserPML4 is the PML4 virtual pointer
+    // for the user's address space (HHDM_PhysToVirt(cr3_phys)). These routines
+    // validate that pages are present and user-accessible before copying.
+    BOOL CopyFromUser(U64 *UserPML4, void* dstKernel, const void* srcUser, SIZE_T len);
+    BOOL CopyToUser(U64 *UserPML4, void* dstUser, const void* srcKernel, SIZE_T len);
     namespace DMAAlloc{
         struct DMABuffer{
             UPTR PhysAddr;
             UPTR VirtAddr;
             SIZE_T Size;
             SIZE_T Pages;
+            SIZE_T GuardPages;
+            SIZE_T TotalPages; // usable pages + guard pages (for pool bookkeeping)
+            SIZE_T RequestedBytes; // original caller size (bytes) for diagnostics
             SIZE_T FirstIndex;
         };
         void InitializeDMA();
