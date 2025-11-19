@@ -32,11 +32,11 @@ namespace Userland{
 
         Arch::MSR::Write(IA32_FMASK, 0x200);
 
-        Printk::Write(Printk::LOG_INFO, "Userland initialized. EFER=0x%llx LSTAR=0x%llx STAR=0x%llx FMASK=0x%llx\n",
-            Arch::MSR::Read(IA32_EFER),
-            Arch::MSR::Read(IA32_LSTAR),
-            Arch::MSR::Read(IA32_STAR),
-            Arch::MSR::Read(IA32_FMASK)
-        );
+        //Printk::Write(Printk::LOG_INFO, "Userland initialized. EFER=0x%llx LSTAR=0x%llx STAR=0x%llx FMASK=0x%llx\n",
+        //    Arch::MSR::Read(IA32_EFER),
+        //    Arch::MSR::Read(IA32_LSTAR),
+        //    Arch::MSR::Read(IA32_STAR),
+        //    Arch::MSR::Read(IA32_FMASK)
+        //);
     }
 }

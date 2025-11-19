@@ -23,7 +23,7 @@
 
 VOID Sys_Read(CpuContext_T *CPUContext){
     U64 fd = CPUContext->rdi;
-    U64 buf = CPUContext->rsi;
+    UNUSED__ U64 buf = CPUContext->rsi;
     U64 count = CPUContext->rdx;
 
     VOID *Buffer = Kmalloc::Alloc(count);
@@ -45,13 +45,13 @@ VOID Sys_Read(CpuContext_T *CPUContext){
     // Copy ke user buffer
     // Build user PML4 pointer from saved CR3 in the CPU context. CR3 is
     // expected to contain the physical CR3 for the user address space.
-    U64 *user_pml4 = HHDM_PhysToVirt((UPTR)CPUContext->cr3);
+    //U64 *user_pml4 = HHDM_PhysToVirt((UPTR)CPUContext->cr3);
 
-    if (!PageAlloc::CopyToUser(user_pml4, (void*)buf, Buffer, ReadBytes)) {
-        Kmalloc::Free(Buffer);
-        CPUContext->rax = (U64)(-1);
-        return;
-    }
+   // if (!PageAlloc::CopyToUser(user_pml4, (void*)buf, Buffer, ReadBytes)) {
+     //   Kmalloc::Free(Buffer);
+       // CPUContext->rax = (U64)(-1);
+       // return;
+    // }
 
     // Success: return number of bytes read
     Kmalloc::Free(Buffer);
@@ -60,7 +60,7 @@ VOID Sys_Read(CpuContext_T *CPUContext){
 
 VOID Sys_Write(CpuContext_T *CPUContext){
     U64 fd = CPUContext->rdi;
-    U64 buf = CPUContext->rsi;
+    UNUSED__ U64 buf = CPUContext->rsi;
     U64 count = CPUContext->rdx;
 
     VOID *Buffer = Kmalloc::Alloc(count);
@@ -72,13 +72,13 @@ VOID Sys_Write(CpuContext_T *CPUContext){
     // Copy dari user buffer
     // Build user PML4 pointer from saved CR3 in the CPU context. CR3 is
     // expected to contain the physical CR3 for the user address space.
-    U64 *user_pml4 = HHDM_PhysToVirt((UPTR)CPUContext->cr3);
+    //U64 *user_pml4 = HHDM_PhysToVirt((UPTR)CPUContext->cr3);
 
-    if (!PageAlloc::CopyFromUser(user_pml4, Buffer, (void*)buf, count)) {
-        Kmalloc::Free(Buffer);
-        CPUContext->rax = (U64)(-1);
-        return;
-    }
+    //if (!PageAlloc::CopyFromUser(user_pml4, Buffer, (void*)buf, count)) {
+   //     Kmalloc::Free(Buffer);
+    //    CPUContext->rax = (U64)(-1);
+    //    return;
+   // }
 
     // Asumsi udah kebuka oleh sys_open
     File *FileDecsriptor = (File*)fd;
@@ -96,20 +96,21 @@ VOID Sys_Write(CpuContext_T *CPUContext){
 }
 
 VOID Sys_Open(CpuContext_T *CPUContext){
-    U64 pathname_ptr =CPUContext->rdi;
+   UNUSED__  U64 pathname_ptr =CPUContext->rdi;
     UNUSED__ U64 flags = CPUContext->rsi;
     UNUSED__ U64 mode = CPUContext->rdx;
 
     // Copy pathname dari user
     CHAR8 PathName[256];
+    String::Memset(PathName, 0, sizeof(PathName));
     // Build user PML4 pointer from saved CR3 in the CPU context. CR3 is
     // expected to contain the physical CR3 for the user address space.
-    U64 *user_pml4 = HHDM_PhysToVirt((UPTR)CPUContext->cr3);
+   // U64 *user_pml4 = HHDM_PhysToVirt((UPTR)CPUContext->cr3);
 
-    if(!PageAlloc::CopyFromUser(user_pml4, PathName, (VOID*)pathname_ptr, sizeof(PathName))){
-        CPUContext->rax = (U64)(-1); // Error
-        return;
-    }
+  //  if(!PageAlloc::CopyFromUser(user_pml4, PathName, (VOID*)pathname_ptr, sizeof(PathName))){
+   //     CPUContext->rax = (U64)(-1); // Error
+   ////     return;
+  //  }
 
     File *OpenedFile = VFSManager::Open(PathName);
     if(!OpenedFile){
