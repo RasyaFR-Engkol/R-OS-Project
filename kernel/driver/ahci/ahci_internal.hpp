@@ -7,8 +7,9 @@ namespace AHCI {
     extern AHCIDriver g_ahci_controllers[MAX_AHCI_CONTROLLERS];
     extern int g_ahci_controller_count;
 
-    // ISR handler table (defined in interrupts.cpp)
-    extern void (*g_ahci_handlers[] )();
+    // ISR handler table (defined in interrupts.cpp). Handlers now accept
+    // a void* context parameter per the new interrupt API.
+    extern void (*g_ahci_handlers[] )(void *);
 
     // Forward declarations for functions split into separate translation units
     VOID HandleInterrupt(VAL32 Controller_ID);

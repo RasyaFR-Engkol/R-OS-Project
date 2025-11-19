@@ -36,7 +36,7 @@ namespace PCI{
     // Attempt to enable legacy INTx (PCI interrupt line) for the given device
     // and register the provided IRQ handler. Returns IRQ number on success,
     // 0 on failure.
-    U8 EnableLegacyINTxForDevice(U8 Bus, U8 Device, U8 Function, void (*irq_handler)()){
+    U8 EnableLegacyINTxForDevice(U8 Bus, U8 Device, U8 Function, void (*irq_handler)(void *context)){
         // Read status to check capabilities
         U32 reg4 = ReadDword(Bus, Device, Function, 0x04);
         U16 status = (U16)((reg4 >> 16) & 0xFFFF);

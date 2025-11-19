@@ -6,6 +6,11 @@
 #include <stddef.h>
 #include <stdbool.h>
 
+#ifndef __x86_64__
+  #error "Kernel ini cuma buat 64-bit, Bos! Ganti compiler gih."
+#endif
+
+
 /* Basic void / pointer (keep ZEROOBJ as requested) */
 typedef void    VOID;
 typedef void*   POINTER;
@@ -57,6 +62,12 @@ typedef bool     FLAGS;
 typedef VAL32 FLAGS32;
 typedef U32 UFLAGS32;
 
+// Constants 
+#define CONSTANTEXPR constexpr
+#define CONSTAT const
+#define VOLATILE volatile
+#define STATIC static
+#define INLINE inline
 
 /* Likely/unlikely helpers (and keep RosTrust/RosDoubt semantics) */
 #if defined(__GNUC__) || defined(__clang__)
@@ -111,5 +122,18 @@ typedef va_list VA_LIST;
 #define WEAK __attribute__((weak))
 #define ALIGNED(x) __attribute__((aligned(x)))
 
+// Error return value
+#define ROS_OK 0
+#define ROS_ERR 1
+#define ROS_INVALID 2
+#define ROS_NOMEM 3
+#define ROS_NOTFOUND 4
+#define ROS_BUSY 5
+#define ROS_UNSUPPORTED 6
+#define ROS_IOERROR 7
+#define ROS_PERM 8
+#define ROS_TIMEOUT 9
+#define ROS_EXIST 10
+#define ROS_INVALSTATE 11
 
 #endif

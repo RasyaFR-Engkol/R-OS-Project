@@ -60,5 +60,8 @@ namespace Arch {
         void Sleep(U64 ms) { SleepMs(ms); }
         void SleepSeconds(U64 s) { SleepMs(s * 1000); }
 
+        U64 GetTickCount(){ return PIT::ticks; }
+        U64 GetSecCount(){ return (PIT::ticks / 100); }
+
     }
 }

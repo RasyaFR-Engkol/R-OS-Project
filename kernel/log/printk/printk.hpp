@@ -1,8 +1,9 @@
 #pragma once
 
+#include "serial.hpp"
 #include "spinlock/simple.hpp"
 #include <rosval.h>
-
+#include "../../filesys/filesystem.hpp"
 /* Per-translation-unit module name provider.
    Users can place `ExportSymbol("NAME")` in a module (after includes)
    to override the default module name for `Printk::Write()` calls in that TU.
@@ -34,6 +35,9 @@ static inline const char* __printk_module_name_impl(void) { return "Module"; }
      static inline const char* __printk_module_name_impl(void) { return name; }
 
 namespace Printk {
+
+    extern File* s_SerialConsoleFile;
+
     typedef enum {
         LOG_EMERG = 1,
         LOG_ALERT = 2,
@@ -53,14 +57,11 @@ namespace Printk {
     BOOL InternalWrite(Level level, const char *module_name, const char *fmt, VA_LIST args);
     extern SPINLOCK_T PrintkLock;
     static inline BOOL Write(Level level, const char *fmt, ...) {
-        Arch::Spinlock::SpinLockAcquire(&PrintkLock);
-        VA_LIST Args;
-        VA_STRT(Args, fmt);
-        const char *module = __printk_module_name_impl();
-        BOOL ret = InternalWrite(level, module, fmt, Args);
-        VA_END(Args);
-        Arch::Spinlock::SpinLockRelease(&PrintkLock);
-        return ret;
+        VA_LIST args;
+        VA_STRT(args, fmt);
+        BOOL result = InternalWrite(level, __printk_module_name_impl(), fmt, args);
+        VA_END(args);
+        return result;
     }
 
     VOID Init();

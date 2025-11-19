@@ -12,7 +12,14 @@
 namespace PIT {
     U16 PITReload = 0;
     volatile U64 ticks = 0; 
-    static void PIT_OnIrq() {
+    static void PIT_OnIrq(void *context) {
+
+        // ini memang timer handler juga. tapi ga bakal
+        // pernah kepake untuk scheduler karena kita
+        // pake LAPIC timer sekarang.
+        // tapi biar konsisten, kita tambahin context
+        // supaya sesuai prototype handler IDT.
+        
         ticks = ticks + 1;
     }
 

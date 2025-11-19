@@ -18,6 +18,10 @@ namespace VFSManager{
     BOOL Mount(const char *path, Partition *Part);
 
     BOOL Mount(const char *path, const char *fsTypeName);
+    
+    // Mount an already-instantiated filesystem object at a path (useful for
+    // pseudo-filesystems like DevFS which are not backed by a Partition)
+    BOOL MountFS(const char *path, FileSystem* fs);
 
     // Resolve an absolute VFS path into (filesystem pointer, relative path inside FS)
     // Returns TRUE if a mounted FS matches a prefix of 'path'.

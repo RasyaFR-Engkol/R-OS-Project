@@ -25,7 +25,7 @@ CXXFLAGS := -g -std=gnu++20 -ffreestanding -fno-exceptions -fno-rtti -m64 -O2 \
  -fstack-protector-strong \
  -mno-mmx -mno-sse -mno-avx \
  -ffunction-sections -fdata-sections \
- -Wformat-security -fno-common \
+ -Wformat-security -fno-common -fno-strict-aliasing -mgeneral-regs-only \
  -D__ROS_KERNEL__ -DACPI_MACHINE_WIDTH=64 -DACPI_NO_ERROR_MESSAGES=1 -DACPI_SINGLE_THREADED \
  -DACPI_USE_DO_WHILE_0 -DACPI_DEBUG_OUTPUT=0 $(INCLUDE_ACPICA)
 

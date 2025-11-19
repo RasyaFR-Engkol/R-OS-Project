@@ -22,5 +22,8 @@ namespace Arch {
 
         // Whether LAPIC timing is active (LapicHz != 0)
         bool LapicTimingActive();
+
+        U64 GetTickCount();
+        U64 GetSecCount();
     }
 }

@@ -115,6 +115,12 @@ namespace DoCR3 {
     static inline void Load(uint64_t *cr3) {
         asm volatile("mov %0, %%cr3" :: "r"(cr3) : "memory");
     }
+
+    static inline uint64_t* GetCurrentCR3() {
+        uint64_t cr3;
+        asm volatile("mov %%cr3, %0" : "=r"(cr3));
+        return (uint64_t*)cr3;
+    }
 }
 
 static inline U64 *HHDM_PhysToVirt(UPTR Phys){

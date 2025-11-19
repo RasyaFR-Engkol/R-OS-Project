@@ -12,7 +12,7 @@ constexpr U32 MSI_MSG_ADDRESS = 0xFEE00000;
 
 namespace MSI{
 
-    U8 EnableMSI(U8 bus, U8 dev, U8 func, U8 msi_cap_offset, void (*handler)()){
+    U8 EnableMSI(U8 bus, U8 dev, U8 func, U8 msi_cap_offset, void (*handler)(void *context)){
         U8 Vector = IDT::AllocateVector();
         if(Vector == 0){
             Printk::Write(Printk::Level::LOG_ERR, " Failed to allocate interrupt vector for MSI\n");

@@ -7,6 +7,8 @@
 // Mirror logs to framebuffer console when available
 #include "../fbcon/fbcon.hpp"
 #include "framebuffer.hpp"
+#include <filesystem/filesystem.hpp>
+#include "../../filesys/vfs/vfs.hpp"
 
 // Module-name is provided per-translation-unit via `ExportSymbol()` macro in
 // the header (static inline helper). No global weak symbol is needed.
@@ -15,7 +17,7 @@ namespace Printk {
     using namespace String;
     using namespace Port;
 
-    static char LogBuffer[1024];
+    static char LogBuffer[4096];
     static size_t LogBufferIndex = 0;
     // Index of the earliest byte not yet flushed to serial
     static size_t LogBufferFlushIndex = 0;
@@ -23,10 +25,37 @@ namespace Printk {
     // Stores the last flushed message for use by emergency handler
     static CHAR8 LastFlushedMessage[sizeof(LogBuffer) + 1];
 
+    // Optional VFS file handles for consoles (if /dev/ttyfb0 and /dev/ttyS0 are available)
+    File* s_FrameConsoleFile = nullptr;
+    File* s_SerialConsoleFile = nullptr;
+
     VOID Init(){
         Arch::Spinlock::SpinlockInit(&PrintkLock);
         Serial::Init();
         FBConsole::Init();
+        // Try to open VFS console device nodes. If present, store handles
+        // so we can write via VFS instead of direct console APIs.
+        s_FrameConsoleFile = VFSManager::Open("/dev/ttyfb0");
+        s_SerialConsoleFile = VFSManager::Open("/dev/ttyS0");
+    }
+
+    // Helper: write the given NUL-terminated string to both serial and
+    // framebuffer consoles. Prefer writing via VFS file handles if they
+    // are available; otherwise fall back to direct Serial/FBConsole APIs.
+    static void WriteToConsolesViaVFSorFallback(const CHAR8* tmp) {
+        if (!tmp) return;
+        U32 len = (U32)Strlen(tmp);
+        if (s_SerialConsoleFile) {
+            VFSManager::Write(s_SerialConsoleFile, (U8*)tmp, len);
+        } else {
+            Serial::Write(tmp);
+        }
+
+        if (s_FrameConsoleFile) {
+            VFSManager::Write(s_FrameConsoleFile, (U8*)tmp, len);
+        } else if (FBConsole::IsReady()) {
+            FBConsole::WriteString(tmp);
+        }
     }
 
     // Append string to log buffer; flush to serial on '\n' or '\0'.
@@ -39,12 +68,16 @@ namespace Printk {
             if (LogBufferIndex >= sizeof(LogBuffer)) {
                 // If buffer is full, flush pending region to serial then wrap
                 if (LogBufferFlushIndex < LogBufferIndex) {
-                    size_t seglen = LogBufferIndex - LogBufferFlushIndex;
-                    CHAR8 tmp[sizeof(LogBuffer) + 1];
-                    for (size_t k = 0; k < seglen; ++k) tmp[k] = LogBuffer[LogBufferFlushIndex + k];
-                    tmp[seglen] = '\0';
-                    Serial::Write(tmp);
-                    if (FBConsole::IsReady()) FBConsole::WriteString(tmp);
+                    const size_t CHUNK = 256;
+                    CHAR8 tmp[CHUNK];
+                    size_t pos = LogBufferFlushIndex;
+                    while (pos < LogBufferIndex) {
+                        size_t tocopy = ((LogBufferIndex - pos) < (CHUNK - 1)) ? (LogBufferIndex - pos) : (CHUNK - 1);
+                        for (size_t k = 0; k < tocopy; ++k) tmp[k] = LogBuffer[pos + k];
+                        tmp[tocopy] = '\0';
+                        WriteToConsolesViaVFSorFallback(tmp);
+                        pos += tocopy;
+                    }
                 }
                 LogBufferIndex = 0;
                 LogBufferFlushIndex = 0;
@@ -55,12 +88,16 @@ namespace Printk {
             // Flush to serial immediately on newline or NUL
             if (ch == '\n' || ch == '\0') {
                 if (LogBufferFlushIndex < LogBufferIndex) {
-                    size_t seglen = LogBufferIndex - LogBufferFlushIndex;
-                    CHAR8 tmp[sizeof(LogBuffer) + 1];
-                    for (size_t k = 0; k < seglen; ++k) tmp[k] = LogBuffer[LogBufferFlushIndex + k];
-                    tmp[seglen] = '\0';
-                    Serial::Write(tmp);
-                    if (FBConsole::IsReady()) FBConsole::WriteString(tmp);
+                    const size_t CHUNK = 256;
+                    CHAR8 tmp[CHUNK];
+                    size_t pos = LogBufferFlushIndex;
+                    while (pos < LogBufferIndex) {
+                        size_t tocopy = ((LogBufferIndex - pos) < (CHUNK - 1)) ? (LogBufferIndex - pos) : (CHUNK - 1);
+                        for (size_t k = 0; k < tocopy; ++k) tmp[k] = LogBuffer[pos + k];
+                        tmp[tocopy] = '\0';
+                        WriteToConsolesViaVFSorFallback(tmp);
+                        pos += tocopy;
+                    }
                     LogBufferFlushIndex = LogBufferIndex;
                 }
             }
@@ -81,31 +118,61 @@ namespace Printk {
     // Flush any pending data in log buffer to serial. If force==TRUE,
     // flush all pending bytes regardless of newline. Handles wrap-around.
     static VOID FlushLogBufferToSerial(BOOL force) {
-        if (LogBufferFlushIndex == LogBufferIndex && !force) return;
+        const size_t CHUNK = 256;
+        if (LogBufferFlushIndex == LogBufferIndex && !force) {
+            WriteToConsolesViaVFSorFallback((const CHAR8*)"WARNING: PRINTK LOG BUFFER FULL!!\n");
+            return;
+        }
 
         if (LogBufferFlushIndex < LogBufferIndex) {
             // contiguous region
-            size_t seglen = LogBufferIndex - LogBufferFlushIndex;
-            CHAR8 tmp[sizeof(LogBuffer) + 1];
-            for (size_t k = 0; k < seglen; ++k) tmp[k] = LogBuffer[LogBufferFlushIndex + k];
-            tmp[seglen] = '\0';
-            Serial::Write(tmp);
-            if (FBConsole::IsReady()) FBConsole::WriteString(tmp);
-            // store last flushed message copy for emergency reporting
-            for (size_t k = 0; k <= seglen; ++k) LastFlushedMessage[k] = tmp[k];
+            CHAR8 tmp[CHUNK];
+            size_t pos = LogBufferFlushIndex;
+            size_t last_copied = 0;
+            while (pos < LogBufferIndex) {
+                size_t tocopy = ((LogBufferIndex - pos) < (CHUNK - 1)) ? (LogBufferIndex - pos) : (CHUNK - 1);
+                for (size_t k = 0; k < tocopy; ++k) tmp[k] = LogBuffer[pos + k];
+                tmp[tocopy] = '\0';
+                WriteToConsolesViaVFSorFallback(tmp);
+                for (size_t k = 0; k < tocopy && (last_copied + k) < sizeof(LastFlushedMessage) - 1; ++k) {
+                    LastFlushedMessage[last_copied + k] = tmp[k];
+                }
+                last_copied += tocopy;
+                pos += tocopy;
+            }
+            LastFlushedMessage[(last_copied < sizeof(LastFlushedMessage)) ? last_copied : (sizeof(LastFlushedMessage)-1)] = '\0';
             LogBufferFlushIndex = LogBufferIndex;
         } else if (force && LogBufferFlushIndex > LogBufferIndex) {
             // wrapped: flush [flushIndex, end) then [0, LogBufferIndex)
-            size_t seglen1 = sizeof(LogBuffer) - LogBufferFlushIndex;
-            CHAR8 tmp[sizeof(LogBuffer) + 1];
-            size_t pos = 0;
-            for (size_t k = 0; k < seglen1; ++k) tmp[pos++] = LogBuffer[LogBufferFlushIndex + k];
-            for (size_t k = 0; k < LogBufferIndex; ++k) tmp[pos++] = LogBuffer[k];
-            tmp[pos] = '\0';
-                Serial::Write(tmp);
-                if (FBConsole::IsReady()) FBConsole::WriteString(tmp);
-                // store last flushed message copy for emergency reporting
-                for (size_t k = 0; k <= pos; ++k) LastFlushedMessage[k] = tmp[k];
+                    CHAR8 tmp[CHUNK];
+            size_t last_copied = 0;
+            // flush [flushIndex, end)
+            size_t p = LogBufferFlushIndex;
+            while (p < sizeof(LogBuffer)) {
+                size_t tocopy = ((sizeof(LogBuffer) - p) < (CHUNK - 1)) ? (sizeof(LogBuffer) - p) : (CHUNK - 1);
+                for (size_t k = 0; k < tocopy; ++k) tmp[k] = LogBuffer[p + k];
+                tmp[tocopy] = '\0';
+                WriteToConsolesViaVFSorFallback(tmp);
+                for (size_t k = 0; k < tocopy && (last_copied + k) < sizeof(LastFlushedMessage) - 1; ++k) {
+                    LastFlushedMessage[last_copied + k] = tmp[k];
+                }
+                last_copied += tocopy;
+                p += tocopy;
+            }
+            // flush [0, LogBufferIndex)
+            p = 0;
+            while (p < LogBufferIndex) {
+                size_t tocopy = ((LogBufferIndex - p) < (CHUNK - 1)) ? (LogBufferIndex - p) : (CHUNK - 1);
+                for (size_t k = 0; k < tocopy; ++k) tmp[k] = LogBuffer[p + k];
+                tmp[tocopy] = '\0';
+                WriteToConsolesViaVFSorFallback(tmp);
+                for (size_t k = 0; k < tocopy && (last_copied + k) < sizeof(LastFlushedMessage) - 1; ++k) {
+                    LastFlushedMessage[last_copied + k] = tmp[k];
+                }
+                last_copied += tocopy;
+                p += tocopy;
+            }
+            LastFlushedMessage[(last_copied < sizeof(LastFlushedMessage)) ? last_copied : (sizeof(LastFlushedMessage)-1)] = '\0';
             LogBufferFlushIndex = LogBufferIndex;
         }
     }
@@ -175,13 +242,16 @@ namespace Printk {
         DumpStackTrace();
         // final message
         // Prefer the explicit last-flushed message if provided, otherwise fall back
-        const CHAR8 *to_print = msg ? msg : LastFlushedMessage;
-        Serial::Printf("[kernel-emergency-mode]_[system_fully_stopped] %s (end of)\n", to_print);
+        const CHAR8 *to_print = "[kernel-emergency-mode]_[system_fully_stopped] (end of)";
+        VFSManager::Write(s_SerialConsoleFile, (U8*)to_print , (U32)Strlen(to_print));
+        VFSManager::Write(s_FrameConsoleFile, (U8*)to_print, Strlen(to_print));
         // halt forever
         while (1) Arch::HaltCPU();
     }
 
     BOOL InternalWrite(Printk::Level level, const char *module_name, const char *fmt, VA_LIST Args) {
+        LOCKRFLAGS prev = Arch::SaveAndDisableInterrupts();
+        Arch::Spinlock::SpinLockAcquire(&PrintkLock);
         // Emit level prefix (restore levelling)
         const CHAR8* levelPrefix = "";
         switch (level) {
@@ -203,291 +273,24 @@ namespace Printk {
         WriteToLogBuffer(mod);
         WriteToLogBuffer("] ");
 
-        // ketika masih ada karakter *fmt, kita akan masuk ke case
-        // *fmt, lalu kita mulai iterasi 1 1 karakternya untuk di printf
-        while(*fmt) {
-            // Jika FMT ada persenan, make itu adalah format, make
-            // kita harus masuk ke iterasi pemrosesan
-            if(*fmt == '%') {
-                // Skip persenan, naikan fmt
-                fmt++;
-
-                BOOL ZeroPadding = FALSE;
-                BOOL LeftJustify = FALSE;
-                // Parse flags: '-', '0' (we support left-justify and zero-pad)
-                if (*fmt == '-') {
-                    LeftJustify = TRUE; fmt++;
-                }
-                if(*fmt == '0') {
-                    ZeroPadding = TRUE;
-                    fmt++;
-                }
-
-                // Kita Parse WIDTH nya
-                VAL32 Width = 0;
-                while(*fmt >= '0' && *fmt <= '9') {
-                    Width = Width * 10 + (*fmt - '0');
-                    fmt++;
-                }
-
-                // Parse precision (optional) and length modifier: l, ll, z
-                BOOL HasPrecision = FALSE;
-                VAL32 Precision = 0;
-                if (*fmt == '.') {
-                    fmt++;
-                    HasPrecision = TRUE;
-                    while (*fmt >= '0' && *fmt <= '9') {
-                        Precision = Precision * 10 + (*fmt - '0');
-                        fmt++;
-                    }
-                }
-                // Parse length modifier: l, ll, z
-                enum LenMod { LM_NONE, LM_L, LM_LL, LM_Z };
-                LenMod LM = LM_NONE;
-                if (*fmt == 'l') {
-                    fmt++;
-                    if (*fmt == 'l') { LM = LM_LL; fmt++; }
-                    else LM = LM_L;
-                } else if (*fmt == 'z') {
-                    LM = LM_Z; fmt++;
-                }
-
-                CHAR8 Buf[64];
-                const CHAR8 *str = NULL;
-
-                switch(*fmt) {
-                    case '%': {
-                        Printk::WriteToLogBuffer("%");
-                        break;
-                    }
-                    case 's': {
-                        str = va_arg(Args, const CHAR8*);
-                        if (!str) str = "(null)";
-                        unsigned long long slen = Strlen(str);
-                        if (HasPrecision && Precision < (VAL32)slen) slen = Precision;
-                        int pad = (Width > (int)slen) ? (Width - (int)slen) : 0;
-                        if (!LeftJustify) {
-                            for (int i = 0; i < pad; ++i) Printk::WriteToLogBuffer(" ");
-                            for (unsigned long long k = 0; k < slen; ++k) Printk::WriteToLogBufferChar(str[k]);
-                        } else {
-                            for (unsigned long long k = 0; k < slen; ++k) Printk::WriteToLogBufferChar(str[k]);
-                            for (int i = 0; i < pad; ++i) Printk::WriteToLogBuffer(" ");
-                        }
-                        break;
-                    }
-                    case 'c': {
-                        int ch = va_arg(Args, int);
-                        CHAR8 tmpc[2] = { (CHAR8)ch, '\0' };
-                        Printk::WriteToLogBuffer(tmpc);
-                        break;
-                    }
-                    case 'd':
-                    case 'i': {
-                        long long sval = 0;
-                        if (LM == LM_LL) sval = va_arg(Args, long long);
-                        else if (LM == LM_L) sval = (long long)va_arg(Args, long);
-                        else if (LM == LM_Z) sval = (long long)va_arg(Args, size_t);
-                        else sval = (long long)va_arg(Args, int);
-                        Itoa(sval, Buf, 10);
-                        CHAR8 *out = Buf;
-                        bool neg = (out[0] == '-');
-                        if (neg) ++out;
-                        unsigned long long len = Strlen(out);
-                        int num_digits = (int)len;
-                        int total_len = num_digits + (neg ? 1 : 0);
-                        // If precision specified for integers, it defines minimum digits
-                        int min_digits = 0;
-                        if (HasPrecision) min_digits = (int)Precision;
-                        int zero_pad = 0;
-                        if (min_digits > num_digits) zero_pad = min_digits - num_digits;
-                        // If no precision, ZeroPadding flag may request zero pad to width
-                        if (!HasPrecision && ZeroPadding && !LeftJustify && Width > total_len) zero_pad = Width - total_len;
-
-                        if (LeftJustify) {
-                            if (neg) Printk::WriteToLogBufferChar('-');
-                            for (int z = 0; z < zero_pad; ++z) Printk::WriteToLogBufferChar('0');
-                            Printk::WriteToLogBuffer(out);
-                            for (int i = total_len + zero_pad; i < Width; ++i) Printk::WriteToLogBufferChar(' ');
-                        } else {
-                            // pad spaces before sign if no zero padding
-                            if (zero_pad == 0) {
-                                for (int i = total_len; i < Width; ++i) Printk::WriteToLogBufferChar(' ');
-                                if (neg) Printk::WriteToLogBufferChar('-');
-                            } else {
-                                if (neg) Printk::WriteToLogBufferChar('-');
-                                for (int z = 0; z < zero_pad; ++z) Printk::WriteToLogBufferChar('0');
-                            }
-                            Printk::WriteToLogBuffer(out);
-                        }
-                        break;
-                    }
-                    case 'u': {
-                        unsigned long long uval = 0ULL;
-                        if (LM == LM_LL) uval = va_arg(Args, unsigned long long);
-                        else if (LM == LM_L) uval = (unsigned long long)va_arg(Args, unsigned long);
-                        else if (LM == LM_Z) uval = (unsigned long long)va_arg(Args, size_t);
-                        else uval = (unsigned long long)va_arg(Args, unsigned int);
-                        Utoa(uval, Buf, 10);
-                        unsigned long long len = Strlen(Buf);
-                        int num_digits = (int)len;
-                        int min_digits = HasPrecision ? (int)Precision : 0;
-                        int zero_pad = (min_digits > num_digits) ? (min_digits - num_digits) : 0;
-                        if (!HasPrecision && ZeroPadding && !LeftJustify && Width > num_digits) zero_pad = Width - num_digits;
-                        if (LeftJustify) {
-                            for (int z = 0; z < zero_pad; ++z) Printk::WriteToLogBufferChar('0');
-                            Printk::WriteToLogBuffer(Buf);
-                            for (int i = num_digits + zero_pad; i < Width; ++i) Printk::WriteToLogBufferChar(' ');
-                        } else {
-                            for (int i = num_digits + zero_pad; i < Width; ++i) Printk::WriteToLogBufferChar(' ');
-                            for (int z = 0; z < zero_pad; ++z) Printk::WriteToLogBufferChar('0');
-                            Printk::WriteToLogBuffer(Buf);
-                        }
-                        break;
-                    }
-                    case 'x':
-                    case 'X': {
-                        unsigned long long uval = 0ULL;
-                        if (LM == LM_LL) uval = va_arg(Args, unsigned long long);
-                        else if (LM == LM_L) uval = (unsigned long long)va_arg(Args, unsigned long);
-                        else if (LM == LM_Z) uval = (unsigned long long)va_arg(Args, size_t);
-                        else uval = (unsigned long long)va_arg(Args, unsigned int);
-                        Utoa(uval, Buf, 16);
-                        if (*fmt == 'X') {
-                            // uppercase hex
-                            for (char* p = Buf; *p; ++p) if (*p >= 'a' && *p <= 'f') *p = *p - 'a' + 'A';
-                        }
-                        unsigned long long len = Strlen(Buf);
-                        int num_digits = (int)len;
-                        int min_digits = HasPrecision ? (int)Precision : 0;
-                        int zero_pad = (min_digits > num_digits) ? (min_digits - num_digits) : 0;
-                        if (!HasPrecision && ZeroPadding && !LeftJustify && Width > num_digits) zero_pad = Width - num_digits;
-                        if (LeftJustify) {
-                            for (int z = 0; z < zero_pad; ++z) Printk::WriteToLogBufferChar('0');
-                            Printk::WriteToLogBuffer(Buf);
-                            for (int i = num_digits + zero_pad; i < Width; ++i) Printk::WriteToLogBufferChar(' ');
-                        } else {
-                            for (int i = num_digits + zero_pad; i < Width; ++i) Printk::WriteToLogBufferChar(' ');
-                            for (int z = 0; z < zero_pad; ++z) Printk::WriteToLogBufferChar('0');
-                            Printk::WriteToLogBuffer(Buf);
-                        }
-                        break;
-                    }
-                    case 'f': {
-#if defined(__SSE__) || defined(__AVX__) || defined(__SSE2__)
-                        /* Minimal floating-point formatting: support precision (default 6), sign,
-                           integer part and fractional part with rounding. Uses only existing
-                           Itoa/Utoa helpers and integer arithmetic for the fractional digits. */
-                        double fval = va_arg(Args, double);
-                        bool neg = false;
-                        if (fval < 0.0) { neg = true; fval = -fval; }
-
-                        int prec = HasPrecision ? (int)Precision : 6; // default precision 6
-                        if (prec < 0) prec = 6;
-
-                        // Extract integer part
-                        long long intpart = (long long)fval;
-                        double frac = fval - (double)intpart;
-
-                        // Prepare multiplier = 10^prec
-                        unsigned long long mul = 1ULL;
-                        for (int i = 0; i < prec; ++i) mul *= 10ULL;
-
-                        // Compute fractional digits as integer with rounding
-                        unsigned long long frac_digits = 0ULL;
-                        {
-                            double tmp = frac * (double)mul;
-                            unsigned long long rounded = (unsigned long long)(tmp + 0.5);
-                            if (rounded >= mul) {
-                                intpart += 1;
-                                rounded -= mul;
-                            }
-                            frac_digits = rounded;
-                        }
-
-                        // Convert integer part
-                        CHAR8 intbuf[48];
-                        Utoa((unsigned long long)intpart, intbuf, 10);
-
-                        // Build fractional string with leading zeros if needed
-                        CHAR8 fracbuf[64];
-                        if (prec > 0) {
-                            for (int i = prec - 1; i >= 0; --i) {
-                                fracbuf[i] = (CHAR8)('0' + (frac_digits % 10ULL));
-                                frac_digits /= 10ULL;
-                            }
-                            fracbuf[prec] = '\0';
-                        } else {
-                            fracbuf[0] = '\0';
-                        }
-
-                        /* Build the whole representation into a temporary buffer then apply padding */
-                        CHAR8 whole[128];
-                        size_t pos = 0;
-                        if (neg) whole[pos++] = '-';
-                        for (size_t i = 0; intbuf[i]; ++i) whole[pos++] = intbuf[i];
-                        if (prec > 0) {
-                            whole[pos++] = '.';
-                            for (int i = 0; i < prec; ++i) whole[pos++] = fracbuf[i];
-                        }
-                        whole[pos] = '\0';
-
-                        unsigned long long wlen = Strlen(whole);
-                        int pad = (Width > (int)wlen) ? (Width - (int)wlen) : 0;
-                        if (!LeftJustify) {
-                            if (ZeroPadding && !HasPrecision) {
-                                for (int i = 0; i < pad; ++i) Printk::WriteToLogBufferChar('0');
-                            } else {
-                                for (int i = 0; i < pad; ++i) Printk::WriteToLogBufferChar(' ');
-                            }
-                        }
-                        Printk::WriteToLogBuffer(whole);
-                        if (LeftJustify) {
-                            for (int i = 0; i < pad; ++i) Printk::WriteToLogBufferChar(' ');
-                        }
-#else
-                        /* Floating-point varargs are not supported under the current
-                           compiler flags (SSE disabled). Print a fallback marker while
-                           keeping width/left-justify behavior. */
-                        CHAR8 whole_fallback[] = "<float>";
-                        unsigned long long wlen = Strlen(whole_fallback);
-                        int pad = (Width > (int)wlen) ? (Width - (int)wlen) : 0;
-                        if (!LeftJustify) {
-                            for (int i = 0; i < pad; ++i) Printk::WriteToLogBufferChar(' ');
-                        }
-                        Printk::WriteToLogBuffer(whole_fallback);
-                        if (LeftJustify) {
-                            for (int i = 0; i < pad; ++i) Printk::WriteToLogBufferChar(' ');
-                        }
-#endif
-                        break;
-                    }
-                    case 'p': {
-                        void* ptr = va_arg(Args, void*);
-                        unsigned long long pv = (unsigned long long)ptr;
-                        Utoa(pv, Buf, 16);
-                        Printk::WriteToLogBuffer("0x");
-                        Printk::WriteToLogBuffer(Buf);
-                        break;
-                    }
-                    default: {
-                        // Unknown specifier: print it literally
-                        Printk::WriteToLogBufferChar('%');
-                        if (*fmt) Printk::WriteToLogBufferChar(*fmt);
-                        break;
-                    }
-                }
-            } else {
-                Printk::WriteToLogBufferChar(*fmt);
-            }
-            fmt++;
+        // Use VSPrint to format the rest of the message into a temporary buffer
+        {
+            CHAR8 temp[2048];
+            // Args is a VA_LIST (typedef to va_list) and VSPrint expects va_list
+            int written = VSPrint((char*)temp, sizeof(temp), fmt, Args);
+            // Ensure null-terminated (VSPrint already does this when bufsize>0)
+            temp[(written < (int)sizeof(temp)) ? written : (int)(sizeof(temp) - 1)] = '\0';
+            Printk::WriteToLogBuffer(temp);
         }
         // After formatting finished, flush remaining content to serial
         FlushLogBufferToSerial(TRUE);
+        BOOL isEmerg = (level == LOG_EMERG);
 
-        if (level == LOG_EMERG) {
+        Arch::Spinlock::SpinLockRelease(&PrintkLock);
+        Arch::RestoreInterrupts(prev);
+
+        if (isEmerg) {
             // This function will not return (halts)
-            // After flushing, LastFlushedMessage contains the formatted output;
-            // pass that to the emergency handler so the final message is shown.
             HandleEmergAndHalt(LastFlushedMessage);
         }
 

@@ -330,3 +330,229 @@ char* Itoa(long long value, char* buffer, int base) {
 }
 
 } // namespace String
+
+namespace String {
+// VSPrint implementation: bounded formatting into caller-provided buffer.
+int VSPrint(char* buffer, unsigned long long bufsize, const char* fmt, va_list args) {
+    if (!buffer || bufsize == 0) {
+        // We still compute the would-be length but cannot store characters.
+        // For simplicity return 0 when buffer is null or size is 0.
+        return 0;
+    }
+
+    unsigned long long pos = 0;
+
+    auto writeChar = [&](char c) {
+        if (pos + 1 < bufsize) buffer[pos] = c;
+        pos++;
+    };
+    auto writeStr = [&](const char* s, unsigned long long len) {
+        if (!s) return;
+        for (unsigned long long i = 0; i < len; ++i) writeChar(s[i]);
+    };
+    auto writeNulTerminate = [&]() {
+        unsigned long long idx = (pos < (bufsize ? bufsize - 1 : 0)) ? pos : (bufsize ? bufsize - 1 : 0);
+        buffer[idx] = '\0';
+    };
+
+    while (*fmt) {
+        if (*fmt == '%') {
+            fmt++;
+
+            BOOL ZeroPadding = FALSE;
+            BOOL LeftJustify = FALSE;
+            if (*fmt == '-') { LeftJustify = TRUE; fmt++; }
+            if (*fmt == '0') { ZeroPadding = TRUE; fmt++; }
+
+            VAL32 Width = 0;
+            while (*fmt >= '0' && *fmt <= '9') { Width = Width * 10 + (*fmt - '0'); fmt++; }
+
+            BOOL HasPrecision = FALSE;
+            VAL32 Precision = 0;
+            if (*fmt == '.') {
+                fmt++; HasPrecision = TRUE;
+                while (*fmt >= '0' && *fmt <= '9') { Precision = Precision * 10 + (*fmt - '0'); fmt++; }
+            }
+
+            enum LenMod { LM_NONE, LM_L, LM_LL, LM_Z } LM = LM_NONE;
+            if (*fmt == 'l') { fmt++; if (*fmt == 'l') { LM = LM_LL; fmt++; } else LM = LM_L; }
+            else if (*fmt == 'z') { LM = LM_Z; fmt++; }
+
+            CHAR8 BufLocal[128];
+
+            switch (*fmt) {
+                case '%': { writeChar('%'); break; }
+                case 's': {
+                    const CHAR8* s = va_arg(args, const CHAR8*);
+                    if (!s) s = "(null)";
+                    unsigned long long slen = Strlen(s);
+                    if (HasPrecision && Precision < (VAL32)slen) slen = Precision;
+                    int pad = (Width > (int)slen) ? (Width - (int)slen) : 0;
+                    if (!LeftJustify) for (int i=0;i<pad;++i) writeChar(' ');
+                    writeStr(s, slen);
+                    if (LeftJustify) for (int i=0;i<pad;++i) writeChar(' ');
+                    break;
+                }
+                case 'c': {
+                    int ch = va_arg(args, int);
+                    writeChar((char)ch);
+                    break;
+                }
+                case 'd': case 'i': {
+                    long long sval = 0;
+                    if (LM == LM_LL) sval = va_arg(args, long long);
+                    else if (LM == LM_L) sval = (long long)va_arg(args, long);
+                    else if (LM == LM_Z) sval = (long long)va_arg(args, size_t);
+                    else sval = (long long)va_arg(args, int);
+                    Itoa(sval, BufLocal, 10);
+                    char* out = BufLocal;
+                    bool neg = (out[0] == '-'); if (neg) ++out;
+                    unsigned long long len = Strlen(out);
+                    int num_digits = (int)len;
+                    int total_len = num_digits + (neg ? 1 : 0);
+                    int min_digits = HasPrecision ? (int)Precision : 0;
+                    int zero_pad = (min_digits > num_digits) ? (min_digits - num_digits) : 0;
+                    if (!HasPrecision && ZeroPadding && !LeftJustify && Width > total_len) zero_pad = Width - total_len;
+                    if (LeftJustify) {
+                        if (neg) writeChar('-');
+                        for (int z=0; z<zero_pad; ++z) writeChar('0');
+                        writeStr(out, len);
+                        for (int i = total_len + zero_pad; i < Width; ++i) writeChar(' ');
+                    } else {
+                        if (zero_pad == 0) {
+                            for (int i = total_len; i < Width; ++i) writeChar(' ');
+                            if (neg) writeChar('-');
+                        } else {
+                            if (neg) writeChar('-');
+                            for (int z=0; z<zero_pad; ++z) writeChar('0');
+                        }
+                        writeStr(out, len);
+                    }
+                    break;
+                }
+                case 'u': {
+                    unsigned long long uval = 0ULL;
+                    if (LM == LM_LL) uval = va_arg(args, unsigned long long);
+                    else if (LM == LM_L) uval = (unsigned long long)va_arg(args, unsigned long);
+                    else if (LM == LM_Z) uval = (unsigned long long)va_arg(args, size_t);
+                    else uval = (unsigned long long)va_arg(args, unsigned int);
+                    Utoa(uval, BufLocal, 10);
+                    unsigned long long len = Strlen(BufLocal);
+                    int num_digits = (int)len;
+                    int min_digits = HasPrecision ? (int)Precision : 0;
+                    int zero_pad = (min_digits > num_digits) ? (min_digits - num_digits) : 0;
+                    if (!HasPrecision && ZeroPadding && !LeftJustify && Width > num_digits) zero_pad = Width - num_digits;
+                    if (LeftJustify) {
+                        for (int z=0; z<zero_pad; ++z) writeChar('0');
+                        writeStr(BufLocal, len);
+                        for (int i = num_digits + zero_pad; i < Width; ++i) writeChar(' ');
+                    } else {
+                        for (int i = num_digits + zero_pad; i < Width; ++i) writeChar(' ');
+                        for (int z = 0; z < zero_pad; ++z) writeChar('0');
+                        writeStr(BufLocal, len);
+                    }
+                    break;
+                }
+                case 'x': case 'X': {
+                    unsigned long long uval = 0ULL;
+                    if (LM == LM_LL) uval = va_arg(args, unsigned long long);
+                    else if (LM == LM_L) uval = (unsigned long long)va_arg(args, unsigned long);
+                    else if (LM == LM_Z) uval = (unsigned long long)va_arg(args, size_t);
+                    else uval = (unsigned long long)va_arg(args, unsigned int);
+                    Utoa(uval, BufLocal, 16);
+                    if (*fmt == 'X') {
+                        for (char* p = BufLocal; *p; ++p) if (*p >= 'a' && *p <= 'f') *p = *p - 'a' + 'A';
+                    }
+                    unsigned long long len = Strlen(BufLocal);
+                    int num_digits = (int)len;
+                    int min_digits = HasPrecision ? (int)Precision : 0;
+                    int zero_pad = (min_digits > num_digits) ? (min_digits - num_digits) : 0;
+                    if (!HasPrecision && ZeroPadding && !LeftJustify && Width > num_digits) zero_pad = Width - num_digits;
+                    if (LeftJustify) {
+                        for (int z=0; z<zero_pad; ++z) writeChar('0');
+                        writeStr(BufLocal, len);
+                        for (int i = num_digits + zero_pad; i < Width; ++i) writeChar(' ');
+                    } else {
+                        for (int i = num_digits + zero_pad; i < Width; ++i) writeChar(' ');
+                        for (int z=0; z<zero_pad; ++z) writeChar('0');
+                        writeStr(BufLocal, len);
+                    }
+                    break;
+                }
+                case 'f': {
+#if defined(__SSE__) || defined(__AVX__) || defined(__SSE2__)
+                    double fval = va_arg(args, double);
+                    bool neg = false;
+                    if (fval < 0.0) { neg = true; fval = -fval; }
+                    int prec = HasPrecision ? (int)Precision : 6;
+                    if (prec < 0) prec = 6;
+                    long long intpart = (long long)fval;
+                    double frac = fval - (double)intpart;
+                    unsigned long long mul = 1ULL;
+                    for (int i=0;i<prec;++i) mul *= 10ULL;
+                    unsigned long long frac_digits = 0ULL;
+                    {
+                        double tmp = frac * (double)mul;
+                        unsigned long long rounded = (unsigned long long)(tmp + 0.5);
+                        if (rounded >= mul) { intpart += 1; rounded -= mul; }
+                        frac_digits = rounded;
+                    }
+                    CHAR8 intbuf[48]; Utoa((unsigned long long)intpart, intbuf, 10);
+                    CHAR8 fracbuf[64];
+                    if (prec > 0) {
+                        for (int i = prec - 1; i >= 0; --i) { fracbuf[i] = (CHAR8)('0' + (frac_digits % 10ULL)); frac_digits /= 10ULL; }
+                        fracbuf[prec] = '\0';
+                    } else {
+                        fracbuf[0] = '\0';
+                    }
+                    CHAR8 whole[128]; size_t ppos = 0;
+                    if (neg) whole[ppos++] = '-';
+                    for (size_t i=0; intbuf[i]; ++i) whole[ppos++] = intbuf[i];
+                    if (prec > 0) { whole[ppos++] = '.'; for (int i=0;i<prec;++i) whole[ppos++] = fracbuf[i]; }
+                    whole[ppos] = '\0';
+                    unsigned long long wlen = Strlen(whole);
+                    int pad = (Width > (int)wlen) ? (Width - (int)wlen) : 0;
+                    if (!LeftJustify) {
+                        if (ZeroPadding && !HasPrecision) for (int i=0;i<pad;++i) writeChar('0');
+                        else for (int i=0;i<pad;++i) writeChar(' ');
+                    }
+                    writeStr(whole, wlen);
+                    if (LeftJustify) for (int i=0;i<pad;++i) writeChar(' ');
+#else
+                    /* floats not supported in this build: print placeholder */
+                    const CHAR8 whole_fallback[] = "<float>";
+                    unsigned long long wlen = Strlen(whole_fallback);
+                    int pad = (Width > (int)wlen) ? (Width - (int)wlen) : 0;
+                    if (!LeftJustify) for (int i=0;i<pad;++i) writeChar(' ');
+                    writeStr(whole_fallback, wlen);
+                    if (LeftJustify) for (int i=0;i<pad;++i) writeChar(' ');
+#endif
+                    break;
+                }
+                case 'p': {
+                    void* ptr = va_arg(args, void*);
+                    unsigned long long pv = (unsigned long long)ptr;
+                    Utoa(pv, BufLocal, 16);
+                    writeStr("0x", 2);
+                    writeStr(BufLocal, Strlen(BufLocal));
+                    break;
+                }
+                default: {
+                    writeChar('%'); if (*fmt) writeChar(*fmt);
+                    break;
+                }
+            }
+        } else {
+            writeChar(*fmt);
+        }
+        fmt++;
+    }
+
+    writeNulTerminate();
+    // Return number of characters written (excluding trailing NUL)
+    return (int)((pos < (bufsize ? bufsize - 1 : 0)) ? pos : (bufsize ? bufsize - 1 : 0));
+
+}
+
+} // namespace String
+

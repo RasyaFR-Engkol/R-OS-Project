@@ -355,4 +355,8 @@ namespace FBConsole {
             g_last_blink_time = current_time;
         }
     }
+
+    namespace Driver{
+        
+    }
 }

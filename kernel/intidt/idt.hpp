@@ -47,7 +47,7 @@ struct __attribute__((packed)) IDTEntry{
 
 // Simple handler wrapper
 typedef struct{
-    void (*handler)(void);
+    void (*handler)(void *context);
 } InterruptHandler;
 
 namespace IDT{
@@ -55,11 +55,11 @@ namespace IDT{
     // Register and invoke interrupt handlers dynamically
     void RegisterInterruptHandler(U8 vector, InterruptHandler handler);
     // Convenience overload to register with raw function pointer
-    inline void RegisterInterruptHandler(U8 vector, void (*fn)(void)) {
+    inline void RegisterInterruptHandler(U8 vector, void (*fn)(void *context)) {
         RegisterInterruptHandler(vector, InterruptHandler{fn});
     }
     // Called by dispatchers to run a registered handler, if any
-    void InvokeInterruptHandler(U8 vector);
+    void InvokeInterruptHandler(U8 vector, void *context = nullptr);
 
     U8 AllocateVector();
     VOID FreeVector(U8 vector);

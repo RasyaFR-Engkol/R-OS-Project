@@ -7,12 +7,36 @@
 #include <port.hpp>
 #include "../driver/pic/pic.hpp"
 #include "../intidt/idt.hpp"
+#include <task.hpp>
 
 /* module name provided via PRINTK_MODULE_NAME */
 
 namespace Serial {
     using namespace String;
     using namespace Port;
+
+    // IRQ-driven RX buffer (single-producer (IRQ) / single-consumer (non-IRQ))
+    static constexpr unsigned int RX_BUF_SIZE = 1024u;
+    static volatile unsigned int s_rx_head = 0; // next write index
+    static volatile unsigned int s_rx_tail = 0; // next read index
+    static char s_rx_buf[RX_BUF_SIZE];
+
+    void SerialPutC(char c) {
+        const U16 port = 0x3F8;
+        // Wait for Transmitter Holding Register empty
+        // Add a timeout so we don't spin forever if the UART/IO is stuck.
+        // Without this, a hung serial TX bit can cause the kernel to appear
+        // to freeze because string output (from IRQ or normal context)
+        // busy-waits indefinitely.
+        const unsigned int timeout_max = 100000u;
+        unsigned int timeout = timeout_max;
+        while (!(Port::Inb(port + 5) & 0x20)) {
+            if (--timeout == 0u) return;
+
+            Tasking::SchedulerYield();
+        }
+        Port::Outb(port, (U8)c);
+    }
 
     void Init() {
         const uint16_t port = 0x3F8; // COM1
@@ -31,35 +55,24 @@ namespace Serial {
         for (const char* p = s; *p; ++p) SerialPutC(*p);
     }
 
-    void Printf(const char *fmt, ...) {
-        VA_LIST Args;
-        VA_STRT(Args, fmt);
-
-        // ketika masih ada karakter *fmt, kita akan masuk ke case
-        // *fmt, lalu kita mulai iterasi 1 1 karakternya untuk di printf
+    void VPrintf(const char *fmt, VA_LIST args) {
+        // Iterate over format string, consuming arguments from `args`
         while(*fmt) {
-            // Jika FMT ada persenan, maka itu adalah format, maka
-            // kita harus masuk ke iterasi pemrosesan
             if(*fmt == '%') {
-                // Skip persenan, naikan fmt
                 fmt++;
 
                 BOOL ZeroPadding = FALSE;
-                // Kalo FMT formatting awalan punya %0 padding, maka
-                // aktifkan padding
                 if(*fmt == '0') {
                     ZeroPadding = TRUE;
                     fmt++;
                 }
 
-                // Kita Parse WIDTH nya
                 VAL32 Width = 0;
                 while(*fmt >= '0' && *fmt <= '9') {
                     Width = Width * 10 + (*fmt - '0');
                     fmt++;
                 }
 
-                // Parse length modifier: l, ll, z
                 enum LenMod { LM_NONE, LM_L, LM_LL, LM_Z };
                 LenMod LM = LM_NONE;
                 if (*fmt == 'l') {
@@ -79,7 +92,7 @@ namespace Serial {
                         break;
                     }
                     case 's': {
-                        str = va_arg(Args, const CHAR8*);
+                        str = va_arg(args, const CHAR8*);
                         if (!str) str = "(null)";
                         unsigned long long slen = Strlen(str);
                         int pad = (Width > (int)slen) ? (Width - (int)slen) : 0;
@@ -88,16 +101,16 @@ namespace Serial {
                         break;
                     }
                     case 'c': {
-                        Serial::SerialPutC((char)va_arg(Args, int));
+                        Serial::SerialPutC((char)va_arg(args, int));
                         break;
                     }
                     case 'd':
                     case 'i': {
                         long long sval = 0;
-                        if (LM == LM_LL) sval = va_arg(Args, long long);
-                        else if (LM == LM_L) sval = (long long)va_arg(Args, long);
-                        else if (LM == LM_Z) sval = (long long)va_arg(Args, size_t);
-                        else sval = (long long)va_arg(Args, int);
+                        if (LM == LM_LL) sval = va_arg(args, long long);
+                        else if (LM == LM_L) sval = (long long)va_arg(args, long);
+                        else if (LM == LM_Z) sval = (long long)va_arg(args, size_t);
+                        else sval = (long long)va_arg(args, int);
                         Itoa(sval, Buf, 10);
                         CHAR8 *out = Buf;
                         bool neg = (out[0] == '-');
@@ -117,10 +130,10 @@ namespace Serial {
                     }
                     case 'u': {
                         unsigned long long uval = 0ULL;
-                        if (LM == LM_LL) uval = va_arg(Args, unsigned long long);
-                        else if (LM == LM_L) uval = (unsigned long long)va_arg(Args, unsigned long);
-                        else if (LM == LM_Z) uval = (unsigned long long)va_arg(Args, size_t);
-                        else uval = (unsigned long long)va_arg(Args, unsigned int);
+                        if (LM == LM_LL) uval = va_arg(args, unsigned long long);
+                        else if (LM == LM_L) uval = (unsigned long long)va_arg(args, unsigned long);
+                        else if (LM == LM_Z) uval = (unsigned long long)va_arg(args, size_t);
+                        else uval = (unsigned long long)va_arg(args, unsigned int);
                         Utoa(uval, Buf, 10);
                         unsigned long long len = Strlen(Buf);
                         for (int i = (int)len; i < Width; ++i) Serial::SerialPutC(ZeroPadding ? '0' : ' ');
@@ -130,13 +143,12 @@ namespace Serial {
                     case 'x':
                     case 'X': {
                         unsigned long long uval = 0ULL;
-                        if (LM == LM_LL) uval = va_arg(Args, unsigned long long);
-                        else if (LM == LM_L) uval = (unsigned long long)va_arg(Args, unsigned long);
-                        else if (LM == LM_Z) uval = (unsigned long long)va_arg(Args, size_t);
-                        else uval = (unsigned long long)va_arg(Args, unsigned int);
+                        if (LM == LM_LL) uval = va_arg(args, unsigned long long);
+                        else if (LM == LM_L) uval = (unsigned long long)va_arg(args, unsigned long);
+                        else if (LM == LM_Z) uval = (unsigned long long)va_arg(args, size_t);
+                        else uval = (unsigned long long)va_arg(args, unsigned int);
                         Utoa(uval, Buf, 16);
                         if (*fmt == 'X') {
-                            // uppercase hex
                             for (char* p = Buf; *p; ++p) if (*p >= 'a' && *p <= 'f') *p = *p - 'a' + 'A';
                         }
                         unsigned long long len = Strlen(Buf);
@@ -145,7 +157,7 @@ namespace Serial {
                         break;
                     }
                     case 'p': {
-                        void* ptr = va_arg(Args, void*);
+                        void* ptr = va_arg(args, void*);
                         unsigned long long pv = (unsigned long long)ptr;
                         Utoa(pv, Buf, 16);
                         Serial::SerialPutC('0'); Serial::SerialPutC('x');
@@ -153,7 +165,6 @@ namespace Serial {
                         break;
                     }
                     default: {
-                        // Unknown specifier: print it literally
                         Serial::SerialPutC('%');
                         if (*fmt) Serial::SerialPutC(*fmt);
                         break;
@@ -164,13 +175,33 @@ namespace Serial {
             }
             fmt++;
         }
+    }
+
+    void Printf(const char *fmt, ...) {
+        VA_LIST Args;
+        VA_STRT(Args, fmt);
+        VPrintf(fmt, Args);
         VA_END(Args);
     }
 
     BOOL TryReadChar(char *out) {
         if (!out) return FALSE;
+        // Try to read from IRQ-driven RX buffer first
+        extern volatile unsigned int s_rx_head;
+        extern volatile unsigned int s_rx_tail;
+        extern char s_rx_buf[];
+        const unsigned int head = s_rx_head;
+        const unsigned int tail = s_rx_tail;
+        if (tail != head) {
+            // buffer implementation stores data at indexes 0..RX_BUF_SIZE-1
+            unsigned int idx = tail % RX_BUF_SIZE;
+            *out = s_rx_buf[idx];
+            s_rx_tail = (tail + 1) % RX_BUF_SIZE;
+            return TRUE;
+        }
+
+        // Fallback: poll hardware directly
         const uint16_t port = 0x3F8; // COM1
-        // LSR bit0: Data Ready
         if (Inb(port + 5) & 0x01) {
             *out = (char)Inb(port + 0);
             return TRUE;
@@ -197,21 +228,29 @@ namespace Serial {
 
     VOID PollToConsoles() {
         char ch;
-        // Drain all currently available input
+        // Drain IRQ-driven RX buffer and then poll hardware
         while (TryReadChar(&ch)) {
             EchoCharToConsoles(ch);
         }
     }
 
     // IRQ handler for COM1 (IRQ4 -> remapped vector 0x20 + 4 = 0x24)
-    static void Serial_OnIrq() {
-        // Read and echo all available bytes
-        char ch;
+    static void Serial_OnIrq(void *Context = nullptr) {
+        // Minimal IRQ handler: read bytes from hardware and push into
+        // a small lock-free circular buffer. Do NOT call printing or
+        // other heavy subsystems from IRQ context.
         const uint16_t port = 0x3F8;
-        // While data ready
         while (Inb(port + 5) & 0x01) {
-            ch = (char)Inb(port + 0);
-            EchoCharToConsoles(ch);
+            char ch = (char)Inb(port + 0);
+            // push into buffer
+            unsigned int head = s_rx_head;
+            unsigned int next = (head + 1) % RX_BUF_SIZE;
+            if (next == s_rx_tail) {
+                // buffer full, drop char
+                continue;
+            }
+            s_rx_buf[head % RX_BUF_SIZE] = ch;
+            s_rx_head = next;
         }
         // EOI is handled by the central IRQ dispatcher (IrqDispatch),
         // which sends either PIC or LAPIC EOI depending on controller.

@@ -8,14 +8,16 @@
 /* module name provided via PRINTK_MODULE_NAME */
 
 namespace AHCI {
-    // ISR wrappers for controllers. Keep them small and map to HandleInterrupt
-    static void AHCI_InterruptHandler_C0() { AHCI::HandleInterrupt(0); }
-    static void AHCI_InterruptHandler_C1() { AHCI::HandleInterrupt(1); }
-    static void AHCI_InterruptHandler_C2() { AHCI::HandleInterrupt(2); }
-    static void AHCI_InterruptHandler_C3() { AHCI::HandleInterrupt(3); }
+    // ISR wrappers for controllers. Updated to accept void* context and
+    // forward to the controller-specific handler. Keep them small.
+    static void AHCI_InterruptHandler_C0(void *context) { AHCI::HandleInterrupt(0); }
+    static void AHCI_InterruptHandler_C1(void *context) { AHCI::HandleInterrupt(1); }
+    static void AHCI_InterruptHandler_C2(void *context) { AHCI::HandleInterrupt(2); }
+    static void AHCI_InterruptHandler_C3(void *context) { AHCI::HandleInterrupt(3); }
 
-    // Export handler table sized for MAX_AHCI_CONTROLLERS
-    void (*g_ahci_handlers[MAX_AHCI_CONTROLLERS])() = {
+    // Export handler table sized for MAX_AHCI_CONTROLLERS. Handlers take
+    // a void* context per the new interrupt API.
+    void (*g_ahci_handlers[MAX_AHCI_CONTROLLERS])(void *) = {
         AHCI_InterruptHandler_C0,
         AHCI_InterruptHandler_C1,
         AHCI_InterruptHandler_C2,

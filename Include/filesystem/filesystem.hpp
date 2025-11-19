@@ -22,4 +22,7 @@
 // VFS
 #include "../../kernel/filesys/vfs/vfs.hpp"
 
+// ChAR devICE
+#include "../../kernel/filesys/devfs/devfs.hpp"
+
 // TODO: nanti disini kita bisa tambah driver NVMe juga

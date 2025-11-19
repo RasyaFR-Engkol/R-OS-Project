@@ -9,6 +9,7 @@ namespace PCI{
     void ScanAllBuses();
     VOID IntializePCIDrivers();
     // Enable legacy INTx for a device and register an IRQ handler.
-    // Returns the IRQ number (0..255) on success, 0 on failure.
-    U8 EnableLegacyINTxForDevice(U8 Bus, U8 Device, U8 Function, void (*irq_handler)());
+    // Handler receives a void* context parameter. Returns the IRQ number
+    // (0..255) on success, 0 on failure.
+    U8 EnableLegacyINTxForDevice(U8 Bus, U8 Device, U8 Function, void (*irq_handler)(void *context));
 }

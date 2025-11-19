@@ -6,7 +6,8 @@
 
 namespace MSI {
 
-    U8 EnableMSI(U8 bus, U8 dev, U8 func, U8 msi_cap_offset, void (*handler)(void));
+    // Enable MSI and register handler. Handler receives a void* context.
+    U8 EnableMSI(U8 bus, U8 dev, U8 func, U8 msi_cap_offset, void (*handler)(void *context));
     
     // Set MSI message address to target APIC ID (xAPIC dest in bits 19:12).
     // Returns TRUE on success.

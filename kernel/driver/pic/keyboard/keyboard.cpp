@@ -87,7 +87,7 @@ namespace PIC{
             }
         }
 
-        static void Keyboard_OnIrq(){
+        static void Keyboard_OnIrq(void *context){
             using namespace Port;
             // Read scancode from PS/2 data port
             U8 sc = Inb(0x60);

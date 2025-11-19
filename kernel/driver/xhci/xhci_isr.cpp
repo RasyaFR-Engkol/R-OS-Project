@@ -209,8 +209,9 @@ namespace xHCI{
         ProcessPendingEvents(DRV, Controller_ID);
     }
 
-    // ISR entry for controller 0
-    void xHCI_InterruptHandler_C0() {
+    // ISR entry for controller 0 (accepts context parameter)
+    void xHCI_InterruptHandler_C0(void *context) {
+        (void)context;
         xHCI_HandleInterrupt(0);
     }
 }

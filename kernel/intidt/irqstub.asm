@@ -4,6 +4,7 @@ section .text
 
 ; Common C handler: void IrqDispatch(unsigned long irq)
 EXTERN IrqDispatch
+EXTERN IrqDispatchWithRawStack
 
 %macro MAKE_IRQ 1
 GLOBAL IrqStub_%1
@@ -25,9 +26,11 @@ IrqStub_%1:
     push r14
     push r15
 
-    ; Arg: irq number in rdi per SysV ABI
+    ; Arg1: irq number in rdi per SysV ABI
+    ; Arg2: pointer to saved registers on stack (rsp) in rsi
     mov rdi, %1
-    call IrqDispatch
+    mov rsi, rsp
+    call IrqDispatchWithRawStack
 
     ; Restore registers
     pop r15

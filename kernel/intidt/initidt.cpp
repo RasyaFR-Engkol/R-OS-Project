@@ -61,10 +61,10 @@ namespace IDT {
     }
 
     // Invoke if present
-    void InvokeInterruptHandler(U8 vector) {
+    void InvokeInterruptHandler(U8 vector, void *context) {
         // vector is U8 (0..255) so the range check is unnecessary
         auto fn = G_Handlers[vector].handler;
-        if (fn) fn();
+        if (fn) fn(context);
     }
 
     U8 AllocateVector(){

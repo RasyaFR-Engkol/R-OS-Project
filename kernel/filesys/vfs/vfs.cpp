@@ -72,6 +72,22 @@ namespace VFSManager{
         return TRUE;
     }
 
+    BOOL MountFS(const char *path, FileSystem* fs){
+        if(!path || !fs) return FALSE;
+        if(g_MountPointCount >= MAX_MOUNT_POINTS) return FALSE;
+        if(path[0] != '/') return FALSE;
+        if(FindMountIndex(path) >= 0){
+            Printk::Write(Printk::Level::LOG_WARNING, "VFS: Mount point %s already exists\n", path);
+            return FALSE;
+        }
+        String::Strncpy(g_MountPoints[g_MountPointCount].path, path, sizeof(g_MountPoints[g_MountPointCount].path)-1);
+        g_MountPoints[g_MountPointCount].path[sizeof(g_MountPoints[g_MountPointCount].path)-1] = '\0';
+        g_MountPoints[g_MountPointCount].fs = fs;
+        g_MountPointCount++;
+        Printk::Write(Printk::Level::LOG_INFO, "VFS: Mounted FS instance at %s\n", path);
+        return TRUE;
+    }
+
     // Not implemented auto-mount variant; stub returning FALSE for now
     BOOL Mount(Partition *Part){ (void)Part; return FALSE; }
 

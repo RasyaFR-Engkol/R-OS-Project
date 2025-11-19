@@ -66,6 +66,15 @@ namespace Arch {
             );
             return (rflags & (1 << 9)) != 0;
         }
+
+        static inline VOID Interrupt(U64 Vector) {
+            asm volatile (
+                "int %0"
+                :
+                : "N"(Vector)
+                : "memory", "cc"
+            );
+        }
     }
 
         // Model-specific register helpers (RDMSR/WRMSR) and convenient EFER/STAR accessors.

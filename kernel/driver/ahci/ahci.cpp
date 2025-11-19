@@ -27,7 +27,7 @@ namespace AHCI {
 
     // The ISR handlers table is defined in interrupts.cpp. Declare it as
     // extern here so RegisterAHCIController can reference the handler.
-    extern void (*g_ahci_handlers[])();
+    extern void (*g_ahci_handlers[])(void *);
 
     VOID RegisterAHCIController(U8 Bus, U8 Device, U8 Function, U8 MSICapOffset){
         if(g_ahci_controller_count >= MAX_AHCI_CONTROLLERS){
@@ -58,7 +58,8 @@ namespace AHCI {
         DRV.IntVector = 0;
 
         if(MSICapOffset != 0){
-            VOID (*MyHandler)(VOID) = g_ahci_handlers[g_ahci_controller_count];
+            // Handlers now take a void* context
+            VOID (*MyHandler)(void *) = g_ahci_handlers[g_ahci_controller_count];
 
             U8 Vector = MSI::EnableMSI(Bus, Device, Function, MSICapOffset, MyHandler);
             if(Vector != 0){
@@ -72,9 +73,9 @@ namespace AHCI {
                     (unsigned)Bus, (unsigned)Device, (unsigned)Function);
             }
         } else {
-            // Try legacy INTx fallback
-            VOID (*MyHandler)(VOID) = g_ahci_handlers[g_ahci_controller_count];
-            U8 irq = PCI::EnableLegacyINTxForDevice(Bus, Device, Function, (void(*)())MyHandler);
+            // Try legacy INTx fallback. Pass handler with new signature.
+            VOID (*MyHandler)(void *) = g_ahci_handlers[g_ahci_controller_count];
+            U8 irq = PCI::EnableLegacyINTxForDevice(Bus, Device, Function, MyHandler);
             if (irq != 0) {
                 DRV.IntVector = (U8)(0x20 + irq);
                 DRV.using_msi = FALSE;

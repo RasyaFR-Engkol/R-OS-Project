@@ -1,4 +1,5 @@
 #pragma once
+#include <stdarg.h>
 
 namespace String{
 	// Memory
@@ -34,4 +35,13 @@ namespace String{
 	// Returns pointer to buffer for convenience.
 	char* Utoa(unsigned long long value, char* buffer, int base);
 	char* Itoa(long long value, char* buffer, int base);
+
+	// Variadic-safe sprintf variant that writes into a provided buffer.
+	// - buffer: destination buffer
+	// - bufsize: size of destination buffer in bytes
+	// - fmt: format string
+	// - args: VA_LIST of arguments (use VA_START/VA_END by caller)
+	// Returns number of characters written (excluding trailing NUL). If bufsize>0
+	// the result is NUL-terminated.
+	int VSPrint(char* buffer, unsigned long long bufsize, const char* fmt, va_list args);
 }

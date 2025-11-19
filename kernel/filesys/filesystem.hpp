@@ -9,7 +9,7 @@ struct File {
     
     // Info umum
     U64 FileSize;
-    U32 CurrentPosition;
+    U64 CurrentPosition;
     BOOL IsDirectory;
     char FileName[256]; // Nama file
     
