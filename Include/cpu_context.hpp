@@ -40,17 +40,5 @@ typedef struct CpuContext_T {
 	U64 rflags;
 	U64 rsp;
 	U64 ss;
-
-	/* Control / process state */
-	U64 cr3;        /* page table (CR3) for this context */
-
-	/* Segment bases (optional): often used for thread-local storage */
-	U64 fs_base;
-	U64 gs_base;
-
-	/* Optional extra fields / padding for future use */
-	U64 reserved0;
-	U64 reserved1;
-
 } CpuContext_T;
 
