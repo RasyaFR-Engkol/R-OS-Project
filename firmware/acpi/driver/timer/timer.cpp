@@ -3,14 +3,17 @@
 #include <logging.hpp>
 #include "../../../../kernel/driver/pic/timer/pit.hpp"
 #include "../../../../kernel/intidt/idt.hpp"
+#include <task.hpp>
 
 // Export lapic tick counter/frequency so Sleep can use LAPIC as time source
 volatile U64 ACPI::Timer::LapicTicks = 0;
 U32 ACPI::Timer::LapicHz = 0;
 
 // Simple LAPIC timer IRQ handler (file-scope). Increment lapic tick counter.
-static void LapicOnIrqHandler() {
+static void LapicOnIrqHandler(void *context) {
     ACPI::Timer::LapicTicks = ACPI::Timer::LapicTicks + 1;
+    PIT::ticks = PIT::ticks + 1;
+    Tasking::SchedulerTick(context);
 }
 
 namespace ACPI {
@@ -87,22 +90,23 @@ namespace ACPI {
             const U32 PIT_BASE = 1193182u;
             U32 pit_hz = (PITReload == 0) ? 100 : (PIT_BASE / PITReload);
 
-            double elapsed_sec = (double)SAMPLE_PIT_TICKS / (double)pit_hz;
-            double apic_hz = (double)delta / elapsed_sec;
-            UNUSED__ U32 measured_apic_hz = (apic_hz > 0.0) ? (U32)apic_hz : 0;
+            // Avoid floating point (SSE) in early kernel build: compute APIC Hz
+            // using 64-bit integer math: apic_hz = delta * pit_hz / SAMPLE_PIT_TICKS
+            U64 apic_hz_num = (U64)delta * (U64)pit_hz;
+            U32 measured_apic_hz = (U32)(apic_hz_num / (U64)SAMPLE_PIT_TICKS);
             Printk::Write(Printk::Level::LOG_DEBUG,
-                " LAPIC timer sample: startPit=%llu sampleTicks=%u pit_hz=%u before=0x%08x after=0x%08x delta=%u apic_hz=%.0f\n",
+                " LAPIC timer sample: startPit=%llu sampleTicks=%u pit_hz=%u before=0x%08x after=0x%08x delta=%u apic_hz=%llu\n",
                 (unsigned long long)startPit,
                 (unsigned)SAMPLE_PIT_TICKS,
                 (unsigned)pit_hz,
                 (unsigned)before,
                 (unsigned)after,
                 (unsigned)delta,
-                apic_hz);
+                (unsigned long long)(apic_hz_num / (U64)SAMPLE_PIT_TICKS));
 
             U32 initial_for_desired = 0x00100000u; // fallback
-            if (apic_hz > 0.0) {
-                initial_for_desired = (U32)(apic_hz / (double)desiredHz);
+            if (measured_apic_hz > 0) {
+                initial_for_desired = (U32)((U64)measured_apic_hz / (U64)desiredHz);
                 if (initial_for_desired == 0) initial_for_desired = 1;
             }
 
@@ -131,8 +135,8 @@ namespace ACPI {
                 " LAPIC timer: initial count set to 0x%08x\n",
                 (unsigned)initial_for_desired);
 
-            Printk::Write(Printk::Level::LOG_INFO, " LAPIC timer calibrated: desired=%uHz apic_hz=%.0f initial=0x%08x mode=%s\n",
-                (unsigned)desiredHz, apic_hz, (unsigned)initial_for_desired, periodic ? "periodic" : "one-shot");
+            Printk::Write(Printk::Level::LOG_INFO, " LAPIC timer calibrated: desired=%uHz apic_hz=%u initial=0x%08x mode=%s\n",
+                (unsigned)desiredHz, (unsigned)measured_apic_hz, (unsigned)initial_for_desired, periodic ? "periodic" : "one-shot");
         }
 
     }
