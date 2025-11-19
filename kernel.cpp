@@ -16,8 +16,10 @@
 #include "kernel/filesys/gpt/gpt.hpp"
 #include "kernel/filesys/vfs/vfs.hpp"
 #include "kernel/filesys/fat32/fat32.hpp"
+#include "kernel/filesys/devfs/devfs.hpp"
 #include "kernel/intidt/idt.hpp"
 #include "kernel/log/fbcon/fbcon.hpp"
+#include "kernel/driver/fb/fbcon_driver.hpp"
 #include "kernel/log/printk/printk.hpp"
 #include "kernel/mm/kmalloc/kmalloc.hpp"
 #include "kernel/mm/mm.hpp"
@@ -28,9 +30,20 @@
 #include "kernel/filesys/pmos/partition_manager.hpp"
 #include <string.hpp>
 #include <userland/syscall.hpp>
+#include "kernel/task/task.hpp"
+#include "rostime.hpp"
 
 // Debug stress test entry (implemented in tools/debug/ext2_stress.cpp)
-extern "C" int main_debug_ext2_stress(int argc, char** argv);
+ABI_C int main_debug_ext2_stress(int argc, char** argv);
+
+VOID TestScheduler(){
+    while(1) VFSManager::Write(Printk::s_SerialConsoleFile, (U8*)"TEST1\n", 6);
+}
+
+VOID TestScheduler2(){
+    while(1)
+    VFSManager::Write(Printk::s_SerialConsoleFile, (U8*)"TEST2\n", 6);
+}
 
 ABI_C NORET void KernelMain()
 {
@@ -54,7 +67,7 @@ ABI_C NORET void KernelMain()
     // Calibrate and start LAPIC timer at 100 Hz (uses PIT ticks)
     // Use a distinct vector for LAPIC timer (not IRQ0/PIT vector 0x20)
     // to avoid conflicts with the PIT handler while calibration runs.
-    ACPI::Timer::InitializeLapicTimer(0xEE, 100, TRUE);
+    ACPI::Timer::InitializeLapicTimer(CONFIG_TIMER_HEXA_GLOBAL, 100, TRUE);
 
     // Now mask and disable legacy PIC hardware while interrupts are briefly
     // disabled inside the call. After that, re-enable interrupts so LAPIC
@@ -68,6 +81,7 @@ ABI_C NORET void KernelMain()
 
     BootInfoPrint();
 
+    DEVFS::Init();
     FB::Init();
     Printk::Init();
 
@@ -80,15 +94,18 @@ ABI_C NORET void KernelMain()
     // AHCI read test: try LBA0 from first available SATA port and hex dump
     //AHCI::TestReadLBA0();
 
-    // Register filesystem drivers BEFORE initializing GPT/partitions
-    VFSManager::RegisterFileSystem("FAT32", []()->FileSystem* { return new FAT32FileSystem(); });
+    // Mount an in-kernel DevFS at /dev and register framebuffer device there
 
     GPTFS::InitFs();
 
     Userland::Syscall_Init();
 
-    UNUSED__ halt:
+    Tasking::CreateKThread(TestScheduler);
+    Tasking::CreateKThread(TestScheduler2);
+    Tasking::SchedulerStart();
 
+    UNUSED__ halt:
+    
     // Main idle loop: poll serial and keyboard consumers so IRQ-driven
     // producers are serviced. This keeps IRQ handlers minimal (they only
     // enqueue) while the main loop does I/O and console rendering.
