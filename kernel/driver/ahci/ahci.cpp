@@ -66,7 +66,7 @@ namespace AHCI {
                 DRV.IntVector = Vector;
                 DRV.using_msi = TRUE;
                 DRV.msi_cap_offset = MSICapOffset;
-                Printk::Write(Printk::Level::LOG_INFO, " Enabled MSI on AHCI Controller %02X:%02X:%02X with vector 0x%02x\n",
+                Printk::Write(Printk::Level::LOG_DEBUG, " Enabled MSI on AHCI Controller %02X:%02X:%02X with vector 0x%02x\n",
                     (unsigned)Bus, (unsigned)Device, (unsigned)Function, (unsigned)Vector);
             } else {
                 Printk::Write(Printk::Level::LOG_ERR, " Failed to enable MSI on AHCI Controller %02X:%02X:%02X\n",
@@ -80,7 +80,7 @@ namespace AHCI {
                 DRV.IntVector = (U8)(0x20 + irq);
                 DRV.using_msi = FALSE;
                 DRV.legacy_irq = irq;
-                Printk::Write(Printk::Level::LOG_INFO, " Enabled legacy INTx IRQ %u for AHCI Controller %02X:%02X:%02X (vector 0x%02x)\n",
+                Printk::Write(Printk::Level::LOG_DEBUG, " Enabled legacy INTx IRQ %u for AHCI Controller %02X:%02X:%02X (vector 0x%02x)\n",
                     (unsigned)irq, (unsigned)Bus, (unsigned)Device, (unsigned)Function, (unsigned)DRV.IntVector);
             } else {
                 Printk::Write(Printk::Level::LOG_WARNING, " No MSI and legacy INTx unavailable for AHCI %02X:%02X:%02X\n",
@@ -92,7 +92,7 @@ namespace AHCI {
 
         Arch::RestoreInterrupts(_ahci_rflags);
 
-        Printk::Write(Printk::Level::LOG_INFO, " Registered AHCI Controller at %02X:%02X:%02X, ABAR phys=%p virt=%p\n",
+        Printk::Write(Printk::Level::LOG_DEBUG, " Registered AHCI Controller at %02X:%02X:%02X, ABAR phys=%p virt=%p\n",
             (unsigned)Bus, (unsigned)Device, (unsigned)Function,
             (void*)(uintptr_t)ABAR_Phys, VirtAddr);
     }
@@ -223,7 +223,7 @@ namespace AHCI {
 
             U32 PortImplemented = DRV.regs->pi;
 
-            Printk::Write(Printk::Level::LOG_INFO, " Controller %d at %02X:%02X:%02X - Ports Implemented: 0x%08X\n",
+            Printk::Write(Printk::Level::LOG_DEBUG, " Controller %d at %02X:%02X:%02X - Ports Implemented: 0x%08X\n",
                 i, (unsigned)DRV.bus, (unsigned)DRV.dev, (unsigned)DRV.func,
                 (unsigned)PortImplemented);
 
@@ -244,7 +244,7 @@ namespace AHCI {
                             IBlockDevice *NewDisk = new AHCIBlockDevice(DRV, (U8)portnum);
 
                             if(DeviceManager::RegisterBlockDevice(NewDisk)){
-                                Printk::Write(Printk::Level::LOG_INFO, " AHCI: Registered block device for Controller %d Port %d\n", i, portnum);
+                                Printk::Write(Printk::Level::LOG_DEBUG, " AHCI: Registered block device for Controller %d Port %d\n", i, portnum);
                             } else {
                                 Printk::Write(Printk::Level::LOG_ERR, " AHCI: Failed to register block device for Controller %d Port %d\n", i, portnum);
                                 delete NewDisk;

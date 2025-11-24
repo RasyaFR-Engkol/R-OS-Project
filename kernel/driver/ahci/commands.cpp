@@ -177,7 +177,7 @@ namespace AHCI {
         
         U64 TotalBytes = TotalSectors * 512;
 
-        Printk::Write(Printk::Level::LOG_INFO, " Port %d: IDENTIFY successful - Total Size: %llu bytes (%llu sectors)\n",
+        Printk::Write(Printk::Level::LOG_DEBUG, " Port %d: IDENTIFY successful - Total Size: %llu bytes (%llu sectors)\n",
             PortNum, TotalBytes, TotalSectors);
 
         PageAlloc::DMAAlloc::FreeDMABuffer(IDBuf);

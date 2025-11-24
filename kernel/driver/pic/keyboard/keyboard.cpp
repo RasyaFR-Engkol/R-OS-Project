@@ -2,10 +2,12 @@
 #include <rossys.hpp>
 #include <serial.hpp>
 #include "../../../intidt/idt.hpp"
+#include "rng/entrophy.hpp"
 #define PRINTK_MODULE_NAME "PICKeyboard"
 #include <logging.hpp>
 #include <port.hpp>
 #include <framebuffer.hpp>
+#include <task.hpp>
 
 /* module name provided via PRINTK_MODULE_NAME */
 
@@ -21,8 +23,16 @@ namespace PIC{
     static volatile unsigned sc_head = 0;
     static volatile unsigned sc_tail = 0;
 
+    // ASCII Buffer for Stdin
+    static constexpr unsigned ASCII_BUF_SIZE = 128;
+    static char ascii_buf[ASCII_BUF_SIZE];
+    static volatile unsigned ascii_head = 0;
+    static volatile unsigned ascii_tail = 0;
+    static Tasking::Task* WaitingTask = nullptr;
+
     // Modifier state (handled by consumer, not IRQ)
     static bool shift_down = false;
+    static bool ctrl_down = false;
 
         // Translate a PS/2 Set 1 scancode (make code) to ASCII; returns 0 if not printable
         static char TranslateScancode(U8 code, bool shift) {
@@ -87,10 +97,16 @@ namespace PIC{
             }
         }
 
+        // Forward declaration
+        void Poll();
+
         static void Keyboard_OnIrq(void *context){
             using namespace Port;
             // Read scancode from PS/2 data port
             U8 sc = Inb(0x60);
+
+            U64 TimeStamp = Arch::ASM::RdTSC();
+            EntrophySystem::AddEntrophy((U32)TimeStamp ^ sc);
 
             // Push into ring buffer if not full. Keep IRQ handler minimal and
             // fast: only enqueue the scancode and send EOI. Heavy work (text
@@ -108,6 +124,9 @@ namespace PIC{
                 // buffer full, drop scancode (could increment a drop counter)
             }
 
+            // Process the scancode immediately (User Request)
+            Poll();
+
             // Acknowledge to PIC as soon as possible
             // EOI is handled by the central IRQ dispatcher (IrqDispatch).
             // Do not call PIC::SendEOI here to avoid unsafe I/O from IRQ handlers
@@ -116,6 +135,13 @@ namespace PIC{
 
         // Consumer: process queued scancodes. Call this periodically from the
         // main loop / console task to avoid doing work in IRQ context.
+
+        void NotifyTaskDied(Tasking::Task* t) {
+            if (WaitingTask == t) {
+                WaitingTask = nullptr; // Lupakan dia!
+            }
+        }
+
         void Poll() {
             while (sc_tail != sc_head) {
                 // Pop
@@ -127,9 +153,62 @@ namespace PIC{
                 bool is_make = !(sc & 0x80);
                 U8 code = sc & 0x7F;
 
+                if (code == 0x1D){
+                    ctrl_down = is_make;
+                    continue;
+                }
+
+
                 // Update Shift state
                 if (code == 0x2A || code == 0x36) {
                     shift_down = is_make;
+                    continue;
+                }
+
+                if(ctrl_down && is_make && code == 0x2E){
+                    VFSManager::Write(Printk::s_SerialConsoleFile, (U8*)"^C\n", 3);
+                    VFSManager::Write(Printk::s_FrameConsoleFile, (U8*)"^C\n", 3);
+                    // CTRL + C detected
+                    if(Tasking::g_ForegroundPID == (U64)-1){
+                        Printk::Write(Printk::Level::LOG_WARNING, "Keyboard: No foreground PID set to send SIGINT\n");
+                        continue;
+                    }
+                    Printk::Write(Printk::Level::LOG_INFO, "Keyboard: CTRL+C detected, sending SIGINT to foreground PID %llu\n", Tasking::g_ForegroundPID);
+                    Tasking::Task* fgTask = Tasking::TaskArray[Tasking::g_ForegroundPID];
+                    if(fgTask){
+
+                        // siapa tau fgTask emang lagi punya PGID. jadi kita
+                        // loop setiap task, dan kalo PGID nya sama dengan si
+                        // fgTask, kita kirim signal juga.
+                        U64 target_pgid = fgTask->PGID;
+                        if(target_pgid != 0){
+                            Printk::Write(Printk::Level::LOG_INFO, "Keyboard: Foreground task PID %llu has PGID %llu, sending SIGINT to all in group\n", fgTask->pid, target_pgid);
+                            for(U64 i = 0; i < MAX_TASK; i++){
+                                Tasking::Task* t = Tasking::TaskArray[i];
+                                if(t && t->PGID == target_pgid){
+                                    Printk::Write(Printk::Level::LOG_INFO, "Keyboard: Sending SIGINT to PID %llu in PGID %llu\n", t->pid, target_pgid);
+                                    t->Signals |= (1 << 2); // SIGINT is signal number 2
+
+                                    // kalo emang kasus lagi blocked, bangunin dia
+                                    if(t->State == Tasking::TaskState::BLOCKED){
+                                        t->State = Tasking::TaskState::READY;
+                                    }
+                                }
+                            }
+                        }
+
+                        fgTask->Signals |= (1 << 2); // SIGINT is signal number 2
+
+                        // kalo emang kasus lagi blocked, bangunin dia
+                        if(fgTask->State == Tasking::TaskState::BLOCKED){
+                            fgTask->State = Tasking::TaskState::READY;
+                        }
+
+                        // Yield CPU to let it handle signal ASAP
+                        Tasking::SchedulerYield();
+                    } else {
+                        Printk::Write(Printk::Level::LOG_WARNING, "Keyboard: No foreground task with PID %llu to send SIGINT\n", Tasking::g_ForegroundPID);
+                    }
                     continue;
                 }
 
@@ -137,8 +216,10 @@ namespace PIC{
 
                 char ch = TranslateScancode(code, shift_down);
                 if (ch) {
-                    CHAR8 buf[2] = { (CHAR8)ch, 0 };
-                    FBConsole::WriteString(buf);
+                    // 1. Echo to Kernel Console (FB & Serial)
+                    UNUSED__ CHAR8 buf[2] = { (CHAR8)ch, 0 };
+                    // ini matiin aja dah
+                    //FBConsole::WriteString(buf);
                     if (ch == '\b') {
                         Serial::SerialPutC('\b');
                         Serial::SerialPutC(' ');
@@ -146,7 +227,56 @@ namespace PIC{
                     } else {
                         Serial::SerialPutC(ch);
                     }
+
+                    // 2. Store in ASCII Buffer for Stdin
+                    unsigned next_ascii = (ascii_head + 1) % ASCII_BUF_SIZE;
+                    if (next_ascii != ascii_tail) {
+                        ascii_buf[ascii_head] = ch;
+                        ascii_head = next_ascii;
+                    }
+
+                    // 3. Wake up waiting task
+                    if (WaitingTask) {
+                        Tasking::Task* taskToWake = WaitingTask;
+                        WaitingTask = nullptr; // Clear BEFORE yielding to avoid race with re-sleeping task
+
+                        taskToWake->State = Tasking::TaskState::READY;
+                        
+                        // LATENCY FIX (MLFQ Style):
+                        // Boost priority to 0 (Highest) so it gets picked up immediately
+                        // by the scheduler on the next tick or yield.
+                        taskToWake->Priority = 0;
+                        taskToWake->TimeSlice = Tasking::GetTimeSliceForPriority(0);
+                        taskToWake->TimeUsedInPriority = 0;
+
+                        // Force reschedule immediately to switch to this high-prio task
+                        Tasking::SchedulerYield();
+                    }
                 }
+            }
+        }
+
+        char GetChar() {
+            while (true) {
+                // Check buffer atomically
+                LOCKRFLAGS irq = Arch::SaveAndDisableInterrupts();
+                if (ascii_head != ascii_tail) {
+                    char c = ascii_buf[ascii_tail];
+                    ascii_tail = (ascii_tail + 1) % ASCII_BUF_SIZE;
+                    Arch::RestoreInterrupts(irq);
+                    return c;
+                }
+                
+                // Buffer empty, sleep
+                Tasking::Task* current = Tasking::GetCurrentTaskPtr();
+                if (current) {
+                    WaitingTask = current;
+                    current->State = Tasking::TaskState::BLOCKED;
+                }
+                Arch::RestoreInterrupts(irq);
+                
+                // Yield CPU if we blocked
+                if (current) Tasking::SchedulerYield();
             }
         }
 
@@ -154,6 +284,14 @@ namespace PIC{
             // Register the keyboard interrupt handler on vector 0x20 + 1 = 0x21 (IRQ1)
             IDT::RegisterInterruptHandler(0x21, Keyboard_OnIrq);
             Printk::Write(Printk::Level::LOG_INFO, " Keyboard PIC (PS/2) Initialized\n");
+        }
+
+        U32 GetBufferCount(){
+            if(ascii_head >= ascii_tail){
+                return ascii_head - ascii_tail;
+            } else {
+                return ASCII_BUF_SIZE - (ascii_tail - ascii_head);
+            }
         }
     }
 }

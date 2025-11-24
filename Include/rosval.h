@@ -48,6 +48,14 @@ typedef intptr_t  SPTR;
 typedef size_t    SIZE_T;
 typedef ptrdiff_t PTRDIFF_T;
 
+/* Integer but in I not in VAL */
+typedef int8_t I8;
+typedef int16_t I16;
+typedef int32_t I32;
+typedef int64_t I64;
+typedef int INTN;
+
+
 /* Boolean */
 typedef bool      BOOL;
 #ifndef TRUE
@@ -64,7 +72,7 @@ typedef U32 UFLAGS32;
 
 // Constants 
 #define CONSTANTEXPR constexpr
-#define CONSTAT const
+#define CONSTANT const
 #define VOLATILE volatile
 #define STATIC static
 #define INLINE inline
@@ -121,6 +129,7 @@ typedef va_list VA_LIST;
 #define ONLYASM __attribute__((naked))
 #define WEAK __attribute__((weak))
 #define ALIGNED(x) __attribute__((aligned(x)))
+#define UNREACHABLE __builtin_unreachable()
 
 // Error return value
 #define ROS_OK 0

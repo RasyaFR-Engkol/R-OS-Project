@@ -5,8 +5,8 @@
 
 #define GDT_KERNEL_CODE_SELECTOR 0x08 // Entry GDT ke-1 (Ring 0 Code)
 #define GDT_KERNEL_DATA_SELECTOR 0x10 // Entry GDT ke-2 (Ring 0 Data)
-#define GDT_USER_DATA_SELECTOR   0x1B // Entry GDT ke-3 (Ring 3 Data, 0x18 | 3)
-#define GDT_USER_CODE_SELECTOR   0x23 // Entry GDT ke-4 (Ring 3 Code, 0x20 | 3)
+#define GDT_USER_DATA_SELECTOR   0x43 // Entry GDT ke-3 (Ring 3 Data, 0x18 | 3)
+#define GDT_USER_CODE_SELECTOR   0x4B // Entry GDT ke-4 (Ring 3 Code, 0x20 | 3)
 
 ABI_C VOID Syscall_AsmEntry();
 
@@ -26,7 +26,7 @@ namespace Userland{
         U64 Star = 0;
         Star |= (U64)GDT_KERNEL_CODE_SELECTOR << 32;
 
-        Star |= (U64)(GDT_USER_DATA_SELECTOR - 8) << 48;
+        Star |= (U64)((GDT_USER_DATA_SELECTOR & ~3) - 8) << 48;
 
         Arch::MSR::Write(IA32_STAR, Star);
 

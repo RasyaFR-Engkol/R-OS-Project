@@ -28,11 +28,11 @@ namespace PCI{
             U8 NextCapPTR = (U8)((CapHeader >> 8) & 0xFF);
 
             if(CapID == 0x05){
-                Write(Level::LOG_NOTICE, "PCI %d:%d:%d - Found MSI Capability at offset 0x%02x\n",
+                Write(Level::LOG_DEBUG, "PCI %d:%d:%d - Found MSI Capability at offset 0x%02x\n",
                     (int)Bus, (int)Device, (int)Function, (int)CapPTR);
                 return CapPTR;
             } else if(CapID == 0x11){
-                Write(Level::LOG_NOTICE, "PCI %d:%d:%d - Found MSI-X Capability at offset 0x%02x\n",
+                Write(Level::LOG_DEBUG, "PCI %d:%d:%d - Found MSI-X Capability at offset 0x%02x\n",
                     (int)Bus, (int)Device, (int)Function, (int)CapPTR);
                 // Here you can parse the MSI-X capability structure further if needed
             }
@@ -61,7 +61,7 @@ namespace PCI{
                 U8 SubClass = (U8)((Reg8 >> 16) & 0xFF);
                 U8 ProgIF = (U8)((Reg8 >> 8) & 0xFF);
 
-                Write(Level::LOG_INFO, "PCI %d:%d:%d - Class:%x Subclass:%x\n",
+                Write(Level::LOG_DEBUG, "PCI %d:%d:%d - Class:%x Subclass:%x\n",
                     (int)bus, (int)device, (int)function,
                     (int)ClassCode, (int)SubClass);
 
@@ -99,7 +99,7 @@ namespace PCI{
     }
 
     void ScanAllBuses(){
-        Write(Level::LOG_INFO, " start scanning all buses\n");
+        Write(Level::LOG_DEBUG, " start scanning all buses\n");
         for(unsigned bus = 0; bus < 256; ++bus){
             ScanBus((U8)bus);
         }

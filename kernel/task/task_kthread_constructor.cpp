@@ -35,6 +35,67 @@ namespace Tasking{
         return (U64)new_pml4_phys;
     }
 
+    // Helper to clone a page table level
+    // Returns Physical Address of the new table
+    static UPTR CloneTable(UPTR SrcPhys, int Level) {
+        UPTR NewPhys = PageAlloc::PhysicalAllocPages(1);
+        if (!NewPhys) return 0;
+
+        U64* SrcVirt = HHDM_PhysToVirt(SrcPhys);
+        U64* NewVirt = HHDM_PhysToVirt(NewPhys);
+        String::Memset(NewVirt, 0, PAGE_SIZE);
+
+        for (int i = 0; i < 512; ++i) {
+            if (!(SrcVirt[i] & PAGE_PRESENT)) continue;
+
+            if (Level > 1) {
+                // Directory (PML4, PDPT, PD)
+                // Recurse
+                UPTR ChildSrcPhys = SrcVirt[i] & PAGE_ADDR_MASK;
+                UPTR ChildNewPhys = CloneTable(ChildSrcPhys, Level - 1);
+                if (!ChildNewPhys) return 0; // TODO: Cleanup
+
+                // Copy flags but point to new child
+                NewVirt[i] = ChildNewPhys | (SrcVirt[i] & ~PAGE_ADDR_MASK);
+            } else {
+                // Page Table (Level 1)
+                // Allocate new physical page for data
+                UPTR PageSrcPhys = SrcVirt[i] & PAGE_ADDR_MASK;
+                UPTR PageNewPhys = PageAlloc::PhysicalAllocPages(1);
+                if (!PageNewPhys) return 0; // TODO: Cleanup
+
+                // Copy data
+                void* PageSrcVirt = (void*)HHDM_PhysToVirt(PageSrcPhys);
+                void* PageNewVirt = (void*)HHDM_PhysToVirt(PageNewPhys);
+                String::Memcpy(PageNewVirt, PageSrcVirt, PAGE_SIZE);
+
+                // Map new page
+                NewVirt[i] = PageNewPhys | (SrcVirt[i] & ~PAGE_ADDR_MASK);
+            }
+        }
+        return NewPhys;
+    }
+
+    U64 CloneUserAddressSpace(U64 SourceCR3) {
+        // 1. Create Base (Kernel Mappings)
+        U64 NewCR3 = CreateUserAddressSpace();
+        if (!NewCR3) return 0;
+
+        U64* SrcPML4 = HHDM_PhysToVirt(SourceCR3);
+        U64* NewPML4 = HHDM_PhysToVirt(NewCR3);
+
+        // 2. Clone User Mappings (0-255)
+        for (int i = 0; i < 256; ++i) {
+            if (SrcPML4[i] & PAGE_PRESENT) {
+                UPTR ChildSrcPhys = SrcPML4[i] & PAGE_ADDR_MASK;
+                UPTR ChildNewPhys = CloneTable(ChildSrcPhys, 3); // Start at Level 3 (PDPT)
+                if (!ChildNewPhys) return 0; // TODO: Cleanup
+                NewPML4[i] = ChildNewPhys | (SrcPML4[i] & ~PAGE_ADDR_MASK);
+            }
+        }
+        return NewCR3;
+    }
+
     Task *ConstructTask(VOID (*Entry)(VOID)){
         Task *NewTask = new Task();
         if(NewTask == nullptr){
@@ -54,7 +115,7 @@ namespace Tasking{
         String::Strcpy(NewTask->Name, "KThread");
         NewTask->NextTask = nullptr;
 
-        NewTask->CR3 = (U64)DoCR3::GetCurrentCR3();
+        NewTask->CR3 = KernelPML4Phys; // kernel thread uses kernel page tables
 
         U64 StackTopAddr = (U64)NewTask->StackBase + NewTask->StackSize;
         U64 FrameAddr = StackTopAddr - sizeof(CpuContext_T);

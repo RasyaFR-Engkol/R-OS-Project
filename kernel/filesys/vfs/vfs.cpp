@@ -1,3 +1,4 @@
+#include "rosval.h"
 #define PRINTK_MODULE_NAME "VFS"
 #include "vfs.hpp"
 #include <string.hpp>
@@ -47,6 +48,15 @@ namespace VFSManager{
             if(String::Strcmp(g_MountPoints[i].path, path) == 0) return (int)i;
         }
         return -1;
+    }
+
+    U32 GetMountPointCount(){
+        return g_MountPointCount;
+    }
+
+    CONSTANT CHAR8* GetMountPointPath(U32 index){
+        if(index >= g_MountPointCount) return nullptr;
+        return (CONSTANT CHAR8*)g_MountPoints[index].path;
     }
 
     BOOL Mount(const char *path, Partition *Part){
@@ -137,7 +147,7 @@ namespace VFSManager{
     File* Open(const char* path){
         FileSystem* fs = nullptr; char rel[256];
         if(!ResolvePath(path, &fs, rel)) {
-            Printk::Write(Printk::Level::LOG_DEBUG, "VFS: Open - ResolvePath failed for '%s'\n", path);
+            Printk::Write(Printk::Level::LOG_ERR, "VFS: Open - ResolvePath failed for '%s'\n", path);
             return nullptr;
         }
         Printk::Write(Printk::Level::LOG_DEBUG, "VFS: Open - path='%s' rel='%s' fs=%p\n", path, rel, (void*)fs);
@@ -308,5 +318,13 @@ namespace VFSManager{
         return file->FSOwner->Flush(file);
     }
 
+    INTN ReadDir(File* dirFile, void* buffer, U32 bufferSize){
+        if(!dirFile || !dirFile->FSOwner) return -1;
+        return dirFile->FSOwner->ReadDir(dirFile, buffer, bufferSize);
+    }
 
+    INTN Ioctl(File* file, U32 command, U64 arg){
+        if(!file || !file->FSOwner) return -1;
+        return file->FSOwner->Ioctl(file, command, arg);
+    }
 }

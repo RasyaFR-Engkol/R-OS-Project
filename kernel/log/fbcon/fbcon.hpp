@@ -8,4 +8,6 @@ namespace FBConsole {
     BOOL IsReady();
     VOID WriteString(const CHAR8 *s);
     VOID UpdateCursor();
+    U64 GetColumns();
+    U64 GetRows();
 }

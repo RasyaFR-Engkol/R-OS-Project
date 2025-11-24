@@ -9,6 +9,7 @@ class ICharDevice{
 
         virtual U32 Read(U8* buffer, U32 size) = 0;
         virtual U32 Write(U8* buffer, U32 size) = 0;
+        virtual INTN Ioctl(File* file, U32 command, U64 arg) = 0;
 
         virtual const CHAR8* GetDeviceName() = 0;
 };
@@ -42,6 +43,7 @@ class DevFS : public FileSystem{
         virtual BOOL Delete(const char* path) override;
         virtual BOOL Rename(const char* oldPath, const char* newPath) override;
         virtual BOOL Seek(File* file, U64 position) override;
+        virtual INTN Ioctl(File* file, U32 command, U64 arg) override;
         
         // Register/unregister device names local to this DevFS instance
         BOOL RegisterCharDevice(ICharDevice* dev, const CHAR8* name);
@@ -56,6 +58,7 @@ class DevFS : public FileSystem{
     virtual BOOL Flush(File* file) override;
     virtual BOOL Append(File* file, U8* buffer, U32 size) override;
     virtual BOOL Cp(const char* srcPath, const char* destPath) override;
+    virtual INTN ReadDir(File* dirFile, void* buffer, U32 bufferSize) override;
     
     private:
         struct DevEntry {

@@ -75,6 +75,12 @@ namespace Arch {
                 : "memory", "cc"
             );
         }
+
+        static inline U64 RdTSC(){
+            U32 lo, hi;
+            asm volatile ("rdtsc" : "=a"(lo), "=d"(hi));
+            return ((U64)hi << 32) | (U64)lo;
+        }
     }
 
         // Model-specific register helpers (RDMSR/WRMSR) and convenient EFER/STAR accessors.

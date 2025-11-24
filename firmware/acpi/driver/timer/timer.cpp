@@ -4,6 +4,8 @@
 #include "../../../../kernel/driver/pic/timer/pit.hpp"
 #include "../../../../kernel/intidt/idt.hpp"
 #include <task.hpp>
+#include "../kernel/log/fbcon/fbcon.hpp"
+#include "../kernel/driver/pic/pic.hpp"
 
 // Export lapic tick counter/frequency so Sleep can use LAPIC as time source
 volatile U64 ACPI::Timer::LapicTicks = 0;
@@ -11,6 +13,7 @@ U32 ACPI::Timer::LapicHz = 0;
 
 // Simple LAPIC timer IRQ handler (file-scope). Increment lapic tick counter.
 static void LapicOnIrqHandler(void *context) {
+    FBConsole::UpdateCursor();
     ACPI::Timer::LapicTicks = ACPI::Timer::LapicTicks + 1;
     PIT::ticks = PIT::ticks + 1;
     Tasking::SchedulerTick(context);

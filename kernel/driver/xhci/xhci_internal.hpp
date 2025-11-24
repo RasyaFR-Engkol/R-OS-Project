@@ -10,4 +10,8 @@ namespace xHCI {
 
     // Diagnostics
     void DumpXHCIState(xHCIDriver &DRV, const char* tag);
+    // Helper: map a completed SlotID back to the root port that requested it
+    U8 GetPortIDForSlot(xHCIDriver &DRV, U8 SlotID);
+
+    VOID SetDeviceConfiguration(xHCIDriver &DRV, U8 SlotID, U8 ConfigValue);
 }

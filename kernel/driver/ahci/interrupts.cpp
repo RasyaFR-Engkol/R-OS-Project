@@ -33,7 +33,7 @@ namespace AHCI {
         U32 PortsWithIRQ = regs->is; // Interrupt Status Register
 
         if(PortsWithIRQ == 0){
-            Printk::Write(Printk::Level::LOG_WARNING, " Spurious interrupt on controller %u\n", (unsigned)Controller_ID);
+            Printk::Write(Printk::Level::LOG_DEBUG, " Spurious interrupt on controller %u\n", (unsigned)Controller_ID);
             return;
         }
 

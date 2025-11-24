@@ -33,7 +33,13 @@ namespace Serial {
         while (!(Port::Inb(port + 5) & 0x20)) {
             if (--timeout == 0u) return;
 
-            Tasking::SchedulerYield();
+            // REMOVED: Tasking::SchedulerYield();
+            // Yielding inside SerialPutC is dangerous because this function
+            // is called from IRQ handlers (Keyboard, Serial RX).
+            // Context switching away from an ISR prevents EOI from being sent,
+            // blocking further interrupts and causing massive lag.
+            // Just spin-wait here.
+            asm volatile("pause");
         }
         Port::Outb(port, (U8)c);
     }
@@ -242,6 +248,10 @@ namespace Serial {
         const uint16_t port = 0x3F8;
         while (Inb(port + 5) & 0x01) {
             char ch = (char)Inb(port + 0);
+
+            // Echo immediately (User Request)
+            EchoCharToConsoles(ch);
+
             // push into buffer
             unsigned int head = s_rx_head;
             unsigned int next = (head + 1) % RX_BUF_SIZE;

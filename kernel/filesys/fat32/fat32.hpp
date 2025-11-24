@@ -82,6 +82,7 @@ class FAT32FileSystem : public FileSystem{
         virtual BOOL Flush(File* file) override;
     virtual BOOL Append(File* file, U8* buffer, U32 size) override;
     virtual BOOL Cp(const char* srcPath, const char* destPath) override;
+    virtual INTN ReadDir(File* dirFile, void* buffer, U32 bufferSize) override;
 
         Partition* GetPartition() { return m_Partition; }
         U32 GetSectorsPerCluster() { return m_BPB.SectorsPerCluster; }

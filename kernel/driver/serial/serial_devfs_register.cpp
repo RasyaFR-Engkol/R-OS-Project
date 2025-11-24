@@ -42,6 +42,10 @@ public:
         return m_Name;
     }
 
+    virtual INTN Ioctl(File* file, U32 command, U64 arg) override {
+        (void)file; (void)command; (void)arg; return -ROS_UNSUPPORTED;
+    }
+
 private:
     CHAR8 m_Name[64];
 };

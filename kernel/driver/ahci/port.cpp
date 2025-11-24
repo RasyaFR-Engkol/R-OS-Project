@@ -86,7 +86,7 @@ namespace AHCI {
         U8 DET = (U8)(SSTS & 0x0F);
 
         if(DET != 0x03) {
-            Printk::Write(Printk::Level::LOG_INFO, " Port %d: No device detected (DET=%u)\n", (unsigned)PortNum, (unsigned)DET);
+            Printk::Write(Printk::Level::LOG_DEBUG, " Port %d: No device detected (DET=%u)\n", (unsigned)PortNum, (unsigned)DET);
             return DeviceType::NONE;
         }
 

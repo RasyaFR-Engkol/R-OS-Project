@@ -17,6 +17,8 @@ namespace DeviceManager{
 
     BOOL RegisterBlockDevice(IBlockDevice *Device);
 
+    BOOL UnregisterBlockDevice(IBlockDevice *Device);
+
     BOOL RegisterCharDevice(ICharDevice *Device);
 
     U32 GetBlockDeviceCount();

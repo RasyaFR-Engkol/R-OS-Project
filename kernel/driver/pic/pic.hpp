@@ -1,5 +1,6 @@
 #pragma once
 #include "rosval.h"
+#include <task.hpp>
 
 // Port PIC 1
 #define PIC1_COMMAND 0x20
@@ -20,6 +21,11 @@ namespace PIC {
         // Poll queued scancodes (call from main loop / console task)
         void Poll();
         
+        // Blocking read for Stdin
+        char GetChar();
+
+        U32 GetBufferCount();
+        void NotifyTaskDied(Tasking::Task* t);
     }
     VOID DisableIRQWhileAndMaskOldPIC();
 }

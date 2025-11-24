@@ -5,6 +5,11 @@
 #include <mm.hpp>
 #include "xhci.hpp"
 #include "xhci_isr.hpp"
+#include <string.hpp>
+#include "../../filesys/iblockdevice.hpp"
+#include "../../dev/devicemanager.hpp"
+#include "../../filesys/devfs/devfs.hpp"
+#include "../../filesys/vfs/vfs.hpp"
 
 namespace xHCI {
     using namespace Printk;
@@ -57,7 +62,7 @@ namespace xHCI {
             U8 Vector = MSI::EnableMSI(Bus, Device, Function, MSICapOffset, xHCI_InterruptHandler_C0);
             if(Vector != 0){
                 DRV.IntVector = Vector;
-                Write(Level::LOG_INFO, " Enabled MSI on XHCI Controller %02X:%02X:%02X with vector 0x%02x\n",
+                Write(Level::LOG_DEBUG, " Enabled MSI on XHCI Controller %02X:%02X:%02X with vector 0x%02x\n",
                     (unsigned)Bus, (unsigned)Device, (unsigned)Function, (unsigned)Vector);
             } else {
                 Write(Level::LOG_ERR, " Failed to enable MSI on XHCI Controller %02X:%02X:%02X\n",
@@ -68,7 +73,7 @@ namespace xHCI {
             U8 irq = PCI::EnableLegacyINTxForDevice(Bus, Device, Function, xHCI_InterruptHandler_C0);
             if (irq != 0) {
                 DRV.IntVector = (U8)(0x20 + irq);
-                Write(Level::LOG_INFO, " Enabled legacy INTx IRQ %u for XHCI Controller %02X:%02X:%02X (vector 0x%02x)\n",
+                Write(Level::LOG_DEBUG, " Enabled legacy INTx IRQ %u for XHCI Controller %02X:%02X:%02X (vector 0x%02x)\n",
                     (unsigned)irq, (unsigned)Bus, (unsigned)Device, (unsigned)Function, (unsigned)DRV.IntVector);
             } else {
                 Write(Level::LOG_WARNING, " No MSI and legacy INTx unavailable for XHCI %02X:%02X:%02X\n",
@@ -78,7 +83,44 @@ namespace xHCI {
 
         g_xhci_controller_count++;
 
-        Write(Level::LOG_INFO, " Registered XHCI Controller %02X:%02X:%02X\n",
+        // Create a small IBlockDevice wrapper so the controller can be
+        // exposed via /dev as a device node (name format: "ud%c"). The
+        // wrapper does not implement sector IO; it simply provides a name
+        // so DevFS/DeviceManager can list the controller.
+        class XHCIBlockDevice : public IBlockDevice {
+        public:
+            CHAR8 m_Name[8];
+            int m_Index;
+            XHCIBlockDevice(int idx){
+                m_Index = idx;
+                char letter = (char)('a' + (idx & 0x1F));
+                m_Name[0] = 'u'; m_Name[1] = 'd'; m_Name[2] = letter; m_Name[3] = '\0';
+            }
+            virtual ~XHCIBlockDevice() {}
+            virtual BOOL ReadSectors(U64 LBA, U32 Count, PageAlloc::DMAAlloc::DMABuffer **BufferOut) override { (void)LBA; (void)Count; (void)BufferOut; return FALSE; }
+            virtual BOOL WriteSectors(U64 LBA, U32 Count, PageAlloc::DMAAlloc::DMABuffer *Buffer) override { (void)LBA; (void)Count; (void)Buffer; return FALSE; }
+            virtual const CHAR8* GetDeviceName() override { return m_Name; }
+        };
+
+        // Instantiate and register the device
+        int idx_for_name = g_xhci_controller_count - 1;
+        XHCIBlockDevice *dev = new XHCIBlockDevice(idx_for_name);
+        if(!dev) {
+            Write(Level::LOG_ERR, " Failed allocating XHCI dev wrapper\n");
+        } else {
+            BOOL ok1 = DeviceManager::RegisterBlockDevice(dev);
+
+            // Also try to register with DevFS mounted at /dev
+            FileSystem* fs = nullptr; char rel[256];
+            BOOL ok2 = FALSE;
+            if (VFSManager::ResolvePath((const char*)"/dev", &fs, rel) && fs) {
+                DevFS* devfs = (DevFS*)fs;
+                ok2 = devfs->RegisterBlockDevice(dev, dev->GetDeviceName());
+            }
+
+            Write(Level::LOG_DEBUG, " XHCI: Registered controller node %s (devmgr=%d, devfs=%d)\n", dev->GetDeviceName(), ok1 ? 1 : 0, ok2 ? 1 : 0);
+        }
+        Write(Level::LOG_DEBUG, " Registered XHCI Controller %02X:%02X:%02X\n",
             (unsigned)Bus, (unsigned)Device, (unsigned)Function);
 
     }

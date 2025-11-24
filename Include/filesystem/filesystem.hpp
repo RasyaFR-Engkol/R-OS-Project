@@ -25,4 +25,7 @@
 // ChAR devICE
 #include "../../kernel/filesys/devfs/devfs.hpp"
 
+// ROOTFS
+#include "../../kernel/filesys/rootfs/rootfs.hpp"
+
 // TODO: nanti disini kita bisa tambah driver NVMe juga

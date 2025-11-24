@@ -70,6 +70,7 @@ class EXT2FileSystem : public FileSystem{
     virtual BOOL Flush(File* file) override;
     virtual BOOL Append(File* file, U8* buffer, U32 size) override;
         virtual BOOL Cp(const char* srcPath, const char* destPath) override;
+        virtual INTN ReadDir(File* dirFile, void* buffer, U32 bufferSize) override;
         // Debug / testing helpers (not used in normal runtime)
         // Set fail-after N writes for WriteBlock() (0 = disabled)
         void DebugSetFailAfter(U32 writes);

@@ -37,6 +37,8 @@ namespace Tasking{
     struct Task{
         U64 pid; // Process ID
         U64 ppid; // Parent Process ID
+        U64 PGID; // Process Group ID
+        U32 Signals; // Pending Signals
         CHAR8 Name[32]; // Task Name
 
         U64 RSP; // Pointer ke konteks CpuContext_T yang siap di-iret
@@ -60,17 +62,35 @@ namespace Tasking{
         U64 MMapNextAddr; // Untuk syscall mmap, nyimpen alamat mmap berikutnya
 
         BOOL YieldRequested; // Tambah ini
+
+        CHAR8 CWD[256];
     };
 
     // Variabl global untuk task management
     extern Task *TaskArray[MAX_TASK];
     extern U64 ActiveTask;
     extern U64 CurrentTaskIndex;
+    extern BOOL SchedulerActive;
+    extern U64 g_ForegroundPID;
 
     VOID SchedulerStart();
     VOID CreateKThread(VOID (*Entry)(VOID));
+    VOID CreateUserTask(const CHAR8 *Name, VOID *ELFImage);
     VOID SchedulerTick(void *context);
     U64 GetTimeSliceForPriority(U8 Priority);
     U64 GetTimeAllotmentForPriority(U8 priority);
     VOID SchedulerYield();
+    U64 CreateUserAddressSpace();
+    U64 CloneUserAddressSpace(U64 SourceCR3);
+    VOID SchedulerAddTask(Task *NewTask);
+    Task* TaskUserConstructor(const CHAR8 *Name, VOID *ELFImage);
+    VOID DestroyTask(Task *task);
+    VOID FreeUserAddressSpace(U64 cr3); // Expose this
+    // Return a copy of the currently running Task struct. If no current
+    // task exists, returns a zeroed Task with pid==0.
+    Task GetCurrentTask();
+    // Faster accessor returning pointer to the current Task (or nullptr)
+    // Use this when you need to access fields like CR3 without copying.
+    Task* GetCurrentTaskPtr();
+    Task *GetTaskPID(U64 pid);
 }

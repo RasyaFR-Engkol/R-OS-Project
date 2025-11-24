@@ -30,8 +30,8 @@ struct __attribute__((packed)) tss_struct {
 
 static tss_struct g_tss __attribute__((aligned(16)));
 
-// GDT selector index to place TSS (pick index 3 => selector = 3*8 = 0x18)
-static constexpr unsigned TSS_GDT_INDEX = 3;
+// GDT selector index to place TSS (two consecutive entries).
+static constexpr unsigned TSS_GDT_INDEX = 6;
 
 // Build 16-byte TSS descriptor fields (low 8 bytes and high 8 bytes)
 static void build_tss_descriptor(U64 base, U32 limit, U64 &out_low, U64 &out_high) {
@@ -102,6 +102,12 @@ namespace TSS {
 
     void SetRsp0(UPTR rsp0_top) {
         g_tss.rsp0 = (U64)rsp0_top;
+    }
+
+    // C-accessible getter for the current RSP0 value. Useful for assembly
+    // stubs that need to switch to the kernel stack for syscall handling.
+    extern "C" UPTR TSS_GetRsp0() {
+        return (UPTR)g_tss.rsp0;
     }
 
 } // namespace TSS

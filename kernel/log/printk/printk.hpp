@@ -37,6 +37,7 @@ static inline const char* __printk_module_name_impl(void) { return "Module"; }
 namespace Printk {
 
     extern File* s_SerialConsoleFile;
+    extern File* s_FrameConsoleFile;
 
     typedef enum {
         LOG_EMERG = 1,

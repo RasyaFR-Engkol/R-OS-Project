@@ -44,6 +44,21 @@ namespace xHCI{
     // Counter for spurious interrupts observed on this controller
     U32 SpuriousInterruptCount;
 
+        // Per-slot device state array maintained by the xHCI driver.
+        // This holds runtime info about allocated slots/devices such as
+        // EP0 ring pointers, enqueue indices and cycle state.
+        struct XHCIDeviceState {
+            PageAlloc::DMAAlloc::DMABuffer* EP0Ring;
+            U32 EP0EnqueueIdx;
+            BOOL EP0CycleState;
+            U64 LastEP0DestPhys;
+            // future: add endpoint rings, address, config, speed, etc.
+            XHCIDeviceState(){ EP0Ring = nullptr; EP0EnqueueIdx = 0; EP0CycleState = TRUE; LastEP0DestPhys = 0; }
+        };
+
+        static const U32 MAX_SLOTS = 256;
+        XHCIDeviceState Devs[MAX_SLOTS];
+
         // Simple state to avoid double-issuing Enable Slot on repeated PSC
         struct xHCIPortState {
             U8 State; // see enum below for symbolic names
@@ -71,4 +86,8 @@ namespace xHCI{
     VOID SimulateDeviceConnectTest();
     // New test: issue N Enable Slot commands (no NOOP, no polling) to verify repeated interrupts
     VOID InterruptBurstTest(U32 times);
+
+
+    VOID SetupAddressDevice(xHCIDriver &DRV, U8 SlotID, U8 RootPortID);
+    VOID GetDeviceDescriptor(xHCIDriver &DRV, U8 SlotID);
 }

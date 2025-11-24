@@ -554,5 +554,14 @@ int VSPrint(char* buffer, unsigned long long bufsize, const char* fmt, va_list a
 
 }
 
+int SPrint(char* buffer, unsigned long long bufsize, const char* fmt, ...)
+{
+    va_list args;
+    va_start(args, fmt);
+    int ret = VSPrint(buffer, bufsize, fmt, args);
+    va_end(args);
+    return ret;
+}
+
 } // namespace String
 

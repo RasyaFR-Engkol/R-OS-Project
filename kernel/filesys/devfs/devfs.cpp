@@ -1,3 +1,4 @@
+#include "devfs.hpp"
 #include <rosval.h>
 #include <filesystem/filesystem.hpp>
 #include <mm.hpp>
@@ -10,6 +11,7 @@
 // Forward declaration for serial devfs registration helper implemented in
 // kernel/driver/serial/serial_devfs_register.cpp
 namespace SerialDriver { BOOL RegisterSerialToDevFS(class DevFS* devfs); }
+namespace StdDvc { VOID RegisterSTD(class DevFS* devfs); }
 
 File* DevFS::Open(const char* path) {
     // Path dari VFS akan relatif, e.g. "/hda"
@@ -28,6 +30,7 @@ File* DevFS::Open(const char* path) {
         f->FSOwner = this;
         f->Type = DevFile::DeviceType::NONE; // Bukan device
         f->dev.BlockDev = nullptr;
+        f->RefCount = 1; // Init RefCount
         return f;
     }
 
@@ -45,6 +48,7 @@ File* DevFS::Open(const char* path) {
                 f->Type = DevFile::DeviceType::CHAR;
                 f->dev.CharDev = m_Entries[i].Ptr.Char;
                 f->FileSize = 0;
+                f->RefCount = 1; // Init RefCount
                 return f;
             } else if (m_Entries[i].Type == DevFile::DeviceType::BLOCK) {
                 DevFile* f = new DevFile();
@@ -55,6 +59,7 @@ File* DevFS::Open(const char* path) {
                 f->Type = DevFile::DeviceType::BLOCK;
                 f->dev.BlockDev = m_Entries[i].Ptr.Block;
                 f->FileSize = 0;
+                f->RefCount = 1; // Init RefCount
                 return f;
             }
         }
@@ -72,6 +77,7 @@ File* DevFS::Open(const char* path) {
         f->dev.BlockDev = bdev;
         // f->FileSize = bdev->GetSectorCount() * 512; // (Jika Anda menambahkan GetSectorCount ke IBlockDevice)
         f->FileSize = 0;
+        f->RefCount = 1; // Init RefCount
         return f;
     }
 
@@ -86,6 +92,7 @@ File* DevFS::Open(const char* path) {
         f->Type = DevFile::DeviceType::CHAR;
         f->dev.CharDev = cdev;
         f->FileSize = 0; // Char device tidak punya ukuran
+        f->RefCount = 1; // Init RefCount
         return f;
     }
     
@@ -280,6 +287,17 @@ U32 DevFS::Write(File *File, U8 *Buffer, U32 Size){
     return 0;
 }
 
+INTN DevFS::Ioctl(File* file, U32 command, U64 arg){
+    if(!file) return -1;
+    DevFile* df = static_cast<DevFile*>(file);
+
+    if(df->Type == DevFile::DeviceType::CHAR){
+        if(df->dev.CharDev) return df->dev.CharDev->Ioctl(file, command, arg);
+        return -1;
+    }
+    return -1;
+}
+
 BOOL DevFS::Delete(const char* path){
     (void)path; return FALSE; // Not supported
 }
@@ -323,6 +341,41 @@ BOOL DevFS::Cp(const char* srcPath, const char* destPath){
     (void)srcPath; (void)destPath; return FALSE; // Not supported
 }
 
+INTN DevFS::ReadDir(File* dirFile, void* buffer, U32 bufferSize){
+    if(!dirFile || !buffer) return -1;
+    if(!dirFile->IsDirectory) return -1;
+    if(bufferSize == 0) return 0;
+
+    char* out = (char*)buffer;
+    U32 remain = bufferSize;
+
+    // Use CurrentPosition as number of entries already returned
+    U64 skip = dirFile->CurrentPosition;
+    U64 seen = 0;
+
+    // First, list local registry entries
+    for(int i=0;i<MAX_ENTRIES;i++){
+        if(!m_Entries[i].Used) continue;
+        const CHAR8* name = m_Entries[i].Name;
+        // count this entry
+        U64 idx = seen++;
+        if(idx < skip) continue;
+        U32 need = (U32)(String::Strlen(name) + 1);
+        if(need > remain) { seen--; break; }
+        String::Memcpy((U8*)out, (const U8*)name, need);
+        out += need; remain -= need;
+    }
+
+    // Debug: how many entries total were reported
+    //Printk::Write(Printk::Level::LOG_INFO, "DevFS: ReadDir total reported=%llu\n", (unsigned long long)seen);
+
+    // update position to number of entries seen
+    dirFile->CurrentPosition = seen;
+
+    U32 used = bufferSize - remain;
+    return (INTN)used;
+}
+
 namespace DEVFS{
     BOOL Init(){
         DevFS *devfs = new DevFS();
@@ -330,6 +383,7 @@ namespace DEVFS{
             // Beberapa yang harus di register ke devfs
             FBDriver::RegisterFBToDevFS(devfs);
             SerialDriver::RegisterSerialToDevFS(devfs);
+            StdDvc::RegisterSTD(devfs);
             return TRUE;
         }
 

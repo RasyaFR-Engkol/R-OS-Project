@@ -10,7 +10,7 @@ namespace xHCI {
     using namespace Printk;
 
     VOID SendNOOPCommand(xHCIDriver &DRV){
-        Write(Level::LOG_NOTICE, " Submitting NOOP Command\n");
+        Write(Level::LOG_DEBUG, " Submitting NOOP Command\n");
 
         U32 index = DRV.CmdRingEnqueueIndex; 
         volatile xHCITRB *NOOPTRB = &DRV.VCmdRing[index];
@@ -34,7 +34,7 @@ namespace xHCI {
         asm volatile ("mfence" ::: "memory");
         DRV.doorbell_regs[0] = 0;
 
-        Write(Level::LOG_NOTICE, " NOOP Command doorbelled\n");
+        Write(Level::LOG_DEBUG, " NOOP Command doorbelled\n");
     }
 
     VOID SendEnableSlotCommand(xHCIDriver &DRV){

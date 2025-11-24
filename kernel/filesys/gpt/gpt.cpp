@@ -11,6 +11,8 @@
 #include "../../mm/kmalloc/kmalloc.hpp"
 #include "../../driver/ahci/ahci_disk.hpp"
 #include "../../dev//devicemanager.hpp"
+#include "../devfs/devfs.hpp"
+#include "../vfs/vfs.hpp"
 
 namespace GPTFS{
     #define SECTOR_SIZE 512
@@ -50,15 +52,15 @@ namespace GPTFS{
             // Copy the 8 signature bytes and NUL-terminate for safe printing
             String::Memcpy(SigBuf, (const void*)&((*OutHeader)->Signature), 8);
             SigBuf[8] = '\0';
-            Printk::Write(Printk::Level::LOG_INFO, " Signature: %.8s\n", SigBuf);
-            Printk::Write(Printk::Level::LOG_INFO, " Revision: %08X\n", (*OutHeader)->Revision);
-            Printk::Write(Printk::Level::LOG_INFO, " Header Size: %u bytes\n", (*OutHeader)->HeaderSize);
-            Printk::Write(Printk::Level::LOG_INFO, " Backup LBA: %llu\n", (*OutHeader)->BackupLBA);
-            Printk::Write(Printk::Level::LOG_INFO, " First Us   able LBA: %llu\n", (*OutHeader)->FirstUsableLBA);
-            Printk::Write(Printk::Level::LOG_INFO, " Last Usable LBA: %llu\n", (*OutHeader)->LastUsableLBA);
-            Printk::Write(Printk::Level::LOG_INFO, " Partition Entry LBA: %llu\n", (*OutHeader)->PartitionEntryLBA);
-            Printk::Write(Printk::Level::LOG_INFO, " Number of Partition Entries: %u\n", (*OutHeader)->NumberOfPartitionEntries);
-            Printk::Write(Printk::Level::LOG_INFO, " Size of Partition Entry: %u bytes\n", (*OutHeader)->SizeOfPartitionEntry);
+            Printk::Write(Printk::Level::LOG_DEBUG, " Signature: %.8s\n", SigBuf);
+            Printk::Write(Printk::Level::LOG_DEBUG, " Revision: %08X\n", (*OutHeader)->Revision);
+            Printk::Write(Printk::Level::LOG_DEBUG, " Header Size: %u bytes\n", (*OutHeader)->HeaderSize);
+            Printk::Write(Printk::Level::LOG_DEBUG, " Backup LBA: %llu\n", (*OutHeader)->BackupLBA);
+            Printk::Write(Printk::Level::LOG_DEBUG, " First Us   able LBA: %llu\n", (*OutHeader)->FirstUsableLBA);
+            Printk::Write(Printk::Level::LOG_DEBUG, " Last Usable LBA: %llu\n", (*OutHeader)->LastUsableLBA);
+            Printk::Write(Printk::Level::LOG_DEBUG, " Partition Entry LBA: %llu\n", (*OutHeader)->PartitionEntryLBA);
+            Printk::Write(Printk::Level::LOG_DEBUG, " Number of Partition Entries: %u\n", (*OutHeader)->NumberOfPartitionEntries);
+            Printk::Write(Printk::Level::LOG_DEBUG, " Size of Partition Entry: %u bytes\n", (*OutHeader)->SizeOfPartitionEntry);
             return TRUE;
     }
     
@@ -68,7 +70,7 @@ namespace GPTFS{
             return FALSE;
         }
 
-        Printk::Write(Printk::Level::LOG_INFO, "GPT: Parsing Partition Entries in LBA %llu\n", GPTHeader0->PartitionEntryLBA);
+        Printk::Write(Printk::Level::LOG_DEBUG, "GPT: Parsing Partition Entries in LBA %llu\n", GPTHeader0->PartitionEntryLBA);
 
         // PERBAIKAN:
         U32 TableSizeBytes = GPTHeader0->NumberOfPartitionEntries * GPTHeader0->SizeOfPartitionEntry;
@@ -107,13 +109,13 @@ namespace GPTFS{
 
             PartitionCount++;
 
-            Printk::Write(Printk::Level::LOG_INFO, "  Partition No.%d:\n", PartitionCount);
-            Printk::Write(Printk::Level::LOG_INFO, "    GUID Type: %08X-%04X-%04X-...\n", 
+            Printk::Write(Printk::Level::LOG_DEBUG, "  Partition No.%d:\n", PartitionCount);
+            Printk::Write(Printk::Level::LOG_DEBUG, "    GUID Type: %08X-%04X-%04X-...\n", 
                 entry->PartitionTypeGUID.data1, 
                 entry->PartitionTypeGUID.data2, 
                 entry->PartitionTypeGUID.data3);
             
-            Printk::Write(Printk::Level::LOG_INFO, "    First LBA: %llu, Last LBA: %llu\n",
+            Printk::Write(Printk::Level::LOG_DEBUG, "    First LBA: %llu, Last LBA: %llu\n",
                 entry->StartingLBA,
                 entry->EndingLBA);
 
@@ -121,12 +123,56 @@ namespace GPTFS{
             if(newPartition){
                 // Daftarkan partisi baru ke PartitionManager
                 PartitionManager::RegisterPartition(newPartition);
+
+                // Buat wrapper IBlockDevice kecil untuk mewakili partisi ini
+                // sehingga bisa didaftarkan ke DeviceManager dan DevFS sebagai
+                // node /dev/<parent><n> (contoh: sda1, sda2).
+                class PartitionBlockDevice : public IBlockDevice {
+                    public:
+                        Partition *m_Part;
+                        CHAR8 m_Name[32];
+                        PartitionBlockDevice(Partition *p, const CHAR8* parentName, U32 partIndex){
+                            m_Part = p;
+                            // Build name: parentName + decimal(partIndex)
+                            String::Strcpy(m_Name, (const char*)parentName);
+                            CHAR8 numbuf[16];
+                            // partIndex is 1-based here
+                            String::Utoa((unsigned long long)partIndex, (char*)numbuf, 10);
+                            String::Strcat(m_Name, (const char*)numbuf);
+                        }
+                        virtual ~PartitionBlockDevice() {}
+                        virtual BOOL ReadSectors(U64 LBA, U32 Count, PageAlloc::DMAAlloc::DMABuffer **BufferOut) override {
+                            return m_Part->ReadSectors(LBA, Count, BufferOut);
+                        }
+                        virtual BOOL WriteSectors(U64 LBA, U32 Count, PageAlloc::DMAAlloc::DMABuffer *Buffer) override {
+                            return m_Part->WriteSectors(LBA, Count, Buffer);
+                        }
+                        virtual const CHAR8* GetDeviceName() override { return m_Name; }
+                };
+
+                // PartitionCount is the sequential index for non-empty partitions
+                // (1-based). Use it as the partition number suffix.
+                PartitionBlockDevice *pdev = new PartitionBlockDevice(newPartition, Device->GetDeviceName(), (U32)PartitionCount);
+                if(pdev){
+                    BOOL ok1 = DeviceManager::RegisterBlockDevice(pdev);
+                    // Store pointer on Partition so we can unregister later
+                    newPartition->SetDeviceWrapper(pdev);
+                    BOOL ok2 = FALSE;
+                    // Also try to register with DevFS mounted at /dev
+                    FileSystem* fs = nullptr; char rel[256];
+                    if (VFSManager::ResolvePath((const char*)"/dev", &fs, rel) && fs) {
+                        DevFS* devfs = (DevFS*)fs;
+                        ok2 = devfs->RegisterBlockDevice(pdev, pdev->GetDeviceName());
+                    }
+                    Printk::Write(Printk::Level::LOG_DEBUG, " GPT: Registered partition device %s (devmgr=%d, devfs=%d)\n", pdev->GetDeviceName(), ok1 ? 1 : 0, ok2 ? 1 : 0);
+                }
+
             } else {
                 Printk::Write(Printk::Level::LOG_ERR, " GPT: Failed to allocate memory for new partition object.\n");
             }
         }
 
-        Printk::Write(Printk::Level::LOG_INFO, " GPT: Total %d partitions found.\n", PartitionCount);
+        Printk::Write(Printk::Level::LOG_NOTICE, " GPT: Total %d partitions found.\n", PartitionCount);
 
         PageAlloc::DMAAlloc::FreeDMABuffer(buf);
         return TRUE;
@@ -141,7 +187,7 @@ namespace GPTFS{
             // Register filesystem drivers BEFORE initializing GPT/partitions
         VFSManager::RegisterFileSystem("FAT32", []()->FileSystem* { return new FAT32FileSystem(); });
 
-        Printk::Write(Printk::Level::LOG_INFO, " GPT: Starting initialization...\n");
+        Printk::Write(Printk::Level::LOG_NOTICE, " GPT: Starting initialization...\n");
 
         U32 DeviceCount = DeviceManager::GetBlockDeviceCount();
         if(DeviceCount == 0){
@@ -159,7 +205,7 @@ namespace GPTFS{
                 continue;
             }
 
-            Printk::Write(Printk::Level::LOG_INFO, " GPT: Initializing device %u...\n", i);
+            Printk::Write(Printk::Level::LOG_DEBUG, " GPT: Initializing device %u...\n", i);
 
             GPTFS::GPTHeader *GPTHeader0 = nullptr;
             if(!InitializeGPT(Device, &GPTHeader0)){
@@ -175,7 +221,7 @@ namespace GPTFS{
             AttemptGPTCall++;
         }
 
-        Printk::Write(Printk::Level::LOG_INFO, " GPT: Initialization complete (%llu attempt)\n", AttemptGPTCall);
+        Printk::Write(Printk::Level::LOG_DEBUG, " GPT: Initialization complete (%llu attempt)\n", AttemptGPTCall);
 
         PartitionManager::InitializeRegisteredPartitionToFS();
 

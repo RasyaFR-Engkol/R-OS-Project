@@ -191,9 +191,7 @@ File* FAT32FileSystem::Open(const char* path){
 
 void FAT32FileSystem::Close(File* file){
     if(!file) return;
-    Printk::Write(Printk::Level::LOG_ALERT, "CLOSING FILE\n");
     delete file;
-    Printk::Write(Printk::Level::LOG_ALERT, "FILE CLOSED\n");
 }
 
 U32 FAT32FileSystem::Read(File* file, U8* buffer, U32 size){
@@ -1119,4 +1117,48 @@ BOOL FAT32FileSystem::Append(File* file, U8* buffer, U32 size){
 
     U32 written = Write(file, buffer, size);
     return (written == size) ? TRUE : FALSE;
+}
+
+INTN FAT32FileSystem::ReadDir(File* dirFile, void* buffer, U32 bufferSize){
+    if(!dirFile || !buffer) return -1;
+    if(!dirFile->IsDirectory) return -1;
+    if(bufferSize == 0) return 0;
+
+    char* out = (char*)buffer;
+    U32 remain = bufferSize;
+
+    // Treat CurrentPosition as number of entries already returned.
+    U64 skip = dirFile->CurrentPosition;
+    U64 seen = 0;
+    bool overflow = false;
+
+    struct Ctx { char* out; U32 remain; U64 skip; U64 *seen; bool *overflow; } ctx;
+    ctx.out = out; ctx.remain = remain; ctx.skip = skip; ctx.seen = &seen; ctx.overflow = &overflow;
+
+    // callback invoked for each directory entry name
+    auto cb = [](const char* name, FAT32_DirectoryEntry* de, void* vctx, U64 lba, U32 off)->BOOL{
+        (void)de; (void)lba; (void)off;
+        Ctx* c = (Ctx*)vctx;
+        if(!name){ return TRUE; }
+        // increment seen count for every valid entry
+        U64 idx = (*c->seen)++;
+        if(idx < c->skip) return TRUE; // skip already-read entries
+        U32 needed = (U32)(String::Strlen(name) + 1);
+        if(needed > c->remain){ (*c->seen)--; *(c->overflow) = true; return FALSE; }
+        String::Memcpy((U8*)c->out, (const U8*)name, needed);
+        c->out += needed;
+        c->remain -= needed;
+        return TRUE; // continue
+    };
+
+    BOOL ok = ReadDirectory(dirFile->Internal_StartCluster, cb, &ctx);
+    // Update out/remaining from ctx
+    out = ctx.out; remain = ctx.remain;
+
+    // Update file CurrentPosition to number of entries seen
+    dirFile->CurrentPosition = (U64)seen;
+
+    if(!ok && !overflow) return -1;
+    U32 used = bufferSize - remain;
+    return (INTN)used;
 }

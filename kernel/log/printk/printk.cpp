@@ -17,6 +17,13 @@ namespace Printk {
     using namespace String;
     using namespace Port;
 
+    // Compile-time log level threshold. If PRINTK_CONFIG is defined by the
+    // build/system headers it will be used; otherwise default to LOG_INFO
+    // so that debug messages are hidden by default.
+#ifndef PRINTK_CONFIG
+#define PRINTK_CONFIG LOG_INFO
+#endif
+
     static char LogBuffer[4096];
     static size_t LogBufferIndex = 0;
     // Index of the earliest byte not yet flushed to serial
@@ -250,6 +257,10 @@ namespace Printk {
     }
 
     BOOL InternalWrite(Printk::Level level, const char *module_name, const char *fmt, VA_LIST Args) {
+        // Filter out messages below the configured threshold to avoid
+        // expensive formatting for debug logs when they're disabled.
+        if (level > PRINTK_CONFIG) return TRUE;
+
         LOCKRFLAGS prev = Arch::SaveAndDisableInterrupts();
         Arch::Spinlock::SpinLockAcquire(&PrintkLock);
         // Emit level prefix (restore levelling)

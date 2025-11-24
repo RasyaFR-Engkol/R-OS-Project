@@ -44,4 +44,7 @@ namespace String{
 	// Returns number of characters written (excluding trailing NUL). If bufsize>0
 	// the result is NUL-terminated.
 	int VSPrint(char* buffer, unsigned long long bufsize, const char* fmt, va_list args);
+
+	// Convenience variadic wrapper around VSPrint (like sprintf but bounded).
+	int SPrint(char* buffer, unsigned long long bufsize, const char* fmt, ...);
 }

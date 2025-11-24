@@ -56,6 +56,17 @@ namespace FBConsole {
     static inline void HideCursor();
     static inline void ShowCursor();
 
+    enum AnsiState { ANSI_NORMAL, ANSI_ESC, ANSI_CSI };
+    static AnsiState g_ansi_state = ANSI_NORMAL;
+    static int g_ansi_params[5];
+    static int g_ansi_count = 0;
+
+    static void AnsiStartCSI() {
+        g_ansi_state = ANSI_CSI;
+        g_ansi_count = 0;
+        g_ansi_params[0] = 0;
+    }
+
     VOID Init(){
         SIZE_T fontlen =Lat15_VGA16_psf_len;
         U8 *fontdata = (U8*)Kmalloc::Alloc(fontlen);
@@ -265,15 +276,52 @@ namespace FBConsole {
         g_last_blink_time = Arch::Time::NowTicks();
     }
 
+    static void AnsiExecute(char cmd) {
+        int p1 = (g_ansi_count > 0) ? g_ansi_params[0] : 1;
+        int p2 = (g_ansi_count > 1) ? g_ansi_params[1] : 1;
+
+        switch (cmd) {
+            case 'm': // Ganti Warna
+                if (g_ansi_count == 0) g_fg = 0x00FFFFFF; // Reset putih
+                else {
+                    for(int i=0; i<g_ansi_count; i++) {
+                        int c = g_ansi_params[i];
+                        if (c == 0) g_fg = 0x00FFFFFF;
+                        else if (c == 31) g_fg = 0x00FF0000; // Merah
+                        else if (c == 32) g_fg = 0x0000FF00; // Hijau
+                        else if (c == 34) g_fg = 0x000000FF; // Biru
+                        else if (c == 36) g_fg = 0x0000FFFF; // Cyan
+                        // Tambahin warna lain sesuka hati
+                    }
+                }
+                break;
+
+            case 'J': // Clear Screen
+                if (p1 == 2) {
+                    for(U64 i=0; i < g_rows * g_cols; i++) g_grid[i] = ' ';
+                    g_cur_col = 0; g_cur_row = 0;
+                    // Langsung flush layar item semua
+                    FB::Rect(0, 0, g_scr_w, g_scr_h, 0x00000000);
+                }
+                break;
+                
+            case 'H': // Pindah Kursor
+                g_cur_row = (p1 > 0 ? p1 - 1 : 0);
+                g_cur_col = (p2 > 0 ? p2 - 1 : 0);
+                if(g_cur_row >= g_rows) g_cur_row = g_rows - 1;
+                if(g_cur_col >= g_cols) g_cur_col = g_cols - 1;
+                break;
+        }
+    }
+
     // Write a zero-terminated string with newline, wrap and scrolling
     VOID WriteString(const CHAR8 *s) {
         if (!g_ready || !s || !g_grid) return;
 
         HideCursor();
 
-        // Track touched rows for a single batched flush at end of write.
-        // This drastically reduces the number of small flushes during heavy logging.
-        U32 min_changed_row = g_rows; // sentinel (no change yet)
+        // Optimasi flushing sakral lo tetep aman disini
+        U32 min_changed_row = g_rows; 
         U32 max_changed_row = 0;
         auto note_row_change = [&](U32 row){
             if(row < min_changed_row) min_changed_row = row;
@@ -282,19 +330,54 @@ namespace FBConsole {
 
         for (const CHAR8* p = s; *p; ++p) {
             CHAR8 ch = *p;
+            
+            // 1. Kalau state lagi ngumpulin kode ANSI (misal lagi baca angka "31")
+            if (g_ansi_state == ANSI_CSI) {
+                if (ch >= '0' && ch <= '9') {
+                    if (g_ansi_count == 0) g_ansi_count = 1;
+                    g_ansi_params[g_ansi_count - 1] = g_ansi_params[g_ansi_count - 1] * 10 + (ch - '0');
+                } 
+                else if (ch == ';') {
+                    if (g_ansi_count < 5) {
+                        g_ansi_count++;
+                        g_ansi_params[g_ansi_count - 1] = 0;
+                    }
+                } 
+                else {
+                    // Ketemu huruf (m, J, H, dll), eksekusi!
+                    AnsiExecute(ch);
+                    g_ansi_state = ANSI_NORMAL;
+                }
+                continue; // <--- SKIP PRINTING, lanjut ke char berikutnya
+            }
+
+            // 2. Kalau state lagi nunggu '[' setelah escape
+            if (g_ansi_state == ANSI_ESC) {
+                if (ch == '[') {
+                    AnsiStartCSI();
+                } else {
+                    g_ansi_state = ANSI_NORMAL; // Batal escape
+                }
+                continue; // <--- SKIP PRINTING
+            }
+
+            // 3. Deteksi awal Escape
+            if (ch == '\033') {
+                g_ansi_state = ANSI_ESC;
+                continue; // <--- SKIP PRINTING
+            }
+
             if (ch == '\b') {
-                // Handle backspace: move cursor left (or to end of previous line), erase cell
                 if (g_cur_col > 0) {
                     --g_cur_col;
                 } else if (g_cur_row > 0) {
                     --g_cur_row;
                     g_cur_col = (g_cols ? (g_cols - 1) : 0);
                 } else {
-                    // At top-left; nothing to erase
                     continue;
                 }
                 g_grid[g_cur_row * g_cols + g_cur_col] = ' ';
-                RenderCell(g_cur_col, g_cur_row);
+                RenderCell(g_cur_col, g_cur_row); // RenderCell bakal pake warna g_fg terbaru
                 note_row_change(g_cur_row);
                 continue;
             }
@@ -307,7 +390,6 @@ namespace FBConsole {
                 continue;
             }
             if (ch == '\t') {
-                // MODIFIKASI: Logika tab non-rekursif
                 U32 spaces_to_add = 4 - (g_cur_col % 4);
                 for (U32 i = 0; i < spaces_to_add; ++i) {
                     if (g_cur_col >= g_cols) {
@@ -324,9 +406,14 @@ namespace FBConsole {
             if (g_cur_col >= g_cols) {
                 NewLine();
             }
+            
             // store char and render cell
             g_grid[g_cur_row * g_cols + g_cur_col] = ch;
-            RenderCell(g_cur_col, g_cur_row);
+            
+            // RenderCell ini (yang ada di fbcon.cpp lo) pasti baca variabel global g_fg kan?
+            // Jadi karena ANSI helper di atas udah ubah g_fg, otomatis disini warnanya berubah.
+            RenderCell(g_cur_col, g_cur_row); 
+            
             note_row_change(g_cur_row);
             ++g_cur_col;
         }
@@ -356,7 +443,11 @@ namespace FBConsole {
         }
     }
 
-    namespace Driver{
-        
+    U64 GetColumns(){
+        return (U64)g_cols;
+    }
+
+    U64 GetRows(){
+        return (U64)g_rows;
     }
 }

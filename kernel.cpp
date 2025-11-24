@@ -14,6 +14,7 @@
 #include "kernel/driver/pic/pic.hpp"
 #include "kernel/driver/pic/timer/pit.hpp"
 #include "kernel/filesys/gpt/gpt.hpp"
+#include "kernel/filesys/rootfs/rootfs.hpp"
 #include "kernel/filesys/vfs/vfs.hpp"
 #include "kernel/filesys/fat32/fat32.hpp"
 #include "kernel/filesys/devfs/devfs.hpp"
@@ -37,16 +38,19 @@
 ABI_C int main_debug_ext2_stress(int argc, char** argv);
 
 VOID TestScheduler(){
-    while(1) VFSManager::Write(Printk::s_SerialConsoleFile, (U8*)"TEST1\n", 6);
+    while(1){
+        Arch::ASM::CPURelax();
+    }
 }
 
 VOID TestScheduler2(){
-    while(1)
-    VFSManager::Write(Printk::s_SerialConsoleFile, (U8*)"TEST2\n", 6);
+    while(1){
+        Arch::ASM::CPURelax();
+    }
 }
 
 ABI_C NORET void KernelMain()
-{
+{ 
     IDT::InitializeIDT();
     // Initialize PIC and PIT early so we can use PIT as a calibration
     // source for APIC timer calibration when ACPI brings up LAPIC.
@@ -81,6 +85,7 @@ ABI_C NORET void KernelMain()
 
     BootInfoPrint();
 
+    ROOTFS::InitROOTFS();
     DEVFS::Init();
     FB::Init();
     Printk::Init();
@@ -101,7 +106,32 @@ ABI_C NORET void KernelMain()
     Userland::Syscall_Init();
 
     Tasking::CreateKThread(TestScheduler);
-    Tasking::CreateKThread(TestScheduler2);
+
+    {
+        File *F = VFSManager::Open("/mnt/part1/init.elf");
+        if(F){
+            U64 ELFSize = F->FileSize;
+            VOID *ELFImage = Kmalloc::Alloc(ELFSize);
+            if(!ELFImage){
+                Printk::Write(Printk::Level::LOG_ERR, "KernelMain: failed to allocate memory for init.elf\n");
+                goto halt;
+            }
+            U64 ReadBytes = VFSManager::Read(F, (U8*)ELFImage, ELFSize);
+            if(ReadBytes != ELFSize){
+                Printk::Write(Printk::Level::LOG_ERR, "KernelMain: failed to read full init.elf (read %llu of %llu)\n",
+                              (unsigned long long)ReadBytes, (unsigned long long)ELFSize);
+                Kmalloc::Free(ELFImage);
+                goto halt;
+            }
+
+            Tasking::CreateUserTask("init", ELFImage);
+            Kmalloc::Free(ELFImage);
+            VFSManager::Close(F);
+        } else {
+            Printk::Write(Printk::Level::LOG_ERR, "KernelMain: failed to open /mnt/part1/init.elf\n");
+        }
+    }
+
     Tasking::SchedulerStart();
 
     UNUSED__ halt:

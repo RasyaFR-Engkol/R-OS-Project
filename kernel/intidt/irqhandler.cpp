@@ -63,6 +63,7 @@ ABI_C VOID IrqDispatchWithRawStack(U64 irq, void* raw_sp) {
         PIC::SendEOI((U8)irq);
     }
 
+
     // Invoke registered handler for this vector (same as old path)
     IDT::InvokeInterruptHandler(vector, raw_sp);
 
@@ -73,5 +74,6 @@ ABI_C VOID IrqDispatchWithRawStack(U64 irq, void* raw_sp) {
     static volatile U64 irq_ticks = 0;
     (void)__atomic_fetch_add(&irq_ticks, 1ULL, __ATOMIC_RELAXED);
     (void)irq_ticks;
+
     return;
 }

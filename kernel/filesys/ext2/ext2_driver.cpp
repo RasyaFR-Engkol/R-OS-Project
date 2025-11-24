@@ -62,7 +62,7 @@ BOOL EXT2FileSystem::WriteBlock(U32 blockNum, PageAlloc::DMAAlloc::DMABuffer* bu
 }
 
 BOOL EXT2FileSystem::Mount(Partition *Part){
-    Printk::Write(Printk::Level::LOG_INFO, "EXT2: Mounting EXT2 filesystem...\n");
+    Printk::Write(Printk::Level::LOG_DEBUG, "EXT2: Mounting EXT2 filesystem...\n");
     m_Partition = Part;
 
     PageAlloc::DMAAlloc::DMABuffer *Buffer = nullptr;
@@ -83,18 +83,18 @@ BOOL EXT2FileSystem::Mount(Partition *Part){
 
     m_BlockSize = 1024 << m_Superblock.s_log_block_size;
     m_SectorsPerBlock = m_BlockSize / 512;
-    Printk::Write(Printk::Level::LOG_INFO, "EXT2: Mounted successfully. Block Size: %u bytes\n", m_BlockSize);      
+    Printk::Write(Printk::Level::LOG_DEBUG, "EXT2: Mounted successfully. Block Size: %u bytes\n", m_BlockSize);      
 
     m_NumBlockGroups = (m_Superblock.s_blocks_count + m_Superblock.s_blocks_per_group - 1) 
                         / m_Superblock.s_blocks_per_group;
 
-    Printk::Write(Printk::Level::LOG_INFO, "EXT2: Number of Block Groups: %u\n", m_NumBlockGroups);
+    Printk::Write(Printk::Level::LOG_DEBUG, "EXT2: Number of Block Groups: %u\n", m_NumBlockGroups);
 
     U32 BGDTStartBlocks = (m_BlockSize == 1024) ? 2 : 1;
     U32 BGDTSizeBytes = m_NumBlockGroups * sizeof(EXT2::BlockGroupDescriptor);
     m_BGDT_SizeInBlocks = (BGDTSizeBytes + m_BlockSize - 1) / m_BlockSize;
 
-    Printk::Write(Printk::Level::LOG_INFO, "EXT2: BLOCK Size: %u bytes (%u blocks)\n", 
+    Printk::Write(Printk::Level::LOG_DEBUG, "EXT2: BLOCK Size: %u bytes (%u blocks)\n", 
         m_BlockSize, m_BGDT_SizeInBlocks);
     m_BGDT = (EXT2::BlockGroupDescriptor*)Kmalloc::Alloc(m_BGDT_SizeInBlocks * m_BlockSize);
     if(!m_BGDT){
@@ -103,7 +103,7 @@ BOOL EXT2FileSystem::Mount(Partition *Part){
         return FALSE;
     }
 
-    Printk::Write(Printk::Level::LOG_INFO, "EXT2: Reading BGDT starting at block %u, size %u blocks\n", 
+    Printk::Write(Printk::Level::LOG_DEBUG, "EXT2: Reading BGDT starting at block %u, size %u blocks\n", 
         BGDTStartBlocks, m_BGDT_SizeInBlocks);
 
     U8 *DMABufferAddr = (U8*)m_BGDT;
@@ -121,7 +121,7 @@ BOOL EXT2FileSystem::Mount(Partition *Part){
         PageAlloc::DMAAlloc::FreeDMABuffer(TempBuffer);
     }
 
-    Printk::Write(Printk::Level::LOG_INFO, "EXT2: BGDT read successfully.\n");
+    Printk::Write(Printk::Level::LOG_DEBUG, "EXT2: BGDT read successfully.\n");
     m_Partition->SetReadWrite();
 
     return TRUE;
@@ -503,6 +503,136 @@ BOOL EXT2FileSystem::Append(File* file, U8* buffer, U32 size){
     return (written == size) ? TRUE : FALSE;
 }
 
+INTN EXT2FileSystem::ReadDir(File* dirFile, void* buffer, U32 bufferSize){
+    if(!dirFile || !buffer) return -1;
+    if(!dirFile->IsDirectory) return -1;
+    if(bufferSize == 0) return 0;
+
+    U32 inodeNum = dirFile->Internal_StartCluster;
+    if(inodeNum == 0) return -1;
+
+    EXT2::Inode dirInode;
+    if(!ReadInode(inodeNum, &dirInode)) return -1;
+
+    char* out = (char*)buffer;
+    U32 remain = bufferSize;
+
+    PageAlloc::DMAAlloc::DMABuffer *DirDataBuffer = nullptr;
+    bool stop = false;
+
+    // Use CurrentPosition as number of entries already returned
+    U64 skip = dirFile->CurrentPosition;
+    U64 seen = 0;
+
+    // helper to scan a single directory data block
+    auto scan_dir_block = [&](U32 blockNum)->BOOL{
+        if(blockNum == 0) return TRUE; // treat as empty block (continue)
+        if(!ReadBlock(blockNum, &DirDataBuffer)) return FALSE;
+        U8 *DirPtr = (U8*)DirDataBuffer->VirtAddr;
+        U32 Offset = 0;
+        struct DirentHeader { U32 inode; U16 rec_len; U8 name_len; U8 file_type; } hdr;
+        while(Offset < m_BlockSize){
+            U8* entryPtr = DirPtr + Offset;
+            String::Memcpy(&hdr, entryPtr, sizeof(hdr));
+            if(hdr.rec_len == 0) break;
+            if(hdr.inode != 0 && hdr.name_len > 0){
+                U32 namelen = hdr.name_len;
+                if(namelen > 255) namelen = 255;
+                // increment seen count for this entry
+                U64 idx = seen++;
+                if(idx < skip){ Offset += hdr.rec_len; continue; }
+                // need space for name + NUL
+                U32 need = namelen + 1;
+                if(need > remain){ PageAlloc::DMAAlloc::FreeDMABuffer(DirDataBuffer); return FALSE; }
+                String::Memcpy((U8*)out, entryPtr + sizeof(hdr), namelen);
+                out += namelen;
+                *out++ = '\0';
+                remain -= need;
+            }
+            Offset += hdr.rec_len;
+        }
+        PageAlloc::DMAAlloc::FreeDMABuffer(DirDataBuffer);
+        return TRUE;
+    };
+
+    // 1) direct blocks
+    for(int i = 0; i < 12 && !stop; i++){
+        if(dirInode.i_block[i] == 0) continue;
+        if(!scan_dir_block(dirInode.i_block[i])) stop = true;
+    }
+
+    U32 EntriesPerBlock = m_BlockSize / sizeof(U32);
+
+    // single indirect
+    if(!stop && dirInode.i_block[12] != 0){
+        PageAlloc::DMAAlloc::DMABuffer* ibuf = nullptr;
+        if(ReadBlock(dirInode.i_block[12], &ibuf)){
+            U32* ptrs = (U32*)ibuf->VirtAddr;
+            for(U32 j = 0; j < EntriesPerBlock && !stop; j++){
+                if(ptrs[j] == 0) continue;
+                if(!scan_dir_block(ptrs[j])){ stop = true; break; }
+            }
+            PageAlloc::DMAAlloc::FreeDMABuffer(ibuf);
+        }
+    }
+
+    // double indirect
+    if(!stop && dirInode.i_block[13] != 0){
+        PageAlloc::DMAAlloc::DMABuffer* dbuf = nullptr;
+        if(ReadBlock(dirInode.i_block[13], &dbuf)){
+            U32* lvl1 = (U32*)dbuf->VirtAddr;
+            for(U32 i1 = 0; i1 < EntriesPerBlock && !stop; i1++){
+                if(lvl1[i1] == 0) continue;
+                PageAlloc::DMAAlloc::DMABuffer* sbuf = nullptr;
+                if(ReadBlock(lvl1[i1], &sbuf)){
+                    U32* ptrs = (U32*)sbuf->VirtAddr;
+                    for(U32 j = 0; j < EntriesPerBlock; j++){
+                        if(ptrs[j] == 0) continue;
+                        if(!scan_dir_block(ptrs[j])){ PageAlloc::DMAAlloc::FreeDMABuffer(sbuf); PageAlloc::DMAAlloc::FreeDMABuffer(dbuf); stop = true; break; }
+                    }
+                    if(!stop) PageAlloc::DMAAlloc::FreeDMABuffer(sbuf);
+                }
+            }
+            if(!stop) PageAlloc::DMAAlloc::FreeDMABuffer(dbuf);
+        }
+    }
+
+    // triple indirect
+    if(!stop && dirInode.i_block[14] != 0){
+        PageAlloc::DMAAlloc::DMABuffer* tbuf = nullptr;
+        if(ReadBlock(dirInode.i_block[14], &tbuf)){
+            U32* lvl1 = (U32*)tbuf->VirtAddr;
+            for(U32 i1 = 0; i1 < EntriesPerBlock && !stop; i1++){
+                if(lvl1[i1] == 0) continue;
+                PageAlloc::DMAAlloc::DMABuffer* mbuf = nullptr;
+                if(ReadBlock(lvl1[i1], &mbuf)){
+                    U32* lvl2 = (U32*)mbuf->VirtAddr;
+                    for(U32 i2 = 0; i2 < EntriesPerBlock && !stop; i2++){
+                        if(lvl2[i2] == 0) continue;
+                        PageAlloc::DMAAlloc::DMABuffer* sbuf = nullptr;
+                        if(ReadBlock(lvl2[i2], &sbuf)){
+                            U32* ptrs = (U32*)sbuf->VirtAddr;
+                            for(U32 j = 0; j < EntriesPerBlock; j++){
+                                if(ptrs[j] == 0) continue;
+                                if(!scan_dir_block(ptrs[j])){ PageAlloc::DMAAlloc::FreeDMABuffer(sbuf); PageAlloc::DMAAlloc::FreeDMABuffer(mbuf); PageAlloc::DMAAlloc::FreeDMABuffer(tbuf); stop = true; break; }
+                            }
+                            if(!stop) PageAlloc::DMAAlloc::FreeDMABuffer(sbuf);
+                        }
+                    }
+                    if(!stop) PageAlloc::DMAAlloc::FreeDMABuffer(mbuf);
+                }
+            }
+            if(!stop) PageAlloc::DMAAlloc::FreeDMABuffer(tbuf);
+        }
+    }
+
+    // update file position to number of entries seen
+    dirFile->CurrentPosition = seen;
+
+    U32 used = bufferSize - remain;
+    return (INTN)used;
+}
+
 File* EXT2FileSystem::Open(const char* path) {
     EXT2::Inode inode;
     U32 InodeNum = FindInodeForPath(path, &inode);
@@ -525,8 +655,9 @@ File* EXT2FileSystem::Open(const char* path) {
     file->FSOwner = this;
 
     file->Internal_StartCluster = InodeNum;
+    file->RefCount = 1; // Init RefCount
 
-    Printk::Write(Printk::Level::LOG_INFO, "EXT2: Opened file %s (Inode %u, Size %u bytes)\n",
+    Printk::Write(Printk::Level::LOG_DEBUG, "EXT2: Opened file %s (Inode %u, Size %u bytes)\n",
         path, InodeNum, inode.i_size);
 
     return file;
@@ -636,8 +767,9 @@ File* EXT2FileSystem::Create(const char *Path) {
     file->CurrentPosition = 0;
     file->FSOwner = this;
     file->Internal_StartCluster = newInodeNum;
+    file->RefCount = 1; // Init RefCount
 
-    Printk::Write(Printk::Level::LOG_INFO, "EXT2: Created file %s (Inode %u)\n", Path, newInodeNum);
+    Printk::Write(Printk::Level::LOG_DEBUG, "EXT2: Created file %s (Inode %u)\n", Path, newInodeNum);
 
     return file;
 }
@@ -885,16 +1017,15 @@ BOOL EXT2FileSystem::Delete(const char* path) {
             U8* p = (U8*)dbuf->VirtAddr;
                 U32 off = 0;
                 while(off < m_BlockSize){
-                    U8* entryPtr = p + off;
                     struct DirentHeader { U32 inode; U16 rec_len; U8 name_len; U8 file_type; } hdr;
-                    String::Memcpy(&hdr, entryPtr, sizeof(hdr));
+                    String::Memcpy(&hdr, p + off, sizeof(hdr));
                     if(hdr.rec_len == 0) break;
                     if(hdr.inode != 0){
                         // copy name into temporary buffer
                         CHAR8 namebuf[256];
                         U32 namelen = hdr.name_len;
                         if(namelen > 255) namelen = 255;
-                        String::Memcpy(namebuf, entryPtr + sizeof(hdr), namelen);
+                        String::Memcpy(namebuf, p + off + sizeof(hdr), namelen);
                         namebuf[namelen] = '\0';
 
                         // compare names
@@ -914,12 +1045,15 @@ BOOL EXT2FileSystem::Delete(const char* path) {
     }
 
     // Remove directory entry from parent
-    if(!RemoveEntryFromDirectory(&parentInode, (const CHAR8*)FileName)){
-        Printk::Write(Printk::Level::LOG_ERR, "EXT2: Delete - failed to remove dir entry %s\n", FileName);
-        return FALSE;
-    }
-    // Decrement link count on inode
+    if(!RemoveEntryFromDirectory(&parentInode, (const CHAR8*)FileName)) return FALSE;
+
+    // Decrement link count (removing old link)
     if(targetInode.i_links_count > 0) targetInode.i_links_count--;
+    if(!WriteInode(targetInodeNum, &targetInode)){
+        Printk::Write(Printk::Level::LOG_WARNING, "EXT2: Delete - failed to write inode %u after unlink\n", targetInodeNum);
+    }
+
+
 
     // If link count reached zero, free data blocks and inode bitmaps
     if(targetInode.i_links_count == 0){
@@ -997,23 +1131,21 @@ BOOL EXT2FileSystem::Delete(const char* path) {
                     if(ReadBlock(lvl2_block, &mbuf)){
                         U32* lvl2 = (U32*)mbuf->VirtAddr;
                         for(U32 i2 = 0; i2 < EntriesPerBlock; i2++){
-                            U32 lvl3_block = lvl2[i2];
-                            if(lvl3_block == 0) continue;
-
+                            if(lvl2[i2] == 0) continue;
                             PageAlloc::DMAAlloc::DMABuffer* sbuf = nullptr;
-                            if(ReadBlock(lvl3_block, &sbuf)){
-                                U32* lvl3 = (U32*)sbuf->VirtAddr;
+                            if(ReadBlock(lvl2[i2], &sbuf)){
+                                U32* ptrs = (U32*)sbuf->VirtAddr;
                                 for(U32 j = 0; j < EntriesPerBlock; j++){
-                                    if(lvl3[j] != 0){
-                                        FreeBlock(lvl3[j]);
-                                        lvl3[j] = 0;
+                                    if(ptrs[j] != 0){
+                                        FreeBlock(ptrs[j]);
+                                        ptrs[j] = 0;
                                     }
                                 }
                                 PageAlloc::DMAAlloc::FreeDMABuffer(sbuf);
                             }
 
                             // free the single-indirect block
-                            FreeBlock(lvl3_block);
+                            FreeBlock(lvl2[i2]);
                             lvl2[i2] = 0;
                         }
                         PageAlloc::DMAAlloc::FreeDMABuffer(mbuf);
@@ -1025,7 +1157,6 @@ BOOL EXT2FileSystem::Delete(const char* path) {
                 }
                 PageAlloc::DMAAlloc::FreeDMABuffer(tbuf);
             }
-
             // free triple indirect block itself
             FreeBlock(targetInode.i_block[14]);
             targetInode.i_block[14] = 0;
@@ -1259,10 +1390,10 @@ BOOL EXT2FileSystem::FindEntryInDirectory(EXT2::Inode *DirInode, const CHAR8 *Fi
                 if(lvl1[i1] == 0) continue;
                 PageAlloc::DMAAlloc::DMABuffer* sbuf = nullptr;
                 if(ReadBlock(lvl1[i1], &sbuf)){
-                    U32* lvl2 = (U32*)sbuf->VirtAddr;
+                    U32* ptrs = (U32*)sbuf->VirtAddr;
                     for(U32 j = 0; j < EntriesPerBlock; j++){
-                        if(lvl2[j] == 0) continue;
-                        if(scan_dir_block(lvl2[j])){ PageAlloc::DMAAlloc::FreeDMABuffer(sbuf); PageAlloc::DMAAlloc::FreeDMABuffer(dbuf); return TRUE; }
+                        if(ptrs[j] == 0) continue;
+                        if(scan_dir_block(ptrs[j])){ PageAlloc::DMAAlloc::FreeDMABuffer(sbuf); PageAlloc::DMAAlloc::FreeDMABuffer(dbuf); return TRUE; }
                     }
                     PageAlloc::DMAAlloc::FreeDMABuffer(sbuf);
                 }
@@ -1285,10 +1416,10 @@ BOOL EXT2FileSystem::FindEntryInDirectory(EXT2::Inode *DirInode, const CHAR8 *Fi
                         if(lvl2[i2] == 0) continue;
                         PageAlloc::DMAAlloc::DMABuffer* sbuf = nullptr;
                         if(ReadBlock(lvl2[i2], &sbuf)){
-                            U32* lvl3 = (U32*)sbuf->VirtAddr;
+                            U32* ptrs = (U32*)sbuf->VirtAddr;
                             for(U32 j = 0; j < EntriesPerBlock; j++){
-                                if(lvl3[j] == 0) continue;
-                                if(scan_dir_block(lvl3[j])){ PageAlloc::DMAAlloc::FreeDMABuffer(sbuf); PageAlloc::DMAAlloc::FreeDMABuffer(mbuf); PageAlloc::DMAAlloc::FreeDMABuffer(tbuf); return TRUE; }
+                                if(ptrs[j] == 0) continue;
+                                if(scan_dir_block(ptrs[j])){ PageAlloc::DMAAlloc::FreeDMABuffer(sbuf); PageAlloc::DMAAlloc::FreeDMABuffer(mbuf); PageAlloc::DMAAlloc::FreeDMABuffer(tbuf); return TRUE; }
                             }
                             PageAlloc::DMAAlloc::FreeDMABuffer(sbuf);
                         }
@@ -1368,7 +1499,7 @@ BOOL EXT2FileSystem::RemoveEntryFromDirectory(EXT2::Inode *DirInode, const CHAR8
     }
 
     // double indirect
-    if(DirInode->i_block[13] != 0){
+    if(DirInode->i_block[13] !=  0){
         PageAlloc::DMAAlloc::DMABuffer* dbuf = nullptr;
         if(ReadBlock(DirInode->i_block[13], &dbuf)){
             U32* lvl1 = (U32*)dbuf->VirtAddr;
@@ -1376,10 +1507,10 @@ BOOL EXT2FileSystem::RemoveEntryFromDirectory(EXT2::Inode *DirInode, const CHAR8
                 if(lvl1[i1] == 0) continue;
                 PageAlloc::DMAAlloc::DMABuffer* sbuf = nullptr;
                 if(ReadBlock(lvl1[i1], &sbuf)){
-                    U32* lvl2 = (U32*)sbuf->VirtAddr;
+                    U32* ptrs = (U32*)sbuf->VirtAddr;
                     for(U32 j = 0; j < EntriesPerBlock; j++){
-                        if(lvl2[j] == 0) continue;
-                        if(remove_in_block(lvl2[j])){ PageAlloc::DMAAlloc::FreeDMABuffer(sbuf); PageAlloc::DMAAlloc::FreeDMABuffer(dbuf); return TRUE; }
+                        if(ptrs[j] == 0) continue;
+                        if(remove_in_block(ptrs[j])){ PageAlloc::DMAAlloc::FreeDMABuffer(sbuf); PageAlloc::DMAAlloc::FreeDMABuffer(dbuf); return TRUE; }
                     }
                     PageAlloc::DMAAlloc::FreeDMABuffer(sbuf);
                 }
@@ -1402,10 +1533,10 @@ BOOL EXT2FileSystem::RemoveEntryFromDirectory(EXT2::Inode *DirInode, const CHAR8
                         if(lvl2[i2] == 0) continue;
                         PageAlloc::DMAAlloc::DMABuffer* sbuf = nullptr;
                         if(ReadBlock(lvl2[i2], &sbuf)){
-                            U32* lvl3 = (U32*)sbuf->VirtAddr;
+                            U32* ptrs = (U32*)sbuf->VirtAddr;
                             for(U32 j = 0; j < EntriesPerBlock; j++){
-                                if(lvl3[j] == 0) continue;
-                                if(remove_in_block(lvl3[j])){ PageAlloc::DMAAlloc::FreeDMABuffer(sbuf); PageAlloc::DMAAlloc::FreeDMABuffer(mbuf); PageAlloc::DMAAlloc::FreeDMABuffer(tbuf); return TRUE; }
+                                if(ptrs[j] == 0) continue;
+                                if(remove_in_block(ptrs[j])){ PageAlloc::DMAAlloc::FreeDMABuffer(sbuf); PageAlloc::DMAAlloc::FreeDMABuffer(mbuf); PageAlloc::DMAAlloc::FreeDMABuffer(tbuf); return TRUE; }
                             }
                             PageAlloc::DMAAlloc::FreeDMABuffer(sbuf);
                         }
@@ -1859,7 +1990,7 @@ void EXT2FileSystem::DebugSetDefaultOwner(U32 uid, U32 gid){
 
 // Walk BGDT/bitmaps and inodes to detect mismatches (best-effort)
 BOOL EXT2FileSystem::DebugConsistencyCheck(){
-    Printk::Write(Printk::Level::LOG_INFO, "EXT2: DebugConsistencyCheck - begin\n");
+    Printk::Write(Printk::Level::LOG_DEBUG, "EXT2: DebugConsistencyCheck - begin\n");
     if(!m_Partition){
         Printk::Write(Printk::Level::LOG_ERR, "EXT2: DebugConsistencyCheck - not mounted\n");
         return FALSE;
@@ -1999,7 +2130,7 @@ BOOL EXT2FileSystem::DebugConsistencyCheck(){
         PageAlloc::DMAAlloc::FreeDMABuffer(ibuf);
     }
 
-    Printk::Write(Printk::Level::LOG_INFO, "EXT2: DebugConsistencyCheck - total bitmap blocks set: %u, total inode bitmap set: %u, actual used inodes: %u, inconsistencies: %u\n", totalBitmapSet, totalBitmapInodesSet, actualUsedInodes, inconsistencies);
+    Printk::Write(Printk::Level::LOG_DEBUG, "EXT2: DebugConsistencyCheck - total bitmap blocks set: %u, total inode bitmap set: %u, actual used inodes: %u, inconsistencies: %u\n", totalBitmapSet, totalBitmapInodesSet, actualUsedInodes, inconsistencies);
 
     Kmalloc::Free(refBitmap);
 
@@ -2009,7 +2140,7 @@ BOOL EXT2FileSystem::DebugConsistencyCheck(){
 // Conservative repair: set bitmap bits for referenced-but-cleared, and clear bitmap bits for set-but-unreferenced.
 // For inode mismatches, call FreeInode for inode-bitset-but-empty, and set bitmap for inode-present-but-cleared.
 U32 EXT2FileSystem::DebugRepairConsistency(){
-    Printk::Write(Printk::Level::LOG_INFO, "EXT2: DebugRepairConsistency - begin\n");
+    Printk::Write(Printk::Level::LOG_DEBUG, "EXT2: DebugRepairConsistency - begin\n");
     if(!m_Partition){
         Printk::Write(Printk::Level::LOG_ERR, "EXT2: DebugRepairConsistency - not mounted\n");
         return 0;
@@ -2031,6 +2162,7 @@ U32 EXT2FileSystem::DebugRepairConsistency(){
         EXT2::Inode inode;
         if(!ReadInode(ino, &inode)) continue;
         if(inode.i_mode == 0) continue;
+        // direct
         for(int d=0; d<12; d++) mark_block(inode.i_block[d]);
         if(inode.i_block[12]){
             PageAlloc::DMAAlloc::DMABuffer* ibuf = nullptr;
@@ -2169,7 +2301,7 @@ U32 EXT2FileSystem::DebugRepairConsistency(){
     PersistSuperblockAndBGDT();
 
     Kmalloc::Free(refBitmap);
-    Printk::Write(Printk::Level::LOG_INFO, "EXT2: DebugRepairConsistency - done; fixes=%u\n", fixes);
+    Printk::Write(Printk::Level::LOG_DEBUG, "EXT2: DebugRepairConsistency - done; fixes=%u\n", fixes);
     return fixes;
 }
 
@@ -2198,61 +2330,9 @@ BOOL EXT2FileSystem::DebugForceRemove(const char* path){
         // mimic Delete's freeing path: clear blocks and FreeInode
         for(int i=0;i<12;i++){ if(targetInode.i_block[i]){ FreeBlock(targetInode.i_block[i]); targetInode.i_block[i]=0; } }
         U32 EntriesPerBlock = m_BlockSize / sizeof(U32);
-        if(targetInode.i_block[12]){
-            PageAlloc::DMAAlloc::DMABuffer* ibuf = nullptr;
-            if(ReadBlock(targetInode.i_block[12], &ibuf)){
-                U32* ptrs = (U32*)ibuf->VirtAddr;
-                for(U32 j=0;j<EntriesPerBlock;j++){ if(ptrs[j]){ FreeBlock(ptrs[j]); ptrs[j]=0; } }
-                PageAlloc::DMAAlloc::FreeDMABuffer(ibuf);
-            }
-            FreeBlock(targetInode.i_block[12]); targetInode.i_block[12]=0;
-        }
-        if(targetInode.i_block[13]){
-            PageAlloc::DMAAlloc::DMABuffer* dbuf = nullptr;
-            if(ReadBlock(targetInode.i_block[13], &dbuf)){
-                U32* lvl1 = (U32*)dbuf->VirtAddr;
-                for(U32 i1=0;i1<EntriesPerBlock;i1++){
-                    U32 first = lvl1[i1];
-                    if(!first) continue;
-                    PageAlloc::DMAAlloc::DMABuffer* sbuf = nullptr;
-                    if(ReadBlock(first, &sbuf)){
-                        U32* lvl2 = (U32*)sbuf->VirtAddr;
-                        for(U32 j=0;j<EntriesPerBlock;j++){ if(lvl2[j]){ FreeBlock(lvl2[j]); lvl2[j]=0; } }
-                        PageAlloc::DMAAlloc::FreeDMABuffer(sbuf);
-                    }
-                    FreeBlock(first);
-                }
-                PageAlloc::DMAAlloc::FreeDMABuffer(dbuf);
-            }
-            FreeBlock(targetInode.i_block[13]); targetInode.i_block[13]=0;
-        }
-        if(targetInode.i_block[14]){
-            PageAlloc::DMAAlloc::DMABuffer* tbuf = nullptr;
-            if(ReadBlock(targetInode.i_block[14], &tbuf)){
-                U32* lvl1 = (U32*)tbuf->VirtAddr;
-                for(U32 i1=0;i1<EntriesPerBlock;i1++){
-                    U32 lvl2_block = lvl1[i1]; if(!lvl2_block) continue;
-                    PageAlloc::DMAAlloc::DMABuffer* mbuf = nullptr;
-                    if(ReadBlock(lvl2_block, &mbuf)){
-                        U32* lvl2 = (U32*)mbuf->VirtAddr;
-                        for(U32 i2=0;i2<EntriesPerBlock;i2++){
-                            U32 lvl3_block = lvl2[i2]; if(!lvl3_block) continue;
-                            PageAlloc::DMAAlloc::DMABuffer* sbuf = nullptr;
-                            if(ReadBlock(lvl3_block, &sbuf)){
-                                U32* lvl3 = (U32*)sbuf->VirtAddr;
-                                for(U32 j=0;j<EntriesPerBlock;j++){ if(lvl3[j]){ FreeBlock(lvl3[j]); lvl3[j]=0; } }
-                                PageAlloc::DMAAlloc::FreeDMABuffer(sbuf);
-                            }
-                            FreeBlock(lvl3_block);
-                        }
-                        PageAlloc::DMAAlloc::FreeDMABuffer(mbuf);
-                    }
-                    FreeBlock(lvl2_block);
-                }
-                PageAlloc::DMAAlloc::FreeDMABuffer(tbuf);
-            }
-            FreeBlock(targetInode.i_block[14]); targetInode.i_block[14]=0;
-        }
+        if(targetInode.i_block[12]){ PageAlloc::DMAAlloc::DMABuffer* ibuf=nullptr; if(ReadBlock(targetInode.i_block[12], &ibuf)){ U32* ptrs=(U32*)ibuf->VirtAddr; for(U32 j=0;j<EntriesPerBlock;j++) if(ptrs[j]){ FreeBlock(ptrs[j]); ptrs[j]=0; } PageAlloc::DMAAlloc::FreeDMABuffer(ibuf);} FreeBlock(targetInode.i_block[12]); targetInode.i_block[12]=0; }
+        if(targetInode.i_block[13]){ PageAlloc::DMAAlloc::DMABuffer* dbuf=nullptr; if(ReadBlock(targetInode.i_block[13], &dbuf)){ U32* lvl1=(U32*)dbuf->VirtAddr; for(U32 i1=0;i1<EntriesPerBlock;i1++){ U32 first = lvl1[i1]; if(!first) continue; PageAlloc::DMAAlloc::DMABuffer* sbuf=nullptr; if(ReadBlock(first, &sbuf)){ U32* lvl2=(U32*)sbuf->VirtAddr; for(U32 j=0;j<EntriesPerBlock;j++) if(lvl2[j]){ FreeBlock(lvl2[j]); lvl2[j]=0; } PageAlloc::DMAAlloc::FreeDMABuffer(sbuf);} FreeBlock(first);} PageAlloc::DMAAlloc::FreeDMABuffer(dbuf);} FreeBlock(targetInode.i_block[13]); targetInode.i_block[13]=0; }
+        if(targetInode.i_block[14]){ PageAlloc::DMAAlloc::DMABuffer* tbuf=nullptr; if(ReadBlock(targetInode.i_block[14], &tbuf)){ U32* lvl1=(U32*)tbuf->VirtAddr; for(U32 i1=0;i1<EntriesPerBlock;i1++){ U32 lvl2_block = lvl1[i1]; if(!lvl2_block) continue; PageAlloc::DMAAlloc::DMABuffer* mbuf=nullptr; if(ReadBlock(lvl2_block, &mbuf)){ U32* lvl2=(U32*)mbuf->VirtAddr; for(U32 i2=0;i2<EntriesPerBlock;i2++){ if(lvl2[i2]==0) continue; PageAlloc::DMAAlloc::DMABuffer* sbuf=nullptr; if(ReadBlock(lvl2[i2], &sbuf)){ U32* ptrs=(U32*)sbuf->VirtAddr; for(U32 j=0;j<EntriesPerBlock;j++) if(ptrs[j]){ FreeBlock(ptrs[j]); ptrs[j]=0; } PageAlloc::DMAAlloc::FreeDMABuffer(sbuf);} FreeBlock(lvl2[i2]); } PageAlloc::DMAAlloc::FreeDMABuffer(mbuf);} FreeBlock(lvl2_block);} PageAlloc::DMAAlloc::FreeDMABuffer(tbuf);} FreeBlock(targetInode.i_block[14]); targetInode.i_block[14]=0; }
         // Zero size and blocks
         targetInode.i_size = 0; targetInode.i_blocks = 0;
         FreeInode(ino);
@@ -2362,10 +2442,9 @@ BOOL EXT2FileSystem::DebugForceRemove(const char* path){
 
     // free blocks (direct + indirect) similar to file case
     for(int i=0;i<12;i++){ if(targetInode.i_block[i]){ FreeBlock(targetInode.i_block[i]); targetInode.i_block[i]=0; } }
-    if(targetInode.i_block[12]){ PageAlloc::DMAAlloc::DMABuffer* ibuf=nullptr; if(ReadBlock(targetInode.i_block[12], &ibuf)){ U32* ptrs=(U32*)ibuf->VirtAddr; for(U32 j=0;j<EntriesPerBlock;j++){ if(ptrs[j]){ FreeBlock(ptrs[j]); ptrs[j]=0; } } PageAlloc::DMAAlloc::FreeDMABuffer(ibuf);} FreeBlock(targetInode.i_block[12]); targetInode.i_block[12]=0; }
-    if(targetInode.i_block[13]){ PageAlloc::DMAAlloc::DMABuffer* dbuf=nullptr; if(ReadBlock(targetInode.i_block[13], &dbuf)){ U32* lvl1=(U32*)dbuf->VirtAddr; for(U32 i1=0;i1<EntriesPerBlock;i1++){ U32 first = lvl1[i1]; if(!first) continue; PageAlloc::DMAAlloc::DMABuffer* sbuf=nullptr; if(ReadBlock(first, &sbuf)){ U32* lvl2=(U32*)sbuf->VirtAddr; for(U32 j=0;j<EntriesPerBlock;j++){ if(lvl2[j]){ FreeBlock(lvl2[j]); lvl2[j]=0; } } PageAlloc::DMAAlloc::FreeDMABuffer(sbuf);} FreeBlock(first);} PageAlloc::DMAAlloc::FreeDMABuffer(dbuf);} FreeBlock(targetInode.i_block[13]); targetInode.i_block[13]=0; }
-    if(targetInode.i_block[14]){ PageAlloc::DMAAlloc::DMABuffer* tbuf=nullptr; if(ReadBlock(targetInode.i_block[14], &tbuf)){ U32* lvl1=(U32*)tbuf->VirtAddr; for(U32 i1=0;i1<EntriesPerBlock;i1++){ U32 lvl2_block = lvl1[i1]; if(!lvl2_block) continue; PageAlloc::DMAAlloc::DMABuffer* mbuf=nullptr; if(ReadBlock(lvl2_block, &mbuf)){ U32* lvl2=(U32*)mbuf->VirtAddr; for(U32 i2=0;i2<EntriesPerBlock;i2++){ U32 lvl3_block = lvl2[i2]; if(!lvl3_block) continue; PageAlloc::DMAAlloc::DMABuffer* sbuf=nullptr; if(ReadBlock(lvl3_block, &sbuf)){ U32* lvl3=(U32*)sbuf->VirtAddr; for(U32 j=0;j<EntriesPerBlock;j++){ if(lvl3[j]){ FreeBlock(lvl3[j]); lvl3[j]=0; } } PageAlloc::DMAAlloc::FreeDMABuffer(sbuf);} FreeBlock(lvl3_block);} PageAlloc::DMAAlloc::FreeDMABuffer(mbuf);} FreeBlock(lvl2_block);} PageAlloc::DMAAlloc::FreeDMABuffer(tbuf);} FreeBlock(targetInode.i_block[14]); targetInode.i_block[14]=0; }
-
+    if(targetInode.i_block[12]){ PageAlloc::DMAAlloc::DMABuffer* ibuf=nullptr; if(ReadBlock(targetInode.i_block[12], &ibuf)){ U32* ptrs=(U32*)ibuf->VirtAddr; for(U32 j=0;j<EntriesPerBlock;j++) if(ptrs[j]){ FreeBlock(ptrs[j]); ptrs[j]=0; } PageAlloc::DMAAlloc::FreeDMABuffer(ibuf);} FreeBlock(targetInode.i_block[12]); targetInode.i_block[12]=0; }
+    if(targetInode.i_block[13]){ PageAlloc::DMAAlloc::DMABuffer* dbuf=nullptr; if(ReadBlock(targetInode.i_block[13], &dbuf)){ U32* lvl1=(U32*)dbuf->VirtAddr; for(U32 i1=0;i1<EntriesPerBlock;i1++){ U32 first = lvl1[i1]; if(!first) continue; PageAlloc::DMAAlloc::DMABuffer* sbuf=nullptr; if(ReadBlock(first, &sbuf)){ U32* lvl2=(U32*)sbuf->VirtAddr; for(U32 j=0;j<EntriesPerBlock;j++) if(lvl2[j]){ FreeBlock(lvl2[j]); lvl2[j]=0; } PageAlloc::DMAAlloc::FreeDMABuffer(sbuf);} FreeBlock(first);} PageAlloc::DMAAlloc::FreeDMABuffer(dbuf);} FreeBlock(targetInode.i_block[13]); targetInode.i_block[13]=0; }
+    if(targetInode.i_block[14]){ PageAlloc::DMAAlloc::DMABuffer* tbuf=nullptr; if(ReadBlock(targetInode.i_block[14], &tbuf)){ U32* lvl1=(U32*)tbuf->VirtAddr; for(U32 i1=0;i1<EntriesPerBlock;i1++){ U32 lvl2_block = lvl1[i1]; if(!lvl2_block) continue; PageAlloc::DMAAlloc::DMABuffer* mbuf=nullptr; if(ReadBlock(lvl2_block, &mbuf)){ U32* lvl2=(U32*)mbuf->VirtAddr; for(U32 i2=0;i2<EntriesPerBlock;i2++){ if(lvl2[i2]==0) continue; PageAlloc::DMAAlloc::DMABuffer* sbuf=nullptr; if(ReadBlock(lvl2[i2], &sbuf)){ U32* ptrs=(U32*)sbuf->VirtAddr; for(U32 j=0;j<EntriesPerBlock;j++) if(ptrs[j]){ FreeBlock(ptrs[j]); ptrs[j]=0; } PageAlloc::DMAAlloc::FreeDMABuffer(sbuf);} FreeBlock(lvl2[i2]); } PageAlloc::DMAAlloc::FreeDMABuffer(mbuf);} FreeBlock(lvl2_block);} PageAlloc::DMAAlloc::FreeDMABuffer(tbuf);} FreeBlock(targetInode.i_block[14]); targetInode.i_block[14]=0; }
     targetInode.i_size = 0; targetInode.i_blocks = 0;
     FreeInode(ino);
     PersistSuperblockAndBGDT();
@@ -2446,7 +2525,7 @@ U32 EXT2FileSystem::AllocateInode(){
             // TODO: Seharusnya update BGDT sama Superblock juga
 
             U32 InodeNum = (Group * m_Superblock.s_inodes_per_group) + (FreeBitIndex + 1);
-            Printk::Write(Printk::Level::LOG_INFO, "EXT2: Allocated inode %u from group %u\n", InodeNum, Group);
+            Printk::Write(Printk::Level::LOG_DEBUG, "EXT2: Allocated inode %u from group %u\n", InodeNum, Group);
             return InodeNum;
         }
     }
@@ -2462,7 +2541,7 @@ U32 EXT2FileSystem::AllocateBlock(){
 
     for(U32 Group = 0; Group < m_NumBlockGroups; Group++){
         if(m_BGDT[Group].bg_free_blocks_count > 0){
-            Printk::Write(Printk::Level::LOG_INFO, "EXT2: AllocateBlock - Found free blocks in group %u\n", Group);     
+            Printk::Write(Printk::Level::LOG_DEBUG, "EXT2: AllocateBlock - Found free blocks in group %u\n", Group);     
 
             U32 BlockBitmapBlock = m_BGDT[Group].bg_block_bitmap;
 
@@ -2521,7 +2600,7 @@ U32 EXT2FileSystem::AllocateBlock(){
 
             U32 BlockNum = (Group * m_Superblock.s_blocks_per_group) + (FreeBitIndex + 1);
 
-            Printk::Write(Printk::Level::LOG_INFO, "EXT2: Allocated block %u from group %u\n", BlockNum, Group);
+            Printk::Write(Printk::Level::LOG_DEBUG, "EXT2: Allocated block %u from group %u\n", BlockNum, Group);
 
             return BlockNum;
         }
@@ -2931,6 +3010,7 @@ U32 EXT2FileSystem::GetOrAllocateBlockForFileOffset(EXT2::Inode* inode, U32 file
             if(db == 0){ PageAlloc::DMAAlloc::FreeDMABuffer(tbuf); return 0; }
             lvl1[idx1] = db;
             if(!WriteBlock(inode->i_block[14], tbuf)){ PageAlloc::DMAAlloc::FreeDMABuffer(tbuf); return 0; }
+            // zero new lvl2 block
             PageAlloc::DMAAlloc::DMABuffer* zb = PageAlloc::DMAAlloc::AllocateDMABytes(m_BlockSize);
             if(zb){ String::Memset((void*)zb->VirtAddr,0,m_BlockSize); WriteBlock(db, zb); PageAlloc::DMAAlloc::FreeDMABuffer(zb); }
         }
@@ -2941,37 +3021,39 @@ U32 EXT2FileSystem::GetOrAllocateBlockForFileOffset(EXT2::Inode* inode, U32 file
         // read lvl2
         PageAlloc::DMAAlloc::DMABuffer* mbuf = nullptr;
         if(!ReadBlock(lvl2_block, &mbuf)) return 0;
-        U32* lvl2 = (U32*)mbuf->VirtAddr;
+        U32* lvl2 = (U32*)mbuf->VirtAddr; // pointers to single-indirect blocks
 
         if(lvl2[idx2] == 0){
             U32 sb = AllocateBlock();
             if(sb == 0){ PageAlloc::DMAAlloc::FreeDMABuffer(mbuf); return 0; }
             lvl2[idx2] = sb;
             if(!WriteBlock(lvl2_block, mbuf)){ PageAlloc::DMAAlloc::FreeDMABuffer(mbuf); return 0; }
+            // zero new single indirect block
             PageAlloc::DMAAlloc::DMABuffer* zb = PageAlloc::DMAAlloc::AllocateDMABytes(m_BlockSize);
             if(zb){ String::Memset((void*)zb->VirtAddr,0,m_BlockSize); WriteBlock(sb, zb); PageAlloc::DMAAlloc::FreeDMABuffer(zb); }
         }
 
-        U32 lvl3_block = lvl2[idx2];
+        U32 target = lvl2[idx2];
         PageAlloc::DMAAlloc::FreeDMABuffer(mbuf);
 
         // now operate on lvl3 single indirect
         PageAlloc::DMAAlloc::DMABuffer* sbuf = nullptr;
-        if(!ReadBlock(lvl3_block, &sbuf)) return 0;
+        if(!ReadBlock(target, &sbuf)) return 0;
         U32* pointers = (U32*)sbuf->VirtAddr;
         if(pointers[idx3] == 0){
             U32 newdata = AllocateBlock();
             if(newdata == 0){ PageAlloc::DMAAlloc::FreeDMABuffer(sbuf); return 0; }
             pointers[idx3] = newdata;
-            if(!WriteBlock(lvl3_block, sbuf)){ PageAlloc::DMAAlloc::FreeDMABuffer(sbuf); return 0; }
+            if(!WriteBlock(target, sbuf)){ PageAlloc::DMAAlloc::FreeDMABuffer(sbuf); return 0; }
+            // zero new data block
             PageAlloc::DMAAlloc::DMABuffer* dataz = PageAlloc::DMAAlloc::AllocateDMABytes(m_BlockSize);
             if(dataz){ String::Memset((void*)dataz->VirtAddr,0,m_BlockSize); WriteBlock(newdata, dataz); PageAlloc::DMAAlloc::FreeDMABuffer(dataz); }
             inode->i_blocks += (m_BlockSize / 512);
         }
 
-        U32 target = pointers[idx3];
+        U32 finalTarget = pointers[idx3];
         PageAlloc::DMAAlloc::FreeDMABuffer(sbuf);
-        return target;
+        return finalTarget;
     }
 
     return 0;

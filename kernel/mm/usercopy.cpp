@@ -10,6 +10,7 @@
 #include <string.hpp>
 #include <serial.hpp>
 #include <rossys.hpp>
+#include <logging.hpp>
 
 using namespace Serial;
 
@@ -64,6 +65,100 @@ namespace {
         if (phys_base) *phys_base = base + (vaddr & (PAGE_SIZE - 1));
         return true;
     }
+}
+
+// Diagnostic helper: print the page-table entries for a virtual address
+// and return FALSE if the address would not be considered a valid user
+// mapping by vaddr_to_phys_page. Useful for runtime debugging.
+BOOL PageAlloc::DumpVaddrMapping(U64 *UserPML4, UPTR vaddr) {
+    if (!UserPML4) return FALSE;
+
+    SIZE_T pml4i = (vaddr >> 39) & 0x1FF;
+    SIZE_T pdpti = (vaddr >> 30) & 0x1FF;
+    SIZE_T pdi = (vaddr >> 21) & 0x1FF;
+    SIZE_T pti = (vaddr >> 12) & 0x1FF;
+
+    U64 pml4e = UserPML4[pml4i];
+    Printk::Write(Printk::Level::LOG_ERR, "[USERCOPY] Dump: vaddr=%p indices PML4=%llu PDPT=%llu PD=%llu PT=%llu\n",
+                  (void*)vaddr, (unsigned long long)pml4i, (unsigned long long)pdpti,
+                  (unsigned long long)pdi, (unsigned long long)pti);
+    Printk::Write(Printk::Level::LOG_ERR, "[USERCOPY] PML4[%llu]=0x%llx\n", (unsigned long long)pml4i, (unsigned long long)pml4e);
+
+    if (!(pml4e & PAGE_PRESENT)) {
+        Printk::Write(Printk::Level::LOG_ERR, "[USERCOPY] fail: PML4 entry not present\n");
+        return FALSE;
+    }
+    if (!(pml4e & PAGE_USER)) {
+        Printk::Write(Printk::Level::LOG_ERR, "[USERCOPY] fail: PML4 entry not user-accessible\n");
+        return FALSE;
+    }
+
+    U64 *pdpt = (U64*)HHDM_PhysToVirt(pml4e & PAGE_ADDR_MASK);
+    U64 pdpte = pdpt[pdpti];
+    Printk::Write(Printk::Level::LOG_ERR, "[USERCOPY] PDPT[%llu]=0x%llx\n", (unsigned long long)pdpti, (unsigned long long)pdpte);
+    if (!(pdpte & PAGE_PRESENT)) {
+        Printk::Write(Printk::Level::LOG_ERR, "[USERCOPY] fail: PDPT entry not present\n");
+        return FALSE;
+    }
+    if (!(pdpte & PAGE_USER)) {
+        Printk::Write(Printk::Level::LOG_ERR, "[USERCOPY] fail: PDPT entry not user-accessible\n");
+        return FALSE;
+    }
+
+    if (pdpte & PAGE_PS) {
+        Printk::Write(Printk::Level::LOG_ERR, "[USERCOPY] maps with 1GiB page\n");
+        return TRUE;
+    }
+
+    U64 *pd = (U64*)HHDM_PhysToVirt(pdpte & PAGE_ADDR_MASK);
+    U64 pde = pd[pdi];
+    Printk::Write(Printk::Level::LOG_ERR, "[USERCOPY] PD[%llu]=0x%llx\n", (unsigned long long)pdi, (unsigned long long)pde);
+    if (!(pde & PAGE_PRESENT)) {
+        Printk::Write(Printk::Level::LOG_ERR, "[USERCOPY] fail: PD entry not present\n");
+        return FALSE;
+    }
+    if (!(pde & PAGE_USER)) {
+        Printk::Write(Printk::Level::LOG_ERR, "[USERCOPY] fail: PD entry not user-accessible\n");
+        return FALSE;
+    }
+
+    if (pde & PAGE_PS) {
+        Printk::Write(Printk::Level::LOG_ERR, "[USERCOPY] maps with 2MiB page\n");
+        return TRUE;
+    }
+
+    U64 *pt = (U64*)HHDM_PhysToVirt(pde & PAGE_ADDR_MASK);
+    U64 pte = pt[pti];
+    Printk::Write(Printk::Level::LOG_ERR, "[USERCOPY] PT[%llu]=0x%llx\n", (unsigned long long)pti, (unsigned long long)pte);
+    if (!(pte & PAGE_PRESENT)) {
+        Printk::Write(Printk::Level::LOG_ERR, "[USERCOPY] fail: PT entry not present\n");
+        return FALSE;
+    }
+    if (!(pte & PAGE_USER)) {
+        Printk::Write(Printk::Level::LOG_ERR, "[USERCOPY] fail: PT entry not user-accessible\n");
+        return FALSE;
+    }
+
+    Printk::Write(Printk::Level::LOG_ERR, "[USERCOPY] success: mapping present and user-accessible\n");
+    return TRUE;
+}
+
+BOOL PageAlloc::DumpVaddrRange(U64 *UserPML4, UPTR vaddr, SIZE_T len) {
+    if (!UserPML4) return FALSE;
+    if (len == 0) return TRUE;
+
+    UPTR start = vaddr & ~(PAGE_SIZE - 1);
+    UPTR end = vaddr + len;
+    for (UPTR a = start; a < end; a += PAGE_SIZE) {
+        if (!vaddr_to_phys_page(UserPML4, a, nullptr, nullptr, nullptr)) {
+            Printk::Write(Printk::Level::LOG_ERR, "[USERCOPY] DumpRange: mapping failed at vaddr=%p\n", (void*)a);
+            // print the detailed mapping for this failing address
+            DumpVaddrMapping(UserPML4, a);
+            return FALSE;
+        }
+    }
+    Printk::Write(Printk::Level::LOG_ERR, "[USERCOPY] DumpRange: whole range present/user-accessible\n");
+    return TRUE;
 }
 
 namespace PageAlloc {

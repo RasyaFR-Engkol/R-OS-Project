@@ -20,6 +20,9 @@ struct File {
     U32 Internal_DirEntryOffset;  // Offset byte di dalam sektor itu
 
     FileSystem *FSOwner;
+    
+    // Reference Counting for Fork
+    I32 RefCount;
 };
 
 class FileSystem{
@@ -42,4 +45,6 @@ class FileSystem{
         virtual BOOL Flush(File* file) = 0;
         virtual BOOL Append(File* file, U8* buffer, U32 size) = 0;
         virtual BOOL Cp(const char* srcPath, const char* destPath) = 0;
+        virtual INTN ReadDir(File* dirFile, void* buffer, U32 bufferSize) = 0;
+        virtual INTN Ioctl(File* file, U32 command, U64 arg){ return -1; } // default no-op
 };

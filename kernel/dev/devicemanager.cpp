@@ -20,7 +20,7 @@ namespace DeviceManager{
         }
         g_BlockDevices[g_BlockDeviceCount] = Device;
         g_BlockDeviceCount++;
-        Printk::Write(Printk::Level::LOG_INFO, " DeviceManager: Registered block device. Total devices: %u\n", g_BlockDeviceCount);
+        Printk::Write(Printk::Level::LOG_INFO, " DeviceManager: Registered block device='%s'.\n", Device->GetDeviceName());
         // Extra debug: print addresses to detect duplicate/ODR issues or memory corruption
         Printk::Write(Printk::Level::LOG_DEBUG, " DeviceManager: Debug addr g_BlockDeviceCount=%p g_BlockDevices=%p device=%p\n",
             (void*)&g_BlockDeviceCount,
@@ -51,6 +51,24 @@ namespace DeviceManager{
         );
         return g_BlockDeviceCount;
     }   
+
+        BOOL UnregisterBlockDevice(IBlockDevice *Device){
+            if(!Device) return FALSE;
+            // Find device
+            int idx = -1;
+            for(U32 i = 0; i < g_BlockDeviceCount; i++){
+                if(g_BlockDevices[i] == Device){ idx = (int)i; break; }
+            }
+            if(idx < 0) return FALSE;
+            // Shift remaining entries down
+            for(U32 i = (U32)idx; i + 1 < g_BlockDeviceCount; i++){
+                g_BlockDevices[i] = g_BlockDevices[i+1];
+            }
+            g_BlockDevices[g_BlockDeviceCount - 1] = nullptr;
+            g_BlockDeviceCount--;
+            Printk::Write(Printk::Level::LOG_INFO, " DeviceManager: Unregistered block device='%s'.\n", Device->GetDeviceName());
+            return TRUE;
+        }
 
     IBlockDevice *GetBlockDevice(U32 Index){
         if(Index >= g_BlockDeviceCount){

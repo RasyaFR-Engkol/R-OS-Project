@@ -5,6 +5,11 @@
 #include <filesystem/filesystem.hpp>
 #include <logging.hpp>
 #include "iblockdevice.hpp"
+#include "../dev/devicemanager.hpp"
+#include "devfs/devfs.hpp"
+// Avoid including vfs.hpp here to prevent circular include (vfs.hpp includes partition.hpp).
+// Forward-declare the ResolvePath helper we use in the destructor.
+namespace VFSManager { BOOL ResolvePath(const char *path, FileSystem** outFS, char *OutRelativePath); }
 
 class FileSystem;
 class IBlockDevice;
@@ -24,6 +29,8 @@ class Partition{
     FileSystem* m_Filesystem; // Pointer ke driver FS yang ter-mount
     BOOL m_isMounted;
     BOOL m_ReadOnly;
+    // Optional wrapper object registered with DeviceManager/DevFS
+    IBlockDevice* m_DeviceWrapper;
 
     public:
     Partition(GPTFS::GptPartitionEntry *RawEntry, IBlockDevice* ParentDevice) {
@@ -37,11 +44,30 @@ class Partition{
         m_Filesystem = nullptr;
         m_isMounted = FALSE;
         m_ReadOnly = TRUE;
+        m_DeviceWrapper = nullptr;
     }
 
     ~Partition(){
-        // Untuk unmount nanti
+        // Unregister device wrapper if present
+        if(m_DeviceWrapper){
+            // Try remove from DevFS first
+            FileSystem* fs = nullptr; char rel[256];
+            if (VFSManager::ResolvePath((const char*)"/dev", &fs, rel) && fs) {
+                DevFS* devfs = (DevFS*)fs;
+                devfs->UnregisterDevice(m_DeviceWrapper->GetDeviceName());
+            }
+            // Then remove from DeviceManager
+            DeviceManager::UnregisterBlockDevice(m_DeviceWrapper);
+            // Free wrapper object: Partition now owns the wrapper and is
+            // responsible for deleting it after unregistering.
+            delete m_DeviceWrapper;
+            m_DeviceWrapper = nullptr;
+        }
     }
+
+    // Store pointer to wrapper device representing this partition
+    void SetDeviceWrapper(IBlockDevice* wrapper){ m_DeviceWrapper = wrapper; }
+    IBlockDevice* GetDeviceWrapper(){ return m_DeviceWrapper; }
 
     BOOL ReadSectors(U64 LBA, U32 Count, PageAlloc::DMAAlloc::DMABuffer **BufferOut) {
         if (LBA + Count > m_SectorCount) {

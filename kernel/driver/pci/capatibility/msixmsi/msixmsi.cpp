@@ -19,7 +19,7 @@ namespace MSI{
             return 0;
         }
 
-        Printk::Write(Printk::Level::LOG_INFO, " Allocated vector 0x%02x for MSI\n", (unsigned)Vector);
+        Printk::Write(Printk::Level::LOG_DEBUG, " Allocated vector 0x%02x for MSI\n", (unsigned)Vector);
         
         // MSI control and layout: first dword at capability offset contains
         // 8-bit CapID, 8-bit NextPtr, 16-bit Message Control (MC)
