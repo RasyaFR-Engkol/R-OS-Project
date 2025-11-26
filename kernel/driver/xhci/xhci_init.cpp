@@ -1,3 +1,4 @@
+#include "rostime.hpp"
 #define PRINTK_MODULE_NAME "XHCIInit"
 #include <rosval.h>
 #include <rossys.hpp>
@@ -52,6 +53,7 @@ namespace xHCI{
             // Initialize per-port state array
             for (U32 __p = 0; __p < 256; ++__p) {
                 DRV.PortStates[__p].State = xHCIDriver::PORT_STATE_EMPTY;
+                DRV.PortStates[__p].SlotID = 0;
             }
             Write(Level::LOG_DEBUG, " Controller %d - PortCount: %u\n", (unsigned)i, (unsigned)DRV.PortCount);
 
@@ -288,6 +290,52 @@ namespace xHCI{
 
             Write(Level::LOG_NOTICE, " Controller %d running! usb_cmd=0x%08x usb_sts=0x%08x\n",
                 (unsigned)i, (unsigned)DRV.op_regs->usb_cmd, (unsigned)DRV.op_regs->usb_sts);
+
+            Arch::Time::Sleep(600); // 600 ms delay to allow ports to power up
+
+            Printk::Write(Printk::Level::LOG_DEBUG, " [XHCIInit] Powering on all ports...\n");
+
+            for (U32 io = 0; io < DRV.PortCount; io++) {
+                // 1. Baca Langsung (Tanpa Pointer Pointeran)
+                U32 raw = DRV.port_regs[io].port_sc;
+                
+                bool hasChange = (raw & (1 << 17)); // CSC
+                bool isConnected = (raw & 1);       // CCS
+                
+                // Debug print biar tau status sebelum diapa-apain
+                if (isConnected || hasChange) {
+                    Printk::Write(Printk::Level::LOG_NOTICE, "  >>> Port %d Detected! (Raw: 0x%08x) -> Kickstarting...\n", io+1, raw);
+
+                    // 2. Clear Status Change Bit (Jika ada)
+                    if (hasChange) {
+                        U32 clear_val = raw;
+                        clear_val &= ~0x00FE0000; // Mask bit status lain biar gak ikut ke-clear
+                        clear_val |= (1 << 17);   // Tulis 1 ke bit 17 buat nge-clear
+                        
+                        // TULIS LANGSUNG ke struct
+                        DRV.port_regs[io].port_sc = clear_val;
+                        
+                        // Baca ulang biar variabel 'raw' update (optional, tapi good practice)
+                        raw = DRV.port_regs[io].port_sc;
+                    }
+
+                    // 3. Lakukan PORT RESET (Ini pemicu utamanya)
+                    // Kita butuh reset biar port masuk ke state Enabled dan device siap
+                    Printk::Write(Printk::Level::LOG_INFO, "  [XHCI] Resetting Port %d...\n", io+1);
+                    
+                    U32 reset_val = raw;
+                    reset_val &= ~0x00FE0000; // Jangan clear status change lain (tulis 0 aman)
+                    reset_val |= (1 << 4);    // Set Bit 4 (Port Reset)
+                    reset_val &= ~(1 << 1);   // Pastikan Bit 1 (Port Enable) ditulis 0 (biar gak disable)
+                    
+                    // TULIS LANGSUNG ke struct
+                    DRV.port_regs[io].port_sc = reset_val;
+
+                    // Selesai.
+                    // Nanti hardware akan reset port, lalu kirim Interrupt "Port Reset Change" (PRC).
+                    // Handler MSI-X kamu akan nangkep itu dan lanjut ke Enable Slot.
+                }
+            }
 
             // Diagnostic dump before NOOP
             //DumpXHCIState(DRV, "pre-noop");

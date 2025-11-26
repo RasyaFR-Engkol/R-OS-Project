@@ -216,6 +216,9 @@ namespace Serial {
     }
 
     static inline void EchoCharToConsoles(char c) {
+        return; 
+        // sudah di ECHO tty. jadi ga perlu echo.
+        // return dari sini biar ga double echo 
         if (c == '\r') {
             // Normalize CR to newline for fbcon, and CRLF on serial
             FBConsole::WriteString("\n");
@@ -233,6 +236,7 @@ namespace Serial {
     }
 
     VOID PollToConsoles() {
+        return;
         char ch;
         // Drain IRQ-driven RX buffer and then poll hardware
         while (TryReadChar(&ch)) {
@@ -248,9 +252,6 @@ namespace Serial {
         const uint16_t port = 0x3F8;
         while (Inb(port + 5) & 0x01) {
             char ch = (char)Inb(port + 0);
-
-            // Echo immediately (User Request)
-            EchoCharToConsoles(ch);
 
             // push into buffer
             unsigned int head = s_rx_head;

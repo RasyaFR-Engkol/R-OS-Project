@@ -38,6 +38,7 @@ namespace Tasking{
         U64 pid; // Process ID
         U64 ppid; // Parent Process ID
         U64 PGID; // Process Group ID
+        Task *PGIDTaskPtr; // Pointer ke task pertama di grup ini
         U32 Signals; // Pending Signals
         CHAR8 Name[32]; // Task Name
 
@@ -72,6 +73,7 @@ namespace Tasking{
     extern U64 CurrentTaskIndex;
     extern BOOL SchedulerActive;
     extern U64 g_ForegroundPID;
+    extern BOOL ForceReschedule;
 
     VOID SchedulerStart();
     VOID CreateKThread(VOID (*Entry)(VOID));
@@ -93,4 +95,12 @@ namespace Tasking{
     // Use this when you need to access fields like CR3 without copying.
     Task* GetCurrentTaskPtr();
     Task *GetTaskPID(U64 pid);
+    Task *GetTaskPGID(U64 pid);
+    // Set a signal on a task or a process group. If `isGroup` is TRUE,
+    // `id` is interpreted as a PGID and the signal is delivered to all
+    // members of that group. `signal` is the POSIX signal number
+    // (e.g., 2 for SIGINT).
+    VOID SetTaskSignal(U64 id, U32 signal, BOOL isGroup);
+    VOID UnlinkFromProcGrp(Task *T);
+    VOID UnblockTaskWithIOBoost(Task *T);
 }

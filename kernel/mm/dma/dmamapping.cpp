@@ -116,7 +116,7 @@ namespace DMAAlloc {
             return;
         }
 
-        if (!PageAlloc::MapPages(KernelPML4, phys, (UPTR)vbase, want, PAGE_PRESENT | PAGE_RW)) {
+        if (!PageAlloc::MapPages(KernelPML4, phys, (UPTR)vbase, want, PAGE_PRESENT | PAGE_RW | PAGE_PCD)) {
             PageAlloc::VirtualFreePages(vbase, want);
             PageAlloc::PhysicalFreePages(phys, want);
             Serial::Write("[DMA] MapPages failed for pool\n");
@@ -237,7 +237,7 @@ namespace DMAAlloc {
                 continue;
             }
 
-            if (!PageAlloc::MapPages(KernelPML4, phys, (UPTR)v, totalPages, PAGE_PRESENT | PAGE_RW)) {
+            if (!PageAlloc::MapPages(KernelPML4, phys, (UPTR)v, totalPages, PAGE_PRESENT | PAGE_RW | PAGE_PCD)) {
                 PageAlloc::VirtualFreePages(v, totalPages);
                 PageAlloc::PhysicalFreePages(phys, totalPages);
                 continue;

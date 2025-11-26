@@ -81,6 +81,8 @@ namespace AHCI {
                 }
             }
         }
+
+        
         if (Port->ci & (1u << Slot)) {
             Printk::Write(Printk::Level::LOG_ERR, " Timeout waiting slot %u to complete (CI=0x%08X)\n",
                           (unsigned)Slot, (unsigned)Port->ci);
@@ -98,7 +100,56 @@ namespace AHCI {
             return FALSE;
         }
         if (Port->is) Port->is = 0xFFFFFFFF;
+
         return TRUE;
+    }
+
+    static BOOL IssueCommand(U32 ControllerID, U32 PortNum, VAL32 Slot){
+        AHCIDriver &Drv = g_ahci_controllers[ControllerID];
+        volatile HBA_PORT *Port = &Drv.regs->ports[PortNum];
+
+        Tasking::Task *CurrentTask = Tasking::GetCurrentTaskPtr();
+        Drv.WaitingTask[PortNum] = CurrentTask;
+        CurrentTask->State = Tasking::TaskState::BLOCKED;
+
+        LOCKRFLAGS issue_flags = Arch::SaveAndDisableInterrupts();
+    
+        // Bersihkan status interrupt lama (biar fresh)
+        Port->is = 0xFFFFFFFF; 
+        
+        // "Pencet Tombol Start" di Hardware
+        Port->ci = (1u << Slot);
+        
+        Arch::RestoreInterrupts(issue_flags);
+
+        Tasking::SchedulerYield();
+
+        Drv.WaitingTask[PortNum] = nullptr;
+
+        if (Port->ci & (1u << Slot)) {
+            Printk::Write(Printk::Level::LOG_ERR, " AHCI: Command timed out / Stuck (CI=0x%08X)\n", (unsigned)Port->ci);
+            Port->ci &= ~(1u << Slot); // Stop paksa
+            return FALSE;
+        }
+
+        // Cek Fatal Error
+        if (Port->is & (1u << 30)) { // TFES (Task File Error Status)
+            Printk::Write(Printk::Level::LOG_ERR, " AHCI: TFES Error (IS=0x%08X)\n", (unsigned)Port->is);
+            Port->is = 0xFFFFFFFF;
+            return FALSE;
+        }
+
+        // Cek Error Bit di TFD
+        if (Port->tfd & 0x01) { // ERR bit
+            Printk::Write(Printk::Level::LOG_ERR, " AHCI: TaskFile Error (TFD=0x%02X)\n", (unsigned)Port->tfd);
+            Port->is = 0xFFFFFFFF;
+            return FALSE;
+        }
+
+        // Bersihkan sisa status interrupt (Housekeeping)
+        if (Port->is) Port->is = 0xFFFFFFFF;
+
+        return TRUE; // Sukses!
     }
 
     BOOL SendIdentify(AHCIDriver &Driver, VAL32 PortNum){

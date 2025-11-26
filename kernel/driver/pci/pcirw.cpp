@@ -33,6 +33,40 @@ namespace PCI{
             Port::Outl(0xCFC, Value);
         }
 
+    U16 ReadWord(U8 Bus, U8 Device, U8 Function, U8 Offset){
+        // 1. Setup Alamat (Harus aligned 32-bit, jadi & 0xFC)
+        U32 Address = (U32)((Bus << 16) | (Device << 11) | (Function << 8) | (Offset & 0xFC) | 0x80000000);
+        Port::Outl(0xCF8, Address);
+
+        // 2. Trik Geser Port Data
+        // Kalau offset misal 0x02, kita baca dari port 0xCFC + 2 = 0xCFE
+        return Port::Inw(0xCFC + (Offset & 2));
+    }
+
+    U8 ReadByte(U8 Bus, U8 Device, U8 Function, U8 Offset){
+        U32 Address = (U32)((Bus << 16) | (Device << 11) | (Function << 8) | (Offset & 0xFC) | 0x80000000);
+        Port::Outl(0xCF8, Address);
+
+        // Kalau offset misal 0x01, kita baca dari port 0xCFC + 1 = 0xCFD
+        return Port::Inb(0xCFC + (Offset & 3));
+    }
+
+    void WriteWord(U8 Bus, U8 Device, U8 Function, U8 Offset, U16 Value){
+        U32 Address = (U32)((Bus << 16) | (Device << 11) | (Function << 8) | (Offset & 0xFC) | 0x80000000);
+        Port::Outl(0xCF8, Address);
+
+        // Tulis 16-bit ke port offset yang sesuai
+        Port::Outw(0xCFC + (Offset & 2), Value);
+    }
+
+    void WriteByte(U8 Bus, U8 Device, U8 Function, U8 Offset, U8 Value){
+        U32 Address = (U32)((Bus << 16) | (Device << 11) | (Function << 8) | (Offset & 0xFC) | 0x80000000);
+        Port::Outl(0xCF8, Address);
+
+        // Tulis 8-bit ke port offset yang sesuai
+        Port::Outb(0xCFC + (Offset & 3), Value);
+    }
+
     // Attempt to enable legacy INTx (PCI interrupt line) for the given device
     // and register the provided IRQ handler. Returns IRQ number on success,
     // 0 on failure.

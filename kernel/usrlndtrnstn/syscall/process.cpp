@@ -116,10 +116,32 @@ VOID Sys_Fork(CpuContext_T *CPUContext) {
     CpuContext_T* ChildContext = (CpuContext_T*)ChildContextAddr;
     ChildContext->rax = 0;
     
-    // 6. Set PID/PPID
+    // 6. Set PID/PPID/PGID
     Child->ppid = Current->pid;
     Child->pid = 0; // Will be set by SchedulerAddTask
     Child->State = Tasking::TaskState::READY;
+    Child->PGID = Current->PGID;
+    Child->PGIDTaskPtr = nullptr; // Safety awal
+
+    // Kalau dia masuk ke grup (PGID != 0), kita harus update rantai
+    if (Child->PGID != 0) {
+        // Kita cari Leader gengnya
+        Tasking::Task* Leader = Tasking::GetTaskPID(Child->PGID);
+        
+        if (Leader) {
+            // TEKNIK INSERT AT HEAD (Paling Cepat O(1))
+            // 1. Child nunjuk ke temen yg ditunjuk Leader sebelumnya
+            Child->PGIDTaskPtr = Leader->PGIDTaskPtr;
+            
+            // 2. Leader nunjuk ke Child (Anak baru jadi tangan kanan Leader)
+            Leader->PGIDTaskPtr = Child;
+        } else {
+            // Edge case aneh: Leader mati pas fork?
+            // Ya udah Child jadi solo player dulu
+            Child->PGID = Child->pid; // Jadi leader sendiri
+            Child->PGIDTaskPtr = nullptr;
+        }
+    }
     
     // 7. Add to Scheduler
     Tasking::SchedulerAddTask(Child);
@@ -558,11 +580,53 @@ VOID Sys_SetPGID(CpuContext_T *CPUContext){
         return;
     }
 
+    // safety check kalo misalkan
+    // ada sebuah hacker mencoba mengubah
+    // PGID dari proses orang lain yang bukan
+    // anaknya sendiri.
+    if (TargetTask != Current && TargetTask->ppid != Current->pid) {
+        CPUContext->rax = -1; return;
+    }
+
     if(pgid == 0){
         pgid = TargetTask->pid;
     }
 
-    TargetTask->PGID = pgid;
+    if (TargetTask->PGID != 0 && TargetTask->PGID != pgid) {
+        Tasking::UnlinkFromProcGrp(TargetTask);
+    }
+
+    // B. Logic Gabung Grup
+    if (pgid == TargetTask->pid) {
+        // CASE 1: Bikin Grup Baru (Dia jadi Leader)
+        TargetTask->PGID = pgid;
+        TargetTask->PGIDTaskPtr = nullptr; // Leader awal gak punya temen
+    } 
+    else {
+        // CASE 2: Join Grup Lain
+        Tasking::Task* Leader = Tasking::GetTaskPID(pgid);
+        
+        if (!Leader) {
+            CPUContext->rax = -1; // EPERM: Leader gak ketemu
+            return;
+        }
+
+        // Cek: Apakah Leader beneran Leader? (Opsional, tapi bagus)
+        if (Leader->PGID != Leader->pid) {
+            // Kita cuma boleh join ke Process yang merupakan Group Leader
+            CPUContext->rax = -1; 
+            return;
+        }
+
+        TargetTask->PGID = pgid;
+
+        // TEKNIK INSERT AT HEAD (O(1))
+        // 1. Target nunjuk ke temennya Leader (Anggota 1)
+        TargetTask->PGIDTaskPtr = Leader->PGIDTaskPtr;
+        
+        // 2. Leader nunjuk ke Target
+        Leader->PGIDTaskPtr = TargetTask;
+    }
 
     Printk::Write(Printk::Level::LOG_NOTICE, "PID %d join proccess group %d\n", TargetTask->pid, pgid);
 

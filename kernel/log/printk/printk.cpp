@@ -21,7 +21,7 @@ namespace Printk {
     // build/system headers it will be used; otherwise default to LOG_INFO
     // so that debug messages are hidden by default.
 #ifndef PRINTK_CONFIG
-#define PRINTK_CONFIG LOG_INFO
+#define PRINTK_CONFIG LOG_DEBUG
 #endif
 
     static char LogBuffer[4096];

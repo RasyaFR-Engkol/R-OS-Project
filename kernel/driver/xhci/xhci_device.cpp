@@ -93,6 +93,9 @@ namespace xHCI{
         U32 PortSC = DRV.port_regs[RootPortID - 1].port_sc;
         U32 Speed = (PortSC >> 10) & 0xF;
 
+        DRV.Devs[SlotID].RootPortID = RootPortID;
+        DRV.Devs[SlotID].PortSpeed  = (U8)Speed;
+
         // Setup Slot Context
         // Word 0: Route=0, Speed, Context Entries=1 (buat aktifin EP0)
         SlotContext[0] = 0;
@@ -288,38 +291,62 @@ namespace xHCI{
             (unsigned)SlotID, (unsigned long long)DestBuffer->PhysAddr);
 
         xHCITRB SetupTRB;
-        // Parameter di Setup TRB itu unik: isinya RAW 8 bytes USB Setup Packet
-        // Kita pack manual jadi 2x U32 biar masuk ke field parameter & status
-        // Request: 80 06 00 01 00 00 12 00 (Get Device Descriptor, 18 bytes)
-        SetupTRB.parameter = 0x01000680; // Low 4 bytes (Little Endian: 80 06 00 01)
-        SetupTRB.status    = 0x00120000; // High 4 bytes (Little Endian: 00 00 12 00)
         
-        SetupTRB.control   = (2u << 10)  // TRB Type 2 = Setup Stage
-                | (2u << 16)  // TRT = 2 (IN Data Stage)
-                | (0u << 6)   // IDT = 0 (use separate Data TRB)
-                | (DRV.Devs[SlotID].EP0CycleState ? 1u : 0u);
+        // USB Setup Packet: 80 06 00 01 00 00 12 00
+        // Low  = 0x01000680 (RequestType, Request, ValueLow)
+        // High = 0x00120000 (ValueHigh, Index, Length)
+        U32 setupLow  = 0x01000680;
+        U32 setupHigh = 0x00120000;
+
+        // Masukkan SEMUA 8 byte ke .parameter (karena parameter kamu U64)
+        SetupTRB.parameter = ((U64)setupHigh << 32) | setupLow;
+        
+        // Field Status: Transfer Length SELALU 8 untuk Setup Stage
+        SetupTRB.status    = 8; 
+        
+        // Field Control:
+        // Type = 2 (Setup Stage)
+        // TRT  = 3 (IN Data Stage) <--- FIX TRT (3, bukan 2)
+        // IDT  = 1 (Immediate Data)
+        SetupTRB.control   = (2u << 10) 
+                           | (3u << 16)  // TRT: 3 = IN Data Stage
+                           | (1u << 6)   // IDT: 1
+                           | (DRV.Devs[SlotID].EP0CycleState ? 1u : 0u);
         
         PushEP0TRB(DRV, SlotID, SetupTRB);
 
+        // ==========================================
+        // DATA TRB (Tetap, cek DIR)
+        // ==========================================
         xHCITRB DataTRB;
-        DataTRB.parameter = DestBuffer->PhysAddr; // Alamat fisik buffer
-        DataTRB.status    = 18;                   // Length transfer (18 bytes)
+        DataTRB.parameter = DestBuffer->PhysAddr;
+        DataTRB.status    = 18; // Length 18 bytes
         
-        DataTRB.control   = (3u << 10)  // TRB Type 3 = Data Stage
-                | (1u << 16)  // DIR = 1 (IN - Device to Host)
-                | (1u << 2)   // ENT (Evaluate Next TRB) - optional tapi bagus
-                | (DRV.Devs[SlotID].EP0CycleState ? 1u : 0u);
+        // Type = 3 (Data Stage)
+        // DIR  = 1 (IN)
+        DataTRB.control   = (3u << 10)
+                          | (1u << 16) // DIR: 1 = IN
+                          | (1u << 2)  // ENT
+                          | (DRV.Devs[SlotID].EP0CycleState ? 1u : 0u);
+        
+        // ==========================================
+        // STATUS TRB (Tetap)
+        // ==========================================
         xHCITRB StatusTRB;
         StatusTRB.parameter = 0;
         StatusTRB.status    = 0;
         
-        StatusTRB.control   = (4u << 10)  // TRB Type 4 = Status Stage
-                            | (0u << 16)  // DIR = 0 (OUT - handshake dr Host)
-                            | (1u << 5)   // IOC (Interrupt On Completion) - KABARI GW KALO KELAR!
+        // Type = 4 (Status Stage)
+        // DIR  = 0 (OUT - Handshake dari Host)
+        // IOC  = 1 (Interrupt On Completion)
+        StatusTRB.control   = (4u << 10)
+                            | (0u << 16) // DIR: 0 = OUT
+                            | (1u << 5)  // IOC
                             | (DRV.Devs[SlotID].EP0CycleState ? 1u : 0u);
 
-                            
-        // Push Data TRB then Status TRB
+        // Push sisa TRB...
+        DRV.Devs[SlotID].Stage = xHCIDriver::XHCIDeviceState::STAGE_GET_DESCRIPTOR_SENT;
+
         PushEP0TRB(DRV, SlotID, DataTRB);
         PushEP0TRB(DRV, SlotID, StatusTRB);
 
@@ -373,7 +400,7 @@ namespace xHCI{
         // TRB 1: SETUP STAGE
         xHCITRB SetupTRB;
         SetupTRB.parameter = paramLow; 
-        SetupTRB.status    = 0; // High 4 bytes (wIndex=0, wLength=0)
+        SetupTRB.status    = 8; // High 4 bytes (wIndex=0, wLength=0)
         
         // TRT=2 (No Data Stage), IDT=1 (Immediate Data), Type=2 (Setup)
         SetupTRB.control   = (2u << 10) | (2u << 16) | (1u << 6) | 
@@ -389,9 +416,51 @@ namespace xHCI{
         StatusTRB.control   = (4u << 10) | (1u << 16) | (1u << 5) |
                               (DRV.Devs[SlotID].EP0CycleState ? 1u : 0u);
 
+        DRV.Devs[SlotID].Stage = xHCIDriver::XHCIDeviceState::STAGE_SET_CONFIG_SENT;
+
         PushEP0TRB(DRV, SlotID, StatusTRB);
 
         // Ring Doorbell
+        Printk::Write(Printk::Level::LOG_INFO, " xHCI: SetDeviceConfiguration - Ringing Doorbell for Slot %u\n", (unsigned)SlotID);
+        DRV.doorbell_regs[SlotID] = 1;
+    }
+
+    VOID GetDescriptor(xHCIDriver &DRV, U8 SlotID, U8 DescType, U8 DescIndex, U16 Length, U64 BufferPhys){
+        U32 Val = (DescType << 8) | DescIndex;
+
+        U32 ParamLow = 0x00000680 | (Val << 16);
+        U32 ParamHigh = 0x0000 | (Length << 16);
+        
+        // 1 = Setup Stage
+        xHCITRB SetupTRB;
+        SetupTRB.parameter = ((U64)ParamHigh << 32) | ParamLow;
+        SetupTRB.status    = 8; // Setup Stage length
+        SetupTRB.control   = (2u << 10) 
+                           | (3u << 16)  // TRT: 3 = IN Data Stage
+                           | (1u << 6)   // IDT: 1
+                           | (DRV.Devs[SlotID].EP0CycleState ? 1u : 0u);
+        PushEP0TRB(DRV, SlotID, SetupTRB);
+
+        // 2 = Data Stage
+        xHCITRB DataTRB;
+        DataTRB.parameter = BufferPhys;
+        DataTRB.status    = Length;
+        DataTRB.control   = (3u << 10)
+                          | (1u << 16) // DIR: 1 = IN
+                          | (1u << 2)  // ENT
+                          | (DRV.Devs[SlotID].EP0CycleState ? 1u : 0u);
+        PushEP0TRB(DRV, SlotID, DataTRB);
+
+        // 3 = Status Stage
+        xHCITRB StatusTRB;
+        StatusTRB.parameter = 0;
+        StatusTRB.status    = 0;
+        StatusTRB.control   = (4u << 10)
+                            | (0u << 16) // DIR: 0 = OUT
+                            | (1u << 5)  // IOC
+                            | (DRV.Devs[SlotID].EP0CycleState ? 1u :    0u);
+        PushEP0TRB(DRV, SlotID, StatusTRB);
+
         DRV.doorbell_regs[SlotID] = 1;
     }
 }

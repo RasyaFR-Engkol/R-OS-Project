@@ -93,12 +93,6 @@ namespace Tasking {
             PrevTask = TaskArray[CurrentTaskIndex];
         }
 
-        // REAPER: Clean up ZOMBIE tasks
-        // TODO: [OPTIMIZATION] Pindahkan logic ini ke Kernel Thread terpisah (Reaper Thread).
-        // Menjalankan memory freeing di dalam interrupt handler (Tick) itu berbahaya untuk latency
-        // dan bisa menyebabkan deadlock jika allocator menggunakan lock.
-        // Untuk sekarang (MAX_TASK=256), ini masih acceptable.
-
         if(PrevTask != nullptr){
             PrevTask->RSP = (U64)Context;
         }
@@ -107,7 +101,7 @@ namespace Tasking {
         // Handle SIGINT immediately so a running foreground process is
         // stopped as soon as possible (fix race where signal was set while
         // the task stayed RUNNING until a later tick).
-        if (PrevTask != nullptr && PrevTask->Signals != 0) {
+        if (FALSE) {
             // Only handle SIGINT (signal number 2) here.
             if (PrevTask->Signals & (1 << 2) && PrevTask->pid > 1) {
                 //Printk::Write(Printk::Level::LOG_INFO, "SchedulerTick: SIGINT received for RUNNING PID %llu\n", PrevTask->pid);
@@ -162,12 +156,28 @@ namespace Tasking {
                 PrevTask->TimeSlice = GetTimeSliceForPriority(PrevTask->Priority);
                 PrevTask->State = TaskState::READY;
             } else if(!IsYield && PrevTask->TimeSlice > 0 && PrevTask->State == TaskState::RUNNING) {
-                //Serial::Printf("[ROS] SchedulerTick: continuing PID %u (RSP=0x%llx CR3=0x%llx) with %u ticks left\n",
-                  //             (unsigned long long)PrevTask->pid,
-                  //             (unsigned long long)PrevTask->RSP,
-                  //             (unsigned long long)PrevTask->CR3,
-                  //             (unsigned)PrevTask->TimeSlice);
-                return;
+                BOOL HigherPriorityWaiting = FALSE;
+
+                if(Tasking::ForceReschedule){
+                    Tasking::ForceReschedule = FALSE;
+                    HigherPriorityWaiting = TRUE;
+                } else {
+                    for(U64 i = 0; i < MAX_TASK; i++){
+                        Task *t = TaskArray[i];
+                        if(!t || t->State != TaskState::READY) continue;
+
+                        if(t->Priority < PrevTask->Priority){
+                            HigherPriorityWaiting = TRUE;
+                            break;
+                        }
+                    }
+                }
+
+                if(!HigherPriorityWaiting){
+                    return;
+                } else {
+                    PrevTask->State = TaskState::READY;
+                }
             } else if(IsYield){
                 PrevTask->State = TaskState::READY;
             }
@@ -176,11 +186,12 @@ namespace Tasking {
         GlobalTickCounter++;
         if(GlobalTickCounter >= PRIORITY_BOOST_INTERVAL){
             GlobalTickCounter = 0;
-            for(VAL32 i = 0; i < MAX_TASK; i++){
-                if(TaskArray[i]){
-                    TaskArray[i]->Priority = 0;
-                    TaskArray[i]->TimeUsedInPriority = 0;
-                    TaskArray[i]->TimeSlice = GetTimeSliceForPriority(0);
+            for(U64 i = 0; i < MAX_TASK; i++){
+                Task* task = TaskArray[i];
+                if(task && task->State != TaskState::ZOMBIE){
+                    task->Priority = 0;
+                    task->TimeUsedInPriority = 0;
+                    task->TimeSlice = GetTimeSliceForPriority(0);
                 }
             }
         }
@@ -236,19 +247,19 @@ namespace Tasking {
     U64 GetTimeSliceForPriority(U8 Priority){
         // Simple mapping: higher priority (lower number) gets more time slice
         switch(Priority){
-            case 0: return 5; // Highest priority
-            case 1: return 10;
-            case 2: return 20;
-            default: return 40; // Lowest priority
+            case 0: return 20; // Highest priority
+            case 1: return 40;
+            case 2: return 60;
+            default: return 80; // Lowest priority
         }
     }
 
     U64 GetTimeAllotmentForPriority(U8 priority) {
         switch(priority) {
-            case 0: return 20;  // Boleh jalan 4x (kalau slice=5) sebelum turun
-            case 1: return 40;
-            case 2: return 80;
-            default: return 0xFFFFFFFFFFFFFFFF; // Prio terendah stay forever
+            case 0: return 100;
+            case 1: return 200;
+            case 2: return 400;
+            default: return 0xFFFFFFFFFFFFFFFF; // Prio terendah tidak akan turun
         }
     }
 

@@ -2,6 +2,7 @@
 
 #include "ahci_regs.hpp"
 #include <mm.hpp>
+#include <task.hpp>
 
 namespace AHCI {
     // Kita siapkan array untuk maks 4 controller
@@ -50,6 +51,9 @@ namespace AHCI {
         // (biar C++ bisa nulis/baca)
         volatile HBA_CMD_HEADER* v_cmd_lists[32];
         volatile U8* v_cmd_tables[32]; // (Kita pakai U8* biar gampang di-offset)
+
+        // task preempted oleh interrupt AHCI
+        Tasking::Task *WaitingTask[32];
     };
 
     struct AHCIPortInfo {

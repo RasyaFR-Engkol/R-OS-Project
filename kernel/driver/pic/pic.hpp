@@ -25,7 +25,10 @@ namespace PIC {
         char GetChar();
 
         U32 GetBufferCount();
+        // Clear input ASCII buffer (used by TCSETSF)
+        void FlushBuffer();
         void NotifyTaskDied(Tasking::Task* t);
+            void InjectScancode(U8 sc);
     }
     VOID DisableIRQWhileAndMaskOldPIC();
 }

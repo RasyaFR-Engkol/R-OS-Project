@@ -47,13 +47,53 @@ namespace xHCI{
         // Per-slot device state array maintained by the xHCI driver.
         // This holds runtime info about allocated slots/devices such as
         // EP0 ring pointers, enqueue indices and cycle state.
+        struct XHCIEndpointState {
+            PageAlloc::DMAAlloc::DMABuffer* Ring;
+            U32 EnqueueIdx;
+            BOOL CycleState;
+        };
+
         struct XHCIDeviceState {
             PageAlloc::DMAAlloc::DMABuffer* EP0Ring;
             U32 EP0EnqueueIdx;
             BOOL EP0CycleState;
             U64 LastEP0DestPhys;
+
+            U8 ActiveIntDCI;     // DCI untuk Interrupt IN (disimpan pas parsing)
+            U8 LastKeyboardData[8]; 
+            BOOL IsKeyboard; // Penanda kalau device ini keyboard
+            U64 IntBufferPhys;   // Alamat fisik buffer data mouse
+            U8* IntBufferVirt;   // Alamat virtual buffer data mouse
+            U8 RootPortID;       // Port fisik di mana device nyolok (penting buat Slot Context)
+            U8 PortSpeed;        // Speed ID (penting buat Slot Context)
+
+            XHCIEndpointState Endpoints[32]; 
+
             // future: add endpoint rings, address, config, speed, etc.
-            XHCIDeviceState(){ EP0Ring = nullptr; EP0EnqueueIdx = 0; EP0CycleState = TRUE; LastEP0DestPhys = 0; }
+            XHCIDeviceState()
+            { EP0Ring = nullptr; 
+              EP0EnqueueIdx = 0; 
+              EP0CycleState = TRUE;
+              LastEP0DestPhys = 0; 
+              Stage = STAGE_NONE;
+
+              // Init endpoints
+                for(int i=0; i<32; i++) {
+                    Endpoints[i].Ring = nullptr;
+                    Endpoints[i].EnqueueIdx = 0;
+                    Endpoints[i].CycleState = TRUE;
+                }
+            }
+
+            enum DeviceStage {
+                STAGE_NONE,
+                STAGE_GET_DESCRIPTOR_SENT,
+                STAGE_SET_CONFIG_SENT,
+                STAGE_CONFIGURED,
+                STAGE_GET_CONFIG_DESC_SENT,
+                STAGE_ENDPOINT_CONFIG_SENT,
+                STAGE_RUNNING
+            } Stage;
         };
 
         static const U32 MAX_SLOTS = 256;
@@ -62,6 +102,7 @@ namespace xHCI{
         // Simple state to avoid double-issuing Enable Slot on repeated PSC
         struct xHCIPortState {
             U8 State; // see enum below for symbolic names
+            U8 SlotID; // Assigned Slot ID after Enable Slot completes
         };
         xHCIPortState PortStates[256]; // Array state buat tiap port
         // Port state symbolic values
@@ -87,7 +128,11 @@ namespace xHCI{
     // New test: issue N Enable Slot commands (no NOOP, no polling) to verify repeated interrupts
     VOID InterruptBurstTest(U32 times);
 
-
     VOID SetupAddressDevice(xHCIDriver &DRV, U8 SlotID, U8 RootPortID);
     VOID GetDeviceDescriptor(xHCIDriver &DRV, U8 SlotID);
+
+    VOID ConfigureEndpoint(xHCIDriver &DRV, U8 SlotID, U8 EpAddr, U8 EpType, U16 MaxPacketSize, U32 Interval);
+    VOID GetDescriptor(xHCIDriver &DRV, U8 SlotID, U8 DescType, U8 DescIndex, U16 Length, U64 BufferPhys);
+
+    VOID QueueInterruptTransfer(xHCIDriver &DRV, U8 SlotID, U8 DCI, U64 BufferPhys, U32 Length);
 }

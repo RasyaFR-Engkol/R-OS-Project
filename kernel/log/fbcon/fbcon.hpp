@@ -10,4 +10,8 @@ namespace FBConsole {
     VOID UpdateCursor();
     U64 GetColumns();
     U64 GetRows();
+    // Compatibility helpers used by TTY ioctl
+    U64 GetCols();
+    U64 GetWidthPixels();
+    U64 GetHeightPixels();
 }

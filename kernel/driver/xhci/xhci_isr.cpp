@@ -50,54 +50,52 @@ namespace xHCI{
     }
 
     static VOID HandlePortStatusChange(xHCIDriver &DRV, U8 PortID){
-        if(PortID == 0 || PortID > DRV.PortCount) {
-            Write(Level::LOG_ERR, " Invalid PortID %u for Port Status Change\n", (unsigned)PortID);
-            return;
-        }
+        if(PortID == 0 || PortID > DRV.PortCount) return;
 
         VOLATILE xHCIPortRegs *PortReg = &DRV.port_regs[PortID - 1];
         U32 PortSC = PortReg->port_sc;
 
-        Write(Level::LOG_INFO, " Port %u - PortSC=0x%08x\n", (unsigned)PortID, (unsigned)PortSC);
+        Write(Level::LOG_INFO, " Port %u Event - PortSC=0x%08x\n", (unsigned)PortID, (unsigned)PortSC);
 
-        // Cek bit CSC (Connect Status Change) - bit 17
-        // Dan bit CCS (Current Connect Status) - bit 0
-        if(PortSC & (1 << 17)){
-            PortReg->port_sc = (1 << 17) | (1 << 9); // Clear CSC by writing 1
-
-                if(PortSC & (1 << 0)){
-                Write(Level::LOG_NOTICE, " xHCI: Device connected on Port %u resetting...\n", (unsigned)PortID);
-
+        // ====================================================
+        // 1. EVENT: CONNECT STATUS CHANGE (Baru Dicolok)
+        // ====================================================
+        if(PortSC & (1 << 17)) { // CSC
+            // Clear CSC (Write-1-to-Clear)
+            PortReg->port_sc = (PortSC & ~0x00FE0000) | (1 << 17);
+            
+            // Kalau Connected tapi belum Enabled, berarti butuh RESET
+            if((PortSC & 1) && !(PortSC & 2)) {
+                Write(Level::LOG_NOTICE, " xHCI: Port %u Connected. Initiating Reset...\n", (unsigned)PortID);
+                
                 U32 ResetCMD = PortSC;
-                ResetCMD &= ~(0xFE0000); // Clear bits 25-31
-                ResetCMD |= (1 << 4);
-                ResetCMD &= ~(1 << 1); // Clear PED to initiate reset
-
+                ResetCMD &= ~0x00FE0000; // Mask status bits
+                ResetCMD |= (1 << 4);    // Set PR (Port Reset)
+                ResetCMD &= ~(1 << 1);   // Clear PED (biar reset jalan)
+                
                 PortReg->port_sc = ResetCMD;
-
-                INTN Timeout = 100000;
-                while(Timeout-- > 0){
-                    if(PortReg->port_sc & (1 << 21)){
-                        break; // Reset complete
-                    }
-                    Arch::ASM::CPURelax();
-                }
-
-                PortReg->port_sc |= (1 << 21);
-
-                Write(Level::LOG_NOTICE, " xHCI: Port %u reset complete.\n", (unsigned)PortID);
-
-                // Mark the port as having an EnableSlot pending so the
-                // completion handler can correlate the returned SlotID
-                // to this root port.
-                if (PortID > 0 && PortID <= DRV.PortCount) {
-                    DRV.PortStates[PortID - 1].State = xHCIDriver::PORT_STATE_ENABLE_SENT;
-                }
-
-                SendEnableSlotCommand(DRV);
-            } else {
-                Write(Level::LOG_NOTICE, " xHCI: Device disconnected from Port %u.\n", (unsigned)PortID);
+                
+                // KITA KELUAR DISINI. Jangan ditungguin pake while loop!
+                // Biarkan hardware kerja. Nanti kalau reset kelar,
+                // dia bakal kirim interrupt lagi dengan bit PRC (21) nyala.
+                return; 
             }
+        }
+
+        // ====================================================
+        // 2. EVENT: PORT RESET CHANGE (Reset Selesai)
+        // ====================================================
+        if(PortSC & (1 << 21)) { // PRC (Port Reset Change)
+            // Clear PRC (Write-1-to-Clear)
+            PortReg->port_sc = (PortSC & ~0x00FE0000) | (1 << 21);
+            
+            Write(Level::LOG_NOTICE, " xHCI: Port %u Reset Complete (PRC). Sending Enable Slot...\n", (unsigned)PortID);
+
+            // Tandai state port
+            DRV.PortStates[PortID - 1].State = xHCIDriver::PORT_STATE_ENABLE_SENT;
+
+            // Kirim Command Enable Slot
+            SendEnableSlotCommand(DRV);
         }
     }
 
@@ -108,6 +106,7 @@ namespace xHCI{
             volatile xHCITRB *Event = &DRV.VEventRing[index];
 
             asm volatile("clflush (%0)" :: "r"(Event) : "memory");
+            asm volatile("mfence" ::: "memory"); // Tunggu memori sinkron
 
             U32 control = Event->control;
 
@@ -126,112 +125,272 @@ namespace xHCI{
             if(EventType == 33){
                 U8  ccode   = (U8)(Event->status >> 24);
                 U8  slotId  = (U8)(Event->control >> 24);
-                UNUSED__ U8 EndpointID = (U8)((Event->control >> 16) & 0x1F);
-
-                //Write(Level::LOG_DEBUG, " Controller %u - CCE: cc=%u slot=%u cmd_ptr=0x%016llx status=0x%08x ctl=0x%08x\n",
-                //    (unsigned)Controller_ID,
-                //    (unsigned)ccode,
-                //    (unsigned)slotId,
-                //    (unsigned long long)cmd_ptr,
-                //    (unsigned)Event->status,
-                //    (unsigned)Event->control);
+                U64 cmdTrbPhys = Event->parameter; // Pointer ke Command TRB asli
+                
+                // Kita harus intip Command TRB aslinya untuk tahu ini command apa
+                volatile xHCITRB *OriginalCmd = (volatile xHCITRB*)HHDM_PhysToVirt((UPTR)cmdTrbPhys);
+                U32 CmdType = (OriginalCmd->control >> 10) & 0x3F; // Ambil TRB Type dari Command aslinya
 
                 if(ccode == 1){ // Success
-                    U8 portWaitingEnable = 0;
-                    for(U32 p=0; p<DRV.PortCount; p++){
-                        if(DRV.PortStates[p].State == xHCIDriver::PORT_STATE_ENABLE_SENT){
-                            portWaitingEnable = p + 1;
-                            DRV.PortStates[p].State = xHCIDriver::PORT_STATE_ADDRESSING; 
+                    
+                    switch(CmdType) {
+                        case 23: // TRB_TYPE_NOOP
+                            Write(Level::LOG_DEBUG, " xHCI: NOOP Command Completed.\n");
                             break;
-                        }
-                    }
 
-                    if (portWaitingEnable != 0) {
-                        // Ini berarti command ENABLE SLOT baru selesai
-                        Write(Level::LOG_INFO, " xHCI: Slot ID %u assigned to Port %u. Starting Address Device...\n", slotId, portWaitingEnable);
-                        
-                        // INI DIA YANG HILANG TADI:
-                        SetupAddressDevice(DRV, slotId, portWaitingEnable); 
-
-                    } else {
-                        // Kalau gak ada port yang nunggu Enable Slot, berarti ini command lain.
-                        // Asumsi flow linear: berarti ini ADDRESS DEVICE selesai.
-
-                        Write(Level::LOG_INFO, " xHCI: Address Device Command Completed for Slot %u. Getting Descriptor...\n", slotId);
-
-                        // Diagnostic dump: print the Event TRB contents we just processed
-                        Write(Level::LOG_DEBUG, " CCE EventTRB: param=0x%016llx status=0x%08x ctl=0x%08x\n",
-                            (unsigned long long)Event->parameter, (unsigned)Event->status, (unsigned)Event->control);
-
-                        // Diagnostic: read device context base for this slot and dump EP0 dequeue pointer
-                        if (DRV.V_DCBAAP) {
-                            U64 dcba_phys = (U64)DRV.V_DCBAAP[slotId];
-                            if (dcba_phys) {
-                                volatile U32 *ep0ctx = (volatile U32*)HHDM_PhysToVirt((UPTR)dcba_phys + 64);
-                                U32 dq_lo = ep0ctx[2];
-                                U32 dq_hi = ep0ctx[3];
-                                U64 dq_phys = ((U64)dq_hi << 32) | (U64)(dq_lo & 0xFFFFFFF0ULL);
-                                U8 dcs = (U8)(dq_lo & 1u);
-                                Write(Level::LOG_INFO, " Slot %u EP0 DequeuePtr lo=0x%08x hi=0x%08x DCS=%u -> phys=0x%016llx\n",
-                                    (unsigned)slotId, (unsigned)dq_lo, (unsigned)dq_hi, (unsigned)dcs, (unsigned long long)dq_phys);
-                            } else {
-                                Write(Level::LOG_INFO, " No DCBAAP entry for slot %u (dcba_phys=0)\n", (unsigned)slotId);
-                            }
-                        } else {
-                            Write(Level::LOG_INFO, " No V_DCBAAP pointer available for controller\n");
-                        }
-
-                        GetDeviceDescriptor(DRV, slotId);
-                    }
-                } else {
-                        // Diagnostic: dump the command TRB referenced by this CCE (Event->parameter)
-                        U64 cmd_ptr_phys = Event->parameter;
-                        if (cmd_ptr_phys) {
-                            volatile xHCITRB *cmd_trb = (volatile xHCITRB*)HHDM_PhysToVirt((UPTR)cmd_ptr_phys);
-                            Write(Level::LOG_DEBUG, " CCE Error: cmd_trb at phys=0x%016llx param=0x%016llx status=0x%08x ctl=0x%08x\n",
-                                (unsigned long long)cmd_ptr_phys, (unsigned long long)cmd_trb->parameter, (unsigned)cmd_trb->status, (unsigned)cmd_trb->control);
-                            U8 trbType = (U8)((cmd_trb->control >> 10) & 0x3F);
-                            Write(Level::LOG_DEBUG, " CCE Error: TRB Type=%u\n", (unsigned)trbType);
-                            if (trbType == 11) { // Address Device command
-                                U64 inctx_phys = cmd_trb->parameter;
-                                if (inctx_phys) {
-                                    volatile U32 *inp = (volatile U32*)HHDM_PhysToVirt((UPTR)inctx_phys);
-                                    Write(Level::LOG_DEBUG, " AddressDevice InputContext (phys=0x%016llx):\n", (unsigned long long)inctx_phys);
-                                    for (int i = 0; i < 8; ++i) {
-                                        Write(Level::LOG_DEBUG, "  IC[%d]=0x%08x\n", i, (unsigned)inp[i]);
+                        case 9: // TRB_TYPE_ENABLE_SLOT
+                            {
+                                // Cari port mana yang request enable slot ini
+                                // (Logic loop portWaitingEnable kamu pindah kesini)
+                                U32 targetPort = 0;
+                                for(U32 p=0; p<DRV.PortCount; p++){
+                                    if(DRV.PortStates[p].State == xHCIDriver::PORT_STATE_ENABLE_SENT){
+                                        targetPort = p + 1;
+                                        DRV.PortStates[p].State = xHCIDriver::PORT_STATE_ADDRESSING; 
+                                        break;
                                     }
                                 }
+                                
+                                if(targetPort) {
+                                    Write(Level::LOG_INFO, " xHCI: Slot ID %u assigned to Port %u. Sending Address Device...\n", slotId, targetPort);
+                                    // PENTING: Simpan SlotID ini ke struktur Port atau Device array kamu
+                                    DRV.PortStates[targetPort-1].SlotID = slotId; 
+                                    
+                                    SetupAddressDevice(DRV, slotId, targetPort);
+                                } else {
+                                    Write(Level::LOG_WARNING, " xHCI: Enable Slot completed but no port was waiting?\n");
+                                }
                             }
-                        } else {
-                            Write(Level::LOG_DEBUG, " CCE Error: no cmd_trb pointer in Event->parameter\n");
-                        }
-                        Write(Level::LOG_WARNING, " xHCI: Command failed with completion code %u for Slot %u\n", (unsigned)ccode, (unsigned)slotId);
+                            break;
+
+                        case 11: // TRB_TYPE_ADDRESS_DEVICE
+                            Write(Level::LOG_INFO, " xHCI: Address Device Command Completed for Slot %u.\n", slotId);
+                            // Baru disini aman panggil GetDescriptor
+                            GetDeviceDescriptor(DRV, slotId);
+                            break;
+
+                        case 12: // TRB_TYPE_CONFIGURE_ENDPOINT
+                            {
+                                Write(Level::LOG_INFO, " xHCI: Configure Endpoint Completed for Slot %u. Endpoint READY!\n", slotId);
+
+                                // --- LOGIC TAMBAHAN: TRIGGER PERTAMA ---
+                                
+                                // 1. Ambil DCI Interrupt yang tadi kita simpan pas parsing Descriptor
+                                U8 targetDCI = DRV.Devs[slotId].ActiveIntDCI;
+                                if(targetDCI == 0) {
+                                    // Fallback kalau parsing gagal/belum diimplementasi: Asumsi EP 1 IN
+                                    targetDCI = 3; 
+                                }
+
+                                // 2. Siapkan Buffer (Misal 8 byte cukup buat Mouse/Keyboard Boot Protocol)
+                                // Simpan buffer ini di struct biar bisa dibaca nanti
+                                if(DRV.Devs[slotId].IntBufferVirt == nullptr) {
+                                    PageAlloc::DMAAlloc::DMABuffer* intBuf = PageAlloc::DMAAlloc::AllocateDMABytes(8);
+                                    DRV.Devs[slotId].IntBufferPhys = intBuf->PhysAddr;
+                                    DRV.Devs[slotId].IntBufferVirt = (U8*)intBuf->VirtAddr;
+                                }
+
+                                // 3. Masukkan "Pancingan" (Transfer TRB) ke Ring Endpoint
+                                Write(Level::LOG_DEBUG, " xHCI: Queueing first Interrupt Transfer for Slot %u DCI %u\n", slotId, targetDCI);
+                                
+                                QueueInterruptTransfer(DRV, slotId, targetDCI, DRV.Devs[slotId].IntBufferPhys, 8);
+
+                                // 4. Update State jadi RUNNING
+                                DRV.Devs[slotId].Stage = xHCIDriver::XHCIDeviceState::STAGE_RUNNING;
+                            }
+                            break;
+                        case 13: //TRB_TYPE_CONFIGURE_ENDPOINT
+                            {
+                                Write(Level::LOG_INFO, " xHCI: Configure Endpoint Completed for Slot %u. Endpoint READY!\n", slotId);
+
+                                // 1. Siapkan Buffer untuk terima data Mouse (misal 8 byte cukup untuk Boot Protocol)
+                                // Simpan pointer ini di struct supaya nanti pas interrupt (STAGE_RUNNING) bisa dibaca datanya
+                                PageAlloc::DMAAlloc::DMABuffer* intBuf = PageAlloc::DMAAlloc::AllocateDMABytes(8);
+                                DRV.Devs[slotId].IntBufferPhys = intBuf->PhysAddr;
+                                DRV.Devs[slotId].IntBufferVirt = (U8*)intBuf->VirtAddr; // Pastikan member ini ada
+
+                                // 2. Ambil DCI yang tadi kita simpan pas parsing
+                                U8 targetDCI = DRV.Devs[slotId].ActiveIntDCI;
+                                if(targetDCI == 0) targetDCI = 3; // Fallback kalau lupa simpan (EP 1 IN)
+
+                                // 3. Masukkan Transfer TRB ke Ring Endpoint (bukan Command Ring!)
+                                // "Tolong isi buffer ini kalau ada data dari mouse"
+                                QueueInterruptTransfer(DRV, slotId, targetDCI, intBuf->PhysAddr, 8);
+
+                                // 4. Update Doorbell! (PENTING)
+                                // Tanpa ini, xHCI gak akan sadar ada TRB baru di Endpoint Ring
+                                DRV.doorbell_regs[slotId] = targetDCI; 
+
+                                // 5. Update State
+                                DRV.Devs[slotId].Stage = xHCIDriver::XHCIDeviceState::STAGE_RUNNING;
+                                
+                                Write(Level::LOG_NOTICE, " xHCI: Slot %u is now RUNNING! Waiting for mouse input...\n", slotId);
+                            }
+                            break;
+
+                        default:
+                            Write(Level::LOG_DEBUG, " xHCI: Unknown Command %u Completed for Slot %u.\n", CmdType, slotId);
+                            break;
+                    }
+
+                } else {
+                    // Handle Error (ccode != 1)
+                    Write(Level::LOG_ERR, " xHCI: Command Type %u Failed! Code: %u Slot: %u\n", CmdType, ccode, slotId);
                 }
-            } else if (EventType == 32){
+            } else if (EventType == 32){ // Transfer Event
                 U8 CCode = (U8)(Event->status >> 24);
                 U8 SlotID = (U8)(Event->control >> 24);
-                U8 EndpointID = (U8)((Event->control >> 16) & 0x1F);
                 
-                if(CCode == 1 && EndpointID == 1){
-                    Write(Level::LOG_INFO, " xHCI: Get Device Descriptor command completed successfully for Slot %u\n", (unsigned)SlotID);
+                auto &devState = DRV.Devs[SlotID];
 
-                    U64 DestPhys = DRV.Devs[SlotID].LastEP0DestPhys;
-                    if(DestPhys){
-                        USBDeviceDescriptor *Desc = (USBDeviceDescriptor*)(VOID*)HHDM_PhysToVirt((UPTR)DestPhys);
-
-                        Write(Level::LOG_NOTICE, " DEVICE FOUND! VID: %04x PID: %04x Class: %02x\n", 
-                            Desc->idVendor, Desc->idProduct, Desc->bDeviceClass);
-
-                        if (Desc->bDeviceClass == 0x08 || Desc->bDeviceClass == 0x00) { 
-                            // Class 0x00 berarti info class ada di Interface Descriptor (umum di flashdisk)
-                            Write(Level::LOG_NOTICE, " !!! MASS STORAGE CANDIDATE !!!\n");
+                if(CCode == 1 || CCode == 13){ // Success
+                    
+                    // CEK STAGE SEKARANG APA?
+                    switch(devState.Stage) {
+                        case xHCIDriver::XHCIDeviceState::STAGE_GET_DESCRIPTOR_SENT:
+                            Write(Level::LOG_INFO, " xHCI: Get Device Descriptor DONE for Slot %u\n", SlotID);
                             
-                            // TRIGGER STEP 5: SET CONFIGURATION
-                            SetDeviceConfiguration(DRV, SlotID, 1); // Config index 1 biasanya
+                            // Parse Descriptor (ambil VID/PID)
+                            // ... kode parsing descriptor kamu ...
+                            
+                            // Lanjut ke Next Step
+                            SetDeviceConfiguration(DRV, SlotID, 1);
+                            break;
+
+                        case xHCIDriver::XHCIDeviceState::STAGE_SET_CONFIG_SENT:
+                            Write(Level::LOG_INFO, " xHCI: Set Configuration DONE for Slot %u\n", SlotID);
+
+                            {
+                                // Alokasi buffer uncached buat nampung descriptor
+                                PageAlloc::DMAAlloc::DMABuffer* descBuf = PageAlloc::DMAAlloc::AllocateDMABytes(256);
+                                DRV.Devs[SlotID].LastEP0DestPhys = descBuf->PhysAddr; // Simpan pointer biar bisa dibaca pas interrupt
+                                DRV.Devs[SlotID].Stage = xHCIDriver::XHCIDeviceState::STAGE_GET_CONFIG_DESC_SENT;
+                                
+                                // Request Config Descriptor (Type 2), Index 0, Length 256
+                                GetDescriptor(DRV, SlotID, 2, 0, 256, descBuf->PhysAddr);
+                            }
+                            break;
+
+                        case xHCIDriver::XHCIDeviceState::STAGE_GET_CONFIG_DESC_SENT:
+                    {
+                        // Cek apakah ini event duplikat (Status Stage)?
+                        // Kita bisa cek apakah kita baru saja memproses ini.
+                        // Tapi cara paling gampang: Ubah stage langsung setelah sukses.
+                        
+                        Write(Level::LOG_INFO, " xHCI: Config Descriptor Received! Parsing...\n");
+                        
+                        U64 bufPhys = DRV.Devs[SlotID].LastEP0DestPhys;
+                        U8* buffer = (U8*)HHDM_PhysToVirt(bufPhys); 
+                        U16 totalLen = buffer[2] | (buffer[3] << 8); 
+                        if (totalLen > 1024) totalLen = 1024; 
+
+                        U32 offset = 0;
+                        BOOL found = FALSE;
+
+                        while (offset < totalLen) {
+                            U8 len = buffer[offset];
+                            U8 type = buffer[offset + 1];
+                            if (len == 0) break;
+
+                            if (type == 5) { // ENDPOINT
+                                U8 addr = buffer[offset + 2];
+                                U8 attr = buffer[offset + 3];
+                                U16 pkt = buffer[offset + 4] | (buffer[offset + 5] << 8);
+                                U8 interval = buffer[offset + 6];
+
+                                if ((attr & 0x3) == 3 && (addr & 0x80)) {
+                                    
+                                    // === FIX 1: SAFETY MARGIN UNTUK MOUSE GAMING ===
+                                    // Jangan set pas-pasan 8. Mouse gaming suka lebay ngirim data.
+                                    // Set ke 64 (Max Full Speed) biar aman dari BABBLE ERROR.
+                                    // xHCI gak peduli kalau device cuma pake 4 dari 64. Aman.
+                                    if (pkt < 64) {
+                                        Write(Level::LOG_WARNING, "   [FIX] Bumping MPS from %u to 64 to prevent Babble on gaming mouse.\n", pkt);
+                                        pkt = 64; 
+                                    }
+
+                                    Write(Level::LOG_NOTICE, "   >>> FOUND MOUSE/KBD ENDPOINT! DCI=%u (Addr=0x%x) MPS=%u\n", ((addr&0xF)*2)+1, addr, pkt);
+                                    
+                                    DRV.Devs[SlotID].ActiveIntDCI = ((addr & 0xF) * 2) + 1;
+                                    
+                                    ConfigureEndpoint(DRV, SlotID, addr, 7, pkt, interval);
+                                    found = TRUE;
+                                    break; 
+                                }
+                            }
+                            offset += len;
+                        }
+
+                        if (found) {
+                            // === FIX 2: MENCEGAH DOUBLE CONFIG ===
+                            // Langsung pindah state supaya event berikutnya (Status Stage)
+                            // tidak memicu parsing ulang.
+                            DRV.Devs[SlotID].Stage = xHCIDriver::XHCIDeviceState::STAGE_ENDPOINT_CONFIG_SENT;
+                        } else {
+                            // Kalau gak ketemu, jangan stuck looping
+                            Write(Level::LOG_ERR, "   No Interrupt Endpoint found. Parking device.\n");
+                            DRV.Devs[SlotID].Stage = xHCIDriver::XHCIDeviceState::STAGE_CONFIGURED; 
                         }
                     }
-                } else if (CCode != 1) {
-                    Write(Level::LOG_ERR, " Transfer Failed Code %d Slot %d EP %d\n", CCode, SlotID, EndpointID);
+                    break;
+                            
+
+                        case xHCIDriver::XHCIDeviceState::STAGE_ENDPOINT_CONFIG_SENT: 
+                            // INI TRICKY: Configure Endpoint itu menghasilkan COMMAND COMPLETION EVENT (Type 33), BUKAN Transfer Event (Type 32).
+                            // Jadi logic "Configure Selesai" harusnya ada di blok (EventType == 33).
+                            // Tapi gapapa, kita pindahin logic-nya nanti.
+                            break;
+
+                        
+                        case xHCIDriver::XHCIDeviceState::STAGE_CONFIGURED:
+                            // Ini mungkin interrupt dari transfer data mouse/keyboard biasa
+                            // Handle data endpoint disini nanti
+                            break;
+
+                        case xHCIDriver::XHCIDeviceState::STAGE_RUNNING:
+                        {
+                            U8* data = devState.IntBufferVirt;
+                            
+                            // Hitung data beneran yang masuk
+                            // Transfer Length (Residual) ada di 24 bit bawah status
+                            U32 residual = (Event->status & 0x00FFFFFF);
+                            U32 lengthRequested = 8; // Sesuai buffer yang kita alokasi
+                            U32 actualLength = lengthRequested - residual;
+
+                            Write(Level::LOG_NOTICE, " [HID INPUT Slot %u] Len=%u Data: %02x %02x %02x %02x\n", 
+                                SlotID, actualLength, data[0], data[1], data[2], data[3]);
+                            
+                            // === LOGIC MOUSE ===
+                            // Byte 0: Bitmap Button (Bit 0=Left, 1=Right, 2=Middle)
+                            // Byte 1: X Offset (Signed char)
+                            // Byte 2: Y Offset (Signed char)
+                            if (actualLength >= 3) {
+                                I8 x_rel = (I8)data[1];
+                                I8 y_rel = (I8)data[2];
+                                if(x_rel != 0 || y_rel != 0) {
+                                    Write(Level::LOG_INFO, "    Mouse Gerak: X=%d Y=%d\n", x_rel, y_rel);
+                                }
+                            }
+
+                            // ===============================================
+                            // INI YANG BIKIN MOUSE LU MATI SEBELUMNYA
+                            // KITA HARUS SELALU RE-QUEUE, GAK PEDULI CODE 1 ATAU 13
+                            // ===============================================
+                            U8 dci = devState.ActiveIntDCI ? devState.ActiveIntDCI : 3;
+                            QueueInterruptTransfer(DRV, SlotID, dci, devState.IntBufferPhys, 8);
+                        }
+                        break;
+                                        
+                        default:
+                            Write(Level::LOG_WARNING, " xHCI: Unknown Transfer Event for Slot %u in Stage %d\n", SlotID, devState.Stage);
+                            break;
+                    }
+
+                } 
+                else {
+                    // Nah, kalau ini baru error beneran (selain 1 dan 13)
+                    Printk::Write(Printk::Level::LOG_ERR, " Transfer Failed Code %d Slot %u\n", CCode, SlotID);
+                    // Handle error beneran (Stall, Babble, dll)
                 }
             } else if (EventType == 34) {
                 U8 PortID = (U8)((Event->parameter >> 24) & 0xFF);
@@ -256,6 +415,8 @@ namespace xHCI{
             DRV.EventRingDequeueIndex = index;
         }
 
+        Printk::Write(Printk::Level::LOG_DEBUG, " xHCI: Controller %u - No more pending events. Spurious Interrupt Handled\n", (unsigned)Controller_ID);
+
         // Ack Event Interrupt (EINT)
         DRV.op_regs->usb_sts = (1u << 3);
             U64 newDequeuePhys = DRV.DMA_EventRing->PhysAddr + ((U64)DRV.EventRingDequeueIndex * sizeof(xHCITRB));
@@ -264,12 +425,16 @@ namespace xHCI{
         // Use an assignment to write the proper bits (clear IP by writing 1, and set IE).
         // Some implementations expect writing 1 to IP clears it; OR-ing the read value
         // is incorrect because it may not write the required '1'. So write both bits.
-        IR0->iman = (1u << 0) | (1u << 1);
+        IR0->iman = (1u << 1) | (1u << 0);
+        asm volatile("mfence" ::: "memory");
     }
 
     static VOID xHCI_HandleInterrupt(VAL32 Controller_ID){
         Write(Level::LOG_INFO, " Interrupt received from controller %u \n", (unsigned)Controller_ID);
         xHCIDriver &DRV = g_xhci_controllers[Controller_ID];
+
+
+        /** 
         U32 Status = DRV.op_regs->usb_sts;
         if(!(Status & (1u << 3))){
             // Spurious interrupt: provide extra debug info to help diagnose IRQ races
@@ -352,6 +517,9 @@ namespace xHCI{
 
             return;
         }
+        ProcessPendingEvents(DRV, Controller_ID);
+    } */
+
         ProcessPendingEvents(DRV, Controller_ID);
     }
 

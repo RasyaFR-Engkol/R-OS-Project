@@ -150,6 +150,8 @@ Task* TaskUserConstructor(const CHAR8 *Name, VOID *ELFImage) {
     newTask->State = TaskState::READY;
     newTask->SleepUntil = 0;
     newTask->YieldRequested = FALSE;
+    newTask->Signals = 0;
+    newTask->PGID = newTask->pid;
     constexpr U64 USER_HEAP_START = 0x0000000200000000ULL;
     newTask->MMapNextAddr = AlignUp(imageEnd, PAGE_SIZE);
     if (newTask->MMapNextAddr < USER_HEAP_START) {
@@ -164,10 +166,12 @@ Task* TaskUserConstructor(const CHAR8 *Name, VOID *ELFImage) {
     }
 
     // setup file descriptor table ke stdin, stdout, stderr
-    newTask->FDTable[0] = VFSManager::Open("/dev/stdin"); // stdin
-    newTask->FDTable[1] = VFSManager::Open("/dev/stdout"); // stdout
-    newTask->FDTable[2] = VFSManager::Open("/dev/stderr"); // stderr
+    newTask->FDTable[0] = VFSManager::Open("/dev/tty"); // stdin
+    newTask->FDTable[1] = VFSManager::Open("/dev/tty"); // stdout
+    newTask->FDTable[2] = VFSManager::Open("/dev/tty"); // stderr
     newTask->CWD[0] = '/'; newTask->CWD[1] = '\0';
+
+    newTask->PGIDTaskPtr = nullptr;
 
     return newTask;
 }

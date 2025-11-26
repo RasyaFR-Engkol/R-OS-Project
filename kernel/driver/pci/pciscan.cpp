@@ -11,37 +11,33 @@
 namespace PCI{
     using namespace Printk;
 
-    static U8 FindCapatibility(U8 Bus, U8 Device, U8 Function){
-        U32 Reg4 = ReadDword(Bus, Device, Function, 0x04);
-        U16 Status = (U16)((Reg4 >> 16) & 0xFFFF);
+    U8 FindCapability(U8 Bus, U8 Device, U8 Function, U8 TargetCapID){
+        U16 Status = ReadWord(Bus, Device, Function, 0x06); // Status Reg is at 0x06
 
         if(!(Status & (1 << 4))){
-            return 0; // Tidak ada capability list
+            return 0; // Bit 4 (Capabilities List) is 0
         }
 
-        U32 Reg34 = ReadDword(Bus, Device, Function, 0x34);
-        U8 CapPTR = (U8)(Reg34 & 0xFF);
+        U8 CapPTR = ReadByte(Bus, Device, Function, 0x34); // Cap Ptr at 0x34
         
-        while(CapPTR != 0x00){
-            U32 CapHeader = ReadDword(Bus, Device, Function, CapPTR);
-            U8 CapID = (U8)(CapHeader & 0xFF);
-            U8 NextCapPTR = (U8)((CapHeader >> 8) & 0xFF);
+        // Loop limit biar gak infinite loop kalau hardware ngaco
+        int loop = 0;
+        while(CapPTR != 0x00 && loop < 48){
+            U8 CapID = ReadByte(Bus, Device, Function, CapPTR);
+            U8 NextCapPTR = ReadByte(Bus, Device, Function, CapPTR + 1);
 
-            if(CapID == 0x05){
-                Write(Level::LOG_DEBUG, "PCI %d:%d:%d - Found MSI Capability at offset 0x%02x\n",
-                    (int)Bus, (int)Device, (int)Function, (int)CapPTR);
+            if(CapID == TargetCapID){
+                // Ketemu!
                 return CapPTR;
-            } else if(CapID == 0x11){
-                Write(Level::LOG_DEBUG, "PCI %d:%d:%d - Found MSI-X Capability at offset 0x%02x\n",
-                    (int)Bus, (int)Device, (int)Function, (int)CapPTR);
-                // Here you can parse the MSI-X capability structure further if needed
             }
 
             CapPTR = NextCapPTR;
+            loop++;
         }
 
         return 0;
     }
+
 
     void ScanBus(U8 bus){
         for(U8 device = 0; device < 32; device++){
@@ -65,12 +61,12 @@ namespace PCI{
                     (int)bus, (int)device, (int)function,
                     (int)ClassCode, (int)SubClass);
 
-                U8 MSIOffset = FindCapatibility(bus, device, function);
-
                 // Mencari AHCI disini
                 if (ClassCode == 0x01 && SubClass == 0x06) {
                     Write(Level::LOG_INFO, "AHCI Controller Found in %d:%d:%d!\n",
                         (int)bus, (int)device, (int)function);
+
+                    U8 MSIOffset = FindCapability(bus, device, function, 0x05); // Cap ID 0x05 = MSI
                     
                     AHCI::RegisterAHCIController(bus, device, function, MSIOffset);
                 }
@@ -79,7 +75,7 @@ namespace PCI{
                 if(ClassCode == 0x0C && SubClass == 0x03 && ProgIF == 0x30){
                     Write(Level::LOG_INFO, "USB XHCI Controller Found in %d:%d:%d!\n",
                         (int)bus, (int)device, (int)function);
-                    xHCI::RegisterController(bus, device, function, MSIOffset);
+                    xHCI::RegisterController(bus, device, function, 0);
 
                 }
 

@@ -8,6 +8,7 @@
 #include <port.hpp>
 #include <framebuffer.hpp>
 #include <task.hpp>
+#include "../../../filesys/devfs/std_devices.hpp"
 
 /* module name provided via PRINTK_MODULE_NAME */
 
@@ -142,6 +143,21 @@ namespace PIC{
             }
         }
 
+        // Di implementasi
+        void InjectScancode(U8 sc) {
+            // 1. Masukin ring buffer (Logic copas dari Keyboard_OnIrq tapi tanpa Inb(0x60))
+            unsigned head = sc_head;
+            unsigned next = (head + 1) & KB_BUF_MASK;
+            if (next != sc_tail) {
+                scancode_buf[head] = sc;
+                asm volatile ("mfence" ::: "memory");
+                sc_head = next;
+            }
+
+            // 2. Langsung proses (biar responsive)
+            Poll();
+        }
+
         void Poll() {
             while (sc_tail != sc_head) {
                 // Pop
@@ -165,62 +181,26 @@ namespace PIC{
                     continue;
                 }
 
-                if(ctrl_down && is_make && code == 0x2E){
-                    VFSManager::Write(Printk::s_SerialConsoleFile, (U8*)"^C\n", 3);
-                    VFSManager::Write(Printk::s_FrameConsoleFile, (U8*)"^C\n", 3);
-                    // CTRL + C detected
-                    if(Tasking::g_ForegroundPID == (U64)-1){
-                        Printk::Write(Printk::Level::LOG_WARNING, "Keyboard: No foreground PID set to send SIGINT\n");
-                        continue;
-                    }
-                    Printk::Write(Printk::Level::LOG_INFO, "Keyboard: CTRL+C detected, sending SIGINT to foreground PID %llu\n", Tasking::g_ForegroundPID);
-                    Tasking::Task* fgTask = Tasking::TaskArray[Tasking::g_ForegroundPID];
-                    if(fgTask){
-
-                        // siapa tau fgTask emang lagi punya PGID. jadi kita
-                        // loop setiap task, dan kalo PGID nya sama dengan si
-                        // fgTask, kita kirim signal juga.
-                        U64 target_pgid = fgTask->PGID;
-                        if(target_pgid != 0){
-                            Printk::Write(Printk::Level::LOG_INFO, "Keyboard: Foreground task PID %llu has PGID %llu, sending SIGINT to all in group\n", fgTask->pid, target_pgid);
-                            for(U64 i = 0; i < MAX_TASK; i++){
-                                Tasking::Task* t = Tasking::TaskArray[i];
-                                if(t && t->PGID == target_pgid){
-                                    Printk::Write(Printk::Level::LOG_INFO, "Keyboard: Sending SIGINT to PID %llu in PGID %llu\n", t->pid, target_pgid);
-                                    t->Signals |= (1 << 2); // SIGINT is signal number 2
-
-                                    // kalo emang kasus lagi blocked, bangunin dia
-                                    if(t->State == Tasking::TaskState::BLOCKED){
-                                        t->State = Tasking::TaskState::READY;
-                                    }
-                                }
-                            }
-                        }
-
-                        fgTask->Signals |= (1 << 2); // SIGINT is signal number 2
-
-                        // kalo emang kasus lagi blocked, bangunin dia
-                        if(fgTask->State == Tasking::TaskState::BLOCKED){
-                            fgTask->State = Tasking::TaskState::READY;
-                        }
-
-                        // Yield CPU to let it handle signal ASAP
-                        Tasking::SchedulerYield();
-                    } else {
-                        Printk::Write(Printk::Level::LOG_WARNING, "Keyboard: No foreground task with PID %llu to send SIGINT\n", Tasking::g_ForegroundPID);
-                    }
-                    continue;
-                }
-
                 if (!is_make) continue; // ignore releases for printable handling
 
                 char ch = TranslateScancode(code, shift_down);
                 if (ch) {
+                    // If Ctrl is held, map printable ASCII to control codes.
+                    // e.g. Ctrl+A -> 0x01, Ctrl+C -> 0x03 (SIGINT is handled
+                    // earlier as a special case and will not reach here).
+                    if (ctrl_down) {
+                        unsigned char uc = (unsigned char)ch;
+                        // Map according to ASCII control mapping (mask lower 5 bits)
+                        // This converts letters to 1..26, and common Ctrl combos.
+                        uc = uc & 0x1F;
+                        ch = (char)uc;
+                    }
                     // 1. Echo to Kernel Console (FB & Serial)
                     UNUSED__ CHAR8 buf[2] = { (CHAR8)ch, 0 };
                     // ini matiin aja dah
                     //FBConsole::WriteString(buf);
                     if (ch == '\b') {
+                        //Printk::Write(Printk::Level::LOG_INFO, "Keyboard PIC: Echoing Backspace character in output\n");
                         Serial::SerialPutC('\b');
                         Serial::SerialPutC(' ');
                         Serial::SerialPutC('\b');
@@ -235,22 +215,23 @@ namespace PIC{
                         ascii_head = next_ascii;
                     }
 
+                    // 2.5 Store to TTY
+                    if (StdDvc::ListeningTTY != nullptr) {
+                        StdDvc::ListeningTTY->OnInput(ch);
+                    }
+
                     // 3. Wake up waiting task
                     if (WaitingTask) {
-                        Tasking::Task* taskToWake = WaitingTask;
-                        WaitingTask = nullptr; // Clear BEFORE yielding to avoid race with re-sleeping task
-
-                        taskToWake->State = Tasking::TaskState::READY;
+                        WaitingTask->State = Tasking::TaskState::READY;
                         
-                        // LATENCY FIX (MLFQ Style):
-                        // Boost priority to 0 (Highest) so it gets picked up immediately
-                        // by the scheduler on the next tick or yield.
-                        taskToWake->Priority = 0;
-                        taskToWake->TimeSlice = Tasking::GetTimeSliceForPriority(0);
-                        taskToWake->TimeUsedInPriority = 0;
-
-                        // Force reschedule immediately to switch to this high-prio task
-                        Tasking::SchedulerYield();
+                        // --- TAMBAHAN PENTING (IO BOOST) ---
+                        // Karena task ini bangun dari IO (Interactive), dia harus prioritas tertinggi!
+                        WaitingTask->Priority = 0; 
+                        WaitingTask->TimeSlice = Tasking::GetTimeSliceForPriority(0); // Reset timeslice
+                        WaitingTask->TimeUsedInPriority = 0; 
+                        
+                        // Opsional: Set flag global biar Scheduler tau ada yang urgent
+                        Tasking::ForceReschedule = TRUE; 
                     }
                 }
             }
@@ -267,7 +248,7 @@ namespace PIC{
                     return c;
                 }
                 
-                // Buffer empty, sleep
+                // Buffer empty, sleep 
                 Tasking::Task* current = Tasking::GetCurrentTaskPtr();
                 if (current) {
                     WaitingTask = current;
@@ -292,6 +273,13 @@ namespace PIC{
             } else {
                 return ASCII_BUF_SIZE - (ascii_tail - ascii_head);
             }
+        }
+
+        void FlushBuffer(){
+            // Clear the ASCII input buffer in an IRQ-safe manner
+            LOCKRFLAGS irq = Arch::SaveAndDisableInterrupts();
+            ascii_head = ascii_tail; // empty buffer
+            Arch::RestoreInterrupts(irq);
         }
     }
 }

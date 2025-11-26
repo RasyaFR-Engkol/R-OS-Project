@@ -57,29 +57,51 @@ namespace xHCI {
         DRV.Initialized = FALSE;
         DRV.IntVector = 0;
 
-        if(MSICapOffset != 0){
-            // Hook controller 0 to ISR for now
-            U8 Vector = MSI::EnableMSI(Bus, Device, Function, MSICapOffset, xHCI_InterruptHandler_C0);
-            if(Vector != 0){
-                DRV.IntVector = Vector;
-                Write(Level::LOG_DEBUG, " Enabled MSI on XHCI Controller %02X:%02X:%02X with vector 0x%02x\n",
-                    (unsigned)Bus, (unsigned)Device, (unsigned)Function, (unsigned)Vector);
-            } else {
-                Write(Level::LOG_ERR, " Failed to enable MSI on XHCI Controller %02X:%02X:%02X\n",
-                    (unsigned)Bus, (unsigned)Device, (unsigned)Function);
+        { 
+            U8 msix_offset = PCI::FindCapability(Bus, Device, Function, 0x11); 
+            if (msix_offset != 0) {
+                Write(Level::LOG_INFO, " xHCI: MSI-X Capability found at 0x%x. Attempting Enable...\n", msix_offset);
+                U8 vec = MSI::EnableMSIX(Bus, Device, Function, msix_offset, xHCI_InterruptHandler_C0);
+                
+                if (vec != 0) {
+                    DRV.IntVector = vec;
+                    Write(Level::LOG_INFO, " xHCI: MSI-X Enabled! Vector 0x%x\n", vec);
+                    goto interrupt_done;
+                } else {
+                    Write(Level::LOG_ERR, " xHCI: MSI-X Enable Failed. Trying fallback...\n");
+                }
             }
-        } else {
-            // Try legacy INTx fallback
+        } // Tambahkan kurung kurawal penutup "}" di sini. 
+          // Variabel msix_offset & vec mati disini, jadi aman dilompati.
+
+        // 2. TRY MSI (The Standard)
+        // Tambahkan kurung kurawal pembuka "{" di sini
+        {
+            U8 msi_offset = PCI::FindCapability(Bus, Device, Function, 0x05); 
+            if (msi_offset != 0) {
+                Write(Level::LOG_INFO, " xHCI: MSI Capability found at 0x%x. Attempting Enable...\n", msi_offset);
+                U8 vec = MSI::EnableMSI(Bus, Device, Function, msi_offset, xHCI_InterruptHandler_C0);
+                
+                if (vec != 0) {
+                    DRV.IntVector = vec;
+                    Write(Level::LOG_INFO, " xHCI: MSI Enabled! Vector 0x%x\n", vec);
+                    goto interrupt_done;
+                }
+            }
+        } // Tambahkan kurung kurawal penutup "}" di sini
+
+        // 3. TRY LEGACY INTx (The Old Reliable)
+        {
             U8 irq = PCI::EnableLegacyINTxForDevice(Bus, Device, Function, xHCI_InterruptHandler_C0);
             if (irq != 0) {
-                DRV.IntVector = (U8)(0x20 + irq);
-                Write(Level::LOG_DEBUG, " Enabled legacy INTx IRQ %u for XHCI Controller %02X:%02X:%02X (vector 0x%02x)\n",
-                    (unsigned)irq, (unsigned)Bus, (unsigned)Device, (unsigned)Function, (unsigned)DRV.IntVector);
+                DRV.IntVector = 0x20 + irq;
+                Write(Level::LOG_WARNING, " xHCI: Fallback to Legacy INTx IRQ %d (Vec 0x%x)\n", irq, DRV.IntVector);
             } else {
-                Write(Level::LOG_WARNING, " No MSI and legacy INTx unavailable for XHCI %02X:%02X:%02X\n",
-                    (unsigned)Bus, (unsigned)Device, (unsigned)Function);
+                Write(Level::LOG_ERR, " xHCI: FATAL - No Interrupt method available!\n");
             }
         }
+
+        interrupt_done:
 
         g_xhci_controller_count++;
 

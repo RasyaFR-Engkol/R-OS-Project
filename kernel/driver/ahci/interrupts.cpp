@@ -62,6 +62,12 @@ namespace AHCI {
 
             port->is = interesting;
 
+            Tasking::Task *waiting_task = Driver.WaitingTask[PortNum];
+            if (waiting_task) {
+                Tasking::UnblockTaskWithIOBoost(waiting_task);
+                Driver.WaitingTask[PortNum] = nullptr;
+            }
+
             //Printk::Write(Printk::Level::LOG_INFO, " Controller %u Port %u - Port Status: 0x%08x\n",
               //  (unsigned)Controller_ID, (unsigned)PortNum, (unsigned)interesting);
         }

@@ -450,4 +450,17 @@ namespace FBConsole {
     U64 GetRows(){
         return (U64)g_rows;
     }
+
+    // Compatibility wrappers
+    U64 GetCols(){
+        return GetColumns();
+    }
+
+    U64 GetWidthPixels(){
+        return (U64)g_scr_w;
+    }
+
+    U64 GetHeightPixels(){
+        return (U64)g_scr_h;
+    }
 }

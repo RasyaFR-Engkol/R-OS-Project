@@ -8,6 +8,13 @@
 // yang menerima interrupt. Alamat ini standar.
 constexpr U32 MSI_MSG_ADDRESS = 0xFEE00000;
 
+struct MSIXTableEntry {
+    volatile U32 MsgAddrLo;
+    volatile U32 MsgAddrHi;
+    volatile U32 MsgData;
+    volatile U32 VectorControl;
+};
+
 /* module name provided via PRINTK_MODULE_NAME */
 
 namespace MSI{
@@ -80,4 +87,96 @@ namespace MSI{
 
             return TRUE;
         }
+
+    U8 EnableMSIX(U8 bus, U8 dev, U8 func, U8 msix_cap_offset, void (*handler)(void *context)) {
+        Printk::Write(Printk::Level::LOG_DEBUG, " [MSI-X] Enabling for PCI %02x:%02x:%02x at offset 0x%x\n", bus, dev, func, msix_cap_offset);
+
+        // 1. Baca Message Control (Offset + 2)
+        // Struktur: [15: Enable] [14: Func Mask] [13:11 Rsvd] [10:0 Table Size N-1]
+        UNUSED__ U32 cap_reg_val = PCI::ReadDword(bus, dev, func, msix_cap_offset);
+        U16 msg_ctrl = PCI::ReadWord(bus, dev, func, msix_cap_offset + 2);
+        U16 table_size = (msg_ctrl & 0x7FF) + 1;
+        
+        U32 table_info = PCI::ReadDword(bus, dev, func, msix_cap_offset + 4);
+        U8  bir = (U8)(table_info & 0x7); 
+        U32 table_offset = table_info & ~0x7;
+
+        U32 bar_reg = 0x10 + (bir * 4);
+        U32 bar_lo = PCI::ReadDword(bus, dev, func, bar_reg);
+        U64 bar_phys = 0;
+        
+        if ((bar_lo & 0x6) == 0x4) {
+            U32 bar_hi = PCI::ReadDword(bus, dev, func, bar_reg + 4);
+            bar_phys = ((U64)bar_hi << 32) | (bar_lo & ~0xF);
+        } else {
+            bar_phys = (bar_lo & ~0xF);
+        }
+
+        if (bar_phys == 0) return 0;
+        
+        U64 msix_table_phys_start = bar_phys + table_offset;
+
+        // ===============================================
+        // FIX: MAPPING MANUAL (JANGAN PAKE HHDM)
+        // ===============================================
+        
+        // 1. Hitung Alignment Page (4KiB)
+        UPTR PagePhysStart = msix_table_phys_start & ~(PAGE_SIZE - 1);
+        UPTR PageOffset    = msix_table_phys_start & (PAGE_SIZE - 1);
+        
+        // 2. Hitung berapa page yang perlu di-map
+        // Satu entry MSI-X itu 16 bytes.
+        U32 table_bytes = table_size * 16;
+        // Kalau tabelnya nyebwrang page boundary, kita butuh map lebih dari 1 page
+        U32 pages_needed = (PageOffset + table_bytes + PAGE_SIZE - 1) / PAGE_SIZE;
+
+        // 3. Alokasi Virtual Address Baru
+        void* VirtAddr = PageAlloc::VirtualAllocPages(pages_needed);
+        if (!VirtAddr) {
+            Printk::Write(Printk::Level::LOG_ERR, " [MSI-X] Failed to allocate virtual pages!\n");
+            return 0;
+        }
+
+        // 4. Map Physical ke Virtual
+        // PENTING: Pake flag PAGE_PCD (Page Cache Disable) karena ini MMIO!
+        PFLAGS Flags = PAGE_PRESENT | PAGE_RW | PAGE_PCD; 
+        if (!PageAlloc::MapPages(KernelPML4, PagePhysStart, (UPTR)VirtAddr, pages_needed, Flags)) {
+             Printk::Write(Printk::Level::LOG_ERR, " [MSI-X] Failed to map MMIO pages!\n");
+             return 0;
+        }
+        
+        // 5. Hitung pointer final
+        volatile MSIXTableEntry* msix_table_virt = (volatile MSIXTableEntry*)((UPTR)VirtAddr + PageOffset);
+
+        Printk::Write(Printk::Level::LOG_DEBUG, " [MSI-X] Mapped Phys 0x%llx -> Virt 0x%llx (Pages: %d)\n", msix_table_phys_start, (U64)msix_table_virt, pages_needed);
+
+        // ===============================================
+        // SISANYA SAMA SEPERTI SEBELUMNYA
+        // ===============================================
+
+        // 5. Alokasi Vector IDT
+        U8 vector = IDT::AllocateVector();
+        if (vector == 0) return 0;
+
+        // 6. Setup Entry 0 (Unmasked)
+        msix_table_virt[0].MsgAddrLo = MSI_MSG_ADDRESS; 
+        msix_table_virt[0].MsgAddrHi = 0;
+        msix_table_virt[0].MsgData = vector;
+        msix_table_virt[0].VectorControl = 0; // Unmask
+        
+        IDT::RegisterInterruptHandler(vector, handler);
+
+        // 7. ENABLE GLOBAL MSI-X
+        msg_ctrl |= (1 << 15); 
+        msg_ctrl &= ~(1 << 14); 
+        PCI::WriteWord(bus, dev, func, msix_cap_offset + 2, msg_ctrl);
+
+        // 8. ENABLE BUS MASTER & DISABLE LEGACY
+        U16 cmd = PCI::ReadWord(bus, dev, func, 0x04);
+        cmd |= (1 << 2); 
+        cmd |= (1 << 10);
+        PCI::WriteWord(bus, dev, func, 0x04, cmd);
+
+        return vector;
+    }
 }
