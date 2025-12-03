@@ -609,3 +609,10 @@ VOID Sys_Ioctl(CpuContext_T *CPUContext){
 
     CPUContext->rax = 0; // Success
 }
+
+VOID Sys_Sync(CpuContext_T *CPUContext){
+    // Flush semua filesystem yang ter-mount
+    VFSManager::SyncAll();
+
+    CPUContext->rax = 0; // Success
+}

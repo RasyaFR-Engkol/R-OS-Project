@@ -1,6 +1,7 @@
 #include <rosval.h>
 #include <cpu_context.hpp>
 #include <rossys.hpp>
+#include "rostime.hpp"
 #include "syscall/process.hpp"
 #define PRINTK_MODULE_NAME "SYSCALL_PROC"
 #include <logging.hpp>
@@ -12,6 +13,7 @@
 #include "../../filesys/filesystem.hpp"
 #include "../../mm/mm.hpp"
 #include "../../mm/usercopy.hpp"
+#include <../firmware/acpi/driver/timer/timer.hpp>
 
 extern "C" VOID Context_Restore(VOID *Context);
 
@@ -19,7 +21,11 @@ extern "C" VOID Context_Restore(VOID *Context);
 static File* VFS_Open(const char* Path) {
     FileSystem* FS = nullptr;
     char RelativePath[256];
-    if (!VFSManager::ResolvePath(Path, &FS, RelativePath)) return nullptr;
+    if (!VFSManager::ResolvePath(Path, &FS, RelativePath)) {
+        Printk::Write(Printk::Level::LOG_DEBUG, "VFS_Open - Failed to resolve path %s\n", Path);
+        return nullptr;
+    }
+    Printk::Write(Printk::Level::LOG_DEBUG, "VFS_Open - Resolved path %s to relative %s\n", Path, RelativePath);
     return FS->Open(RelativePath);
 }
 
@@ -118,7 +124,7 @@ VOID Sys_Fork(CpuContext_T *CPUContext) {
     
     // 6. Set PID/PPID/PGID
     Child->ppid = Current->pid;
-    Child->pid = 0; // Will be set by SchedulerAddTask
+    Child->pid = (U64)-1; // Will be set by SchedulerAddTask
     Child->State = Tasking::TaskState::READY;
     Child->PGID = Current->PGID;
     Child->PGIDTaskPtr = nullptr; // Safety awal
@@ -213,7 +219,9 @@ VOID Sys_Execve(CpuContext_T *CPUContext) {
     
     if ((I64)Entry < 0) {
         // Failed. 
-        // TODO: Free NewCR3
+        
+        Tasking::FreeUserAddressSpace(NewCR3);
+        PageAlloc::PhysicalFreePages(NewCR3, 1);
         CPUContext->rax = -1;
         return;
     }
@@ -650,4 +658,211 @@ VOID Sys_GetPGID(CpuContext_T *CPUContext){
     }
 
     CPUContext->rax = TargetTask->PGID;
+}
+
+struct kernel_timespec {
+    I64 tv_sec;
+    I64 tv_nsec;
+};
+
+VOID Sys_SleepNs(CpuContext_T *CPUContext){
+    // Argumen dari register (Linux System V ABI)
+    // RDI = struct timespec *req
+    // RSI = struct timespec *rem
+    UPTR req_addr = CPUContext->rdi;
+    UPTR rem_addr = CPUContext->rsi;
+
+    if(req_addr == 0){
+        CPUContext->rax = -14; // EFAULT
+        return;
+    }
+
+    // --- SAFETY FIRST: CopyFromUser ---
+    kernel_timespec kreq;
+    Tasking::Task* Current = Tasking::GetCurrentTaskPtr();
+    if (!Current) { CPUContext->rax = -1; return; }
+
+    // Gunakan PML4 process yang sedang jalan untuk translate address
+    if (!PageAlloc::CopyFromUser((U64*)Current->CR3 /* Atau simpen PML4 Virtual di Task Struct */, 
+                                 &kreq, 
+                                 (void*)req_addr, 
+                                 sizeof(kernel_timespec))) 
+    {
+        Printk::Write(Printk::Level::LOG_DEBUG, "Sys_SleepNs: Segfault accessing req\n");
+        CPUContext->rax = -14; // EFAULT
+        return;
+    }
+
+    I64 Seconds = kreq.tv_sec;
+    I64 Nanoseconds = kreq.tv_nsec;
+
+    // Validasi standar POSIX
+    if(Nanoseconds < 0 || Nanoseconds >= 1000000000){
+        CPUContext->rax = -22; // EINVAL
+        return;
+    }
+
+    U64 TotalNs = (U64)Seconds * 1000000000ULL + (U64)Nanoseconds;
+    U64 TicksToSleep = ACPI::Timer::NanosecondsToTicks(TotalNs);
+
+    // Jangan tidur 0 tick, minimal 1 biar sempet yield
+    if (TicksToSleep == 0 && TotalNs > 0) TicksToSleep = 1;
+
+    // --- CRITICAL FIX: Absolute Time ---
+    // SleepTick adalah TARGET WAKTU BANGUN, bukan durasi.
+    // Jadi harus ditambah waktu sekarang.
+    Current->BlockReason |= TASK_SLEEPING;
+    Current->SleepTick = ACPI::Timer::LapicTicks + TicksToSleep; 
+    Current->State = Tasking::TaskState::BLOCKED;   
+
+    // Bye! Panggil Scheduler
+    Tasking::SchedulerYield();
+
+    // --- Pas Bangun (Resumed) ---
+    
+    // Kalau user minta sisa waktu (rem), kita null-in aja karena asumsi tidur pules (ga kena signal)
+    if(rem_addr){
+        kernel_timespec krem = {0, 0};
+        // Copy balik ke user space (ignore error kalo user kasih pointer busuk di sini, opsional)
+        PageAlloc::CopyToUser((U64*)Current->CR3, (void*)rem_addr, &krem, sizeof(krem));
+    }
+
+    CPUContext->rax = 0;
+}
+
+
+// ===================================
+// Custom syscall
+// ===================================
+
+// tidurkan task berdasarkan ms
+VOID SysSleepMS(CpuContext_T *CPUContext){
+    U64 ms = CPUContext->rdi;
+
+    Tasking::Task* Current = Tasking::GetCurrentTaskPtr();
+    if (!Current) { CPUContext->rax = -1; return; }
+
+    U64 ticks = Arch::Time::MsToTicks(ms);
+    if (ticks == 0 && ms > 0) {
+        ticks = 1; // Minimal tidur 1 tick (10ms) kalau diminta > 0
+    }
+
+    Current->BlockReason |= TASK_SLEEPING;
+    Current->SleepTick = ticks;
+    Current->State = Tasking::TaskState::BLOCKED;
+
+    Tasking::SchedulerYield();
+}
+
+// |=====================================|
+// |                                     |
+// |         End Custom Syscalls         |
+// |                                     |
+// |=====================================|
+
+VOID Sys_Signal(CpuContext_T *CPUContext){
+    U64 signum = CPUContext->rdi;
+    U64 handler = CPUContext->rsi;
+
+    Tasking::Task* Current = Tasking::GetCurrentTaskPtr();
+    if (!Current) { CPUContext->rax = -1; return; }
+
+    if (signum >= 32) {
+        CPUContext->rax = -1; // Invalid signal number
+        return;
+    }
+
+    // SIGKILL (9) cannot be caught or ignored
+    if (signum == 9) {
+        CPUContext->rax = -1;
+        return;
+    }
+
+    // Return old handler
+    U64 old_handler = Current->SignalHandlers[signum];
+    Current->SignalHandlers[signum] = handler;
+    
+    CPUContext->rax = old_handler;
+}
+
+struct KernelSigAction {
+    U64 sa_handler;
+    U64 sa_flags;
+    U64 sa_restorer;
+    U64 sa_mask;
+};
+
+VOID Sys_RtSigAction(CpuContext_T *CPUContext) {
+    // Arguments:
+    // RDI: int sig
+    // RSI: const struct sigaction *act
+    // RDX: struct sigaction *oact
+    // R10: size_t sigsetsize
+
+    I32 sig = (I32)CPUContext->rdi;
+    U64 act_addr = CPUContext->rsi;
+    U64 oact_addr = CPUContext->rdx;
+    __MAYBE_UNUSED U64 sigsetsize = CPUContext->r10;
+
+    Tasking::Task* Current = Tasking::GetCurrentTaskPtr();
+    if (!Current) { CPUContext->rax = -1; return; }
+
+    if (sig >= 32 || sig <= 0) {
+        CPUContext->rax = -22; // EINVAL
+        return;
+    }
+    
+    // SIGKILL (9) and SIGSTOP (19) cannot be caught
+    if (sig == 9 || sig == 19) {
+        CPUContext->rax = -22; // EINVAL
+        return;
+    }
+
+    /*if (sigsetsize != 8) {
+        //             (unsigned long long)sigsetsize);
+        C We only support 64-bit signal mask for now (standard x86_64)
+        Printk::Write(Printk::Level::LOG_DEBUG,
+                      "Sys_RtSigAction: invalid sigsetsize %llu\n",
+         PUContext->rax = -22; // EINVAL
+        return;
+    }*/
+
+    // Handle Old Action (oact)
+    if (oact_addr) {
+        KernelSigAction ksa_old;
+        String::Memset(&ksa_old, 0, sizeof(KernelSigAction));
+        ksa_old.sa_handler = Current->SignalHandlers[sig];
+        // We don't store flags/mask yet, so return 0 for them
+        
+        U64* UserPML4 = HHDM_PhysToVirt(Current->CR3);
+        if (!PageAlloc::CopyToUser(UserPML4, (void*)oact_addr, &ksa_old, sizeof(KernelSigAction))) {
+            Printk::Write(Printk::Level::LOG_DEBUG,
+                          "Sys_RtSigAction: CopyToUser failed for oact_addr %p\n",
+                          (void*)oact_addr);
+             CPUContext->rax = -14; // EFAULT
+             return;
+        }
+    }
+
+    // Handle New Action (act)
+    if (act_addr) {
+        KernelSigAction ksa_new;
+        U64* UserPML4 = HHDM_PhysToVirt(Current->CR3);
+        if (!PageAlloc::CopyFromUser(UserPML4, &ksa_new, (void*)act_addr, sizeof(KernelSigAction))) {
+            Printk::Write(Printk::Level::LOG_DEBUG,
+                          "Sys_RtSigAction: CopyFromUser failed for act_addr %p\n",
+                          (void*)act_addr);
+             CPUContext->rax = -14; // EFAULT
+             return;
+        }
+
+        Current->SignalHandlers[sig] = ksa_new.sa_handler;
+        // TODO: Store flags and restorer
+    }
+
+    Printk::Write(Printk::Level::LOG_DEBUG,
+                  "PID %d set signal handler for signal %d to %p\n",
+                  Current->pid, sig,
+                  (void*)Current->SignalHandlers[sig]);
+    CPUContext->rax = 0;
 }

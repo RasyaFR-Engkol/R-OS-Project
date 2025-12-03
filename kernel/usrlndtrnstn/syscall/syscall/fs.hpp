@@ -12,3 +12,4 @@ VOID Sys_Chdir(CpuContext_T *CPUContext);
 VOID Sys_GetCWD(CpuContext_T *CPUContext);
 VOID Sys_Pipe(CpuContext_T *CPUContext);
 VOID Sys_Ioctl(CpuContext_T *CPUContext);
+VOID Sys_Sync(CpuContext_T *CPUContext);
