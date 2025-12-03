@@ -3,9 +3,14 @@
 #include "../vfs/vfs.hpp"
 
 class RootFS : public FileSystem{
+    private:
+        FileSystem *m_BackendFS;
+        File *m_BackendRootHandle;
     public:
         RootFS();
         virtual ~RootFS();
+
+        VOID SetBackingFileSystem(FileSystem *fs);
 
         // Mount logic
         virtual BOOL Mount(Partition *Part) override { return TRUE; }
@@ -31,4 +36,5 @@ class RootFS : public FileSystem{
 
 namespace ROOTFS{
     VOID InitROOTFS();
+    RootFS *GetRootFS();
 }

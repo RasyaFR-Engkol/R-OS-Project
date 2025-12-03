@@ -6,6 +6,21 @@
 #include <logging.hpp>
 #include <string.hpp>
 #include <mm.hpp>
+#include <rostime.hpp>
+
+namespace{
+    U16 EncodeDateForFAT(U32 Year, U32 Month, U32 Day){
+        U32 FatYear = (Year > 1980) ? (Year - 1980) : 0;
+
+        if(FatYear > 127) FatYear = 127;
+
+        return ((FatYear & 0x7F) << 9) | ((Month & 0x0F) << 5) | (Day & 0x1F);
+    }
+
+    U16 EncodeFATTime(U8 Hour, U8 Minute, U8 Second){
+        return (((Hour & 0x1F) << 11) | ((Minute & 0x3F) << 5) | ((Second /2) & 0x1F));
+    }
+}
 
 // Helper: convert UTF-16LE buffer (array of U16) to UTF-8 into out buffer.
 // outSize is size of out buffer in bytes. Returns number of bytes written (excluding NUL) or -1 on truncation error.
@@ -899,9 +914,13 @@ BOOL FAT32FileSystem::UpdateDirectoryEntry(File* file){
     DirEntry->ClusterLow = (U16)(file->Internal_StartCluster & 0xFFFF);
     DirEntry->ClusterHigh = (U16)((file->Internal_StartCluster >> 16) & 0xFFFF);
 
-    // TODO: Idealnya, update juga LastWriteTime dan LastWriteDate di sini
-    // de->LastWriteTime = ...
-    // de->LastWriteDate = ...
+    auto RTCTime = Arch::CMOS::ReadRTC();
+
+    DirEntry->LastAccessDate = EncodeDateForFAT(RTCTime.year, RTCTime.month, RTCTime.day);
+    DirEntry->LastWriteDate = EncodeDateForFAT(RTCTime.year, RTCTime.month, RTCTime.day);
+    DirEntry->LastWriteTime = EncodeFATTime(RTCTime.hour, RTCTime.minute, RTCTime.second);
+    DirEntry->CreationDate = EncodeFATTime(RTCTime.year, RTCTime.month, RTCTime.day);
+    DirEntry->CreationTime = EncodeFATTime(RTCTime.hour, RTCTime.minute, RTCTime.second);
 
     BOOL Success = m_Partition->WriteSectors(file->Internal_DirEntryLBA, 1, Buf);
     if(!Success){

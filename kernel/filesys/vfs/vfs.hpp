@@ -56,6 +56,7 @@ namespace VFSManager{
     BOOL Flush(File* file);
     INTN ReadDir(File* dirFile, void* buffer, U32 bufferSize);
     INTN Ioctl(File* file, U32 command, U64 arg);
+    BOOL SyncAll();
 }
 
 // pipa

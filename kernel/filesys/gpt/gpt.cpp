@@ -135,6 +135,12 @@ namespace GPTFS{
                             m_Part = p;
                             // Build name: parentName + decimal(partIndex)
                             String::Strcpy(m_Name, (const char*)parentName);
+
+                            int len = String::Strlen(m_Name);
+                            if(len > 0 && m_Name[len-1] >= '0' && m_Name[len-1] <= '9') {
+                                String::Strcat(m_Name, "p");
+                            }
+                            
                             CHAR8 numbuf[16];
                             // partIndex is 1-based here
                             String::Utoa((unsigned long long)partIndex, (char*)numbuf, 10);
@@ -210,6 +216,7 @@ namespace GPTFS{
             GPTFS::GPTHeader *GPTHeader0 = nullptr;
             if(!InitializeGPT(Device, &GPTHeader0)){
                 Printk::Write(Printk::Level::LOG_WARNING, " GPT: Device %u is not GPT formatted or failed to read GPT header.\n", i);
+                Printk::Write(Printk::Level::LOG_DEBUG, " GPT: Device name skipped is %s.\n", Device->GetDeviceName());
                 continue;
             }
 

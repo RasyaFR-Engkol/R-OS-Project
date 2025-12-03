@@ -7,6 +7,7 @@
 #include <string.hpp>
 #include <mm.hpp>
 #include <rossys.hpp>
+#include <rostime.hpp>
 
 // Forward declarations for helpers defined later in this file
 static VOID ParsePath(const CHAR8 *FullPath, CHAR8 *OutParentPath, CHAR8 *OutFileName);
@@ -706,6 +707,10 @@ File* EXT2FileSystem::Create(const char *Path) {
     }
 
     // Prepare new inode structure
+
+    auto RTCTime = Arch::CMOS::ReadRTC();
+    U32 CurrentTimestamp = Arch::Time::RTCToEpoch(RTCTime);
+
     EXT2::Inode newInode;
     String::Memset(&newInode, 0, sizeof(EXT2::Inode));
     newInode.i_mode = EXT2_S_IFREG | 0644; // regular file + permissions
@@ -717,7 +722,10 @@ File* EXT2FileSystem::Create(const char *Path) {
     newInode.i_blocks = 0;
     newInode.i_generation = 0;
     newInode.i_flags = 0;
-    // timestamps left zero for now (could set current time)
+    newInode.i_atime = CurrentTimestamp;
+    newInode.i_ctime = CurrentTimestamp;
+    newInode.i_mtime = CurrentTimestamp;
+    newInode.i_dtime = 0;
 
     // write inode to disk
     if(!WriteInode(newInodeNum, &newInode)){

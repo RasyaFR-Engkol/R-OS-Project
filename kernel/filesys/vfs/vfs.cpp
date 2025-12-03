@@ -3,6 +3,7 @@
 #include "vfs.hpp"
 #include <string.hpp>
 #include <logging.hpp>
+#include "../../dev/devicemanager.hpp"
 
 #define MAX_FS_DRIVERS 10
 #define MAX_MOUNT_POINTS 20
@@ -108,33 +109,75 @@ namespace VFSManager{
         if(OutRelativePath) {
             OutRelativePath[0] = '\0';
         }
+        
+        // Validasi dasar
         if(!path || path[0] != '/') return FALSE;
-        // Longest-prefix match among mount points
-        int bestIdx = -1; unsigned long long bestLen = 0;
-        for(U32 i=0;i<g_MountPointCount;i++){
+
+        // Longest-prefix match logic
+        int bestIdx = -1; 
+        unsigned long long bestLen = 0;
+
+        for(U32 i = 0; i < g_MountPointCount; i++){
             const char* mp = g_MountPoints[i].path;
             unsigned long long mpl = String::Strlen(mp);
-            if(mpl > bestLen){
-                // Must match prefix and either exact or next char is '/'
-                if(String::Strncmp(path, mp, mpl) == 0 && (path[mpl] == '\0' || path[mpl] == '/')){
-                    bestIdx = (int)i; bestLen = mpl;
+            
+            // Kita cari match yang paling panjang
+            // (Tapi logic match-nya harus bener dulu)
+            
+            // Cek apakah mount point ini adalah prefix dari path user
+            if(String::Strncmp(path, mp, mpl) == 0) {
+                
+                BOOL isMatch = FALSE;
+
+                // KASUS 1: Mount Point adalah ROOT ("/")
+                // Root selalu match dengan apapun yang diawali "/"
+                if (mpl == 1 && mp[0] == '/') {
+                    isMatch = TRUE;
+                }
+                // KASUS 2: Mount Point Normal (misal "/mnt/data")
+                // Harus diikuti End-of-String ATAU Separator "/"
+                // Contoh: "/mnt/data" cocok dengan "/mnt/data" atau "/mnt/data/file"
+                // TIDAK cocok dengan "/mnt/database"
+                else if (path[mpl] == '\0' || path[mpl] == '/') {
+                    isMatch = TRUE;
+                }
+
+                if (isMatch) {
+                    // Kalau ini match lebih panjang (lebih spesifik) dari sebelumnya, ambil ini.
+                    // (Mencegah Root "/" ngambil jatah "/mnt/data")
+                    if (mpl > bestLen || bestIdx == -1) { // Tambah bestIdx == -1 buat inisial
+                        bestIdx = (int)i;
+                        bestLen = mpl;
+                    }
                 }
             }
         }
+
         if(bestIdx < 0) return FALSE;
+
         if(outFS) *outFS = g_MountPoints[bestIdx].fs;
+
         if(OutRelativePath){
             const char* rest = path + bestLen;
-            if(rest[0] == '/') rest++; // skip separator
-            // copy remainder (may be empty -> root inside FS)
+            
+            // Kalau sisa path diawali '/', skip dulu biar gak double slash
+            // KECUALI kalau bestLen == 1 (Root), rest-nya bakal "init.elf" (tanpa slash depan)
+            if(rest[0] == '/') rest++; 
+            
             String::Strncpy(OutRelativePath, rest, 255);
             OutRelativePath[255] = '\0';
-            if(OutRelativePath[0] != '/'){
-                // underlying FS expects paths starting with '/'; add leading slash
-                // shift right; ensure space
+
+            // Pastikan Relative Path selalu diawali '/' sesuai standar driver lo
+            // Kalau path kosong (user buka root mountpoint), jadi "/"
+            if(OutRelativePath[0] == '\0') {
+                OutRelativePath[0] = '/';
+                OutRelativePath[1] = '\0';
+            }
+            else if(OutRelativePath[0] != '/'){
+                // Shift kanan buat nambahin slash di depan
                 unsigned long long cur = String::Strlen(OutRelativePath);
                 if(cur + 1 < 256){
-                    for(long long i = (long long)cur; i >= 0; --i){ // include NUL
+                    for(long long i = (long long)cur; i >= 0; --i){ 
                         OutRelativePath[i+1] = OutRelativePath[i];
                     }
                     OutRelativePath[0] = '/';
@@ -326,5 +369,16 @@ namespace VFSManager{
     INTN Ioctl(File* file, U32 command, U64 arg){
         if(!file || !file->FSOwner) return -1;
         return file->FSOwner->Ioctl(file, command, arg);
+    }
+
+    BOOL SyncAll(){
+        // Implemnetasi awal
+        // SYNC ke semua Controller storage yang terdaftar di sistem
+        // Nanti kalau ada FS yang butuh flush khusus, bisa ditambahin di sini
+        // Contoh: EXT2, FAT32, dll
+
+        DeviceManager::StorageManager::SyncAllStorageDevices();
+
+        return TRUE;
     }
 }
