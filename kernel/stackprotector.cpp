@@ -5,7 +5,7 @@
 #include "rosval.h"
 ABI_C {
     // A non-zero guard value; kernel can randomize this at boot if desired.
-    unsigned long __stack_chk_guard = 0xDEADBEEFBADC0FFFull;
+    unsigned long __stack_chk_guard = 0xDEADBEEFBADC0FFEull;
 
     // Minimal direct port I/O helpers (no dependencies)
     static inline void outb(unsigned short port, unsigned char val) {
