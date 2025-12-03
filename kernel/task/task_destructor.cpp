@@ -70,8 +70,12 @@ namespace Tasking {
     VOID DestroyTask(Task *task) {
         if (!task) return;
 
-        // Prevent scheduler from switching to this task while we destroy it
-        // Ideally we should hold a lock here
+        // [NEW] Proteksi Keras System Threads
+        if (task->pid < PID_USER_START) {
+            Printk::Write(Printk::Level::LOG_ERR, "DestroyTask: Attempted to kill System Task PID %u ignored.\n", task->pid);
+            return;
+        }
+        
         LOCKRFLAGS irq = Arch::SaveAndDisableInterrupts();
 
         // 1. Remove from scheduler

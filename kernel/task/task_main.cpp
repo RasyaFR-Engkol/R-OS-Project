@@ -5,6 +5,7 @@
 
 namespace Tasking {
 	Task *TaskArray[MAX_TASK];
+	Task *GraveyardArray[MAX_TASK];
 	U64 ActiveTask = 0;
 	U64 CurrentTaskIndex = MAX_TASK;
 	BOOL SchedulerActive = FALSE;

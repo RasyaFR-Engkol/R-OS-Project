@@ -4,8 +4,10 @@
 #include "string.hpp"
 #include "task.hpp"
 #include "cpu_context.hpp"
-#include "../mm/mm.hpp"
-#include "../mm/kmalloc/kmalloc.hpp"
+#include <mm.hpp>
+#include <userland/syscall.hpp>
+#include <filesystem/filesystem.hpp>
+#include "../filesys/vfs/vfs.hpp"
 #include "../../misc/file/extension/elf.hpp"
 
 namespace Tasking {
@@ -141,7 +143,7 @@ Task* TaskUserConstructor(const CHAR8 *Name, VOID *ELFImage) {
 
     newTask->RSP = stackFrameAddr;
     newTask->CR3 = userCr3Phys;
-    newTask->pid = 0;
+    newTask->pid = (U64)-1;
     newTask->ppid = 0;
     newTask->NextTask = nullptr;
     newTask->Priority = 0;

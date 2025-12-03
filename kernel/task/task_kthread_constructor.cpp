@@ -6,6 +6,9 @@
 #include "task.hpp"
 // need paging helpers
 #include "../mm/mm.hpp"
+#include <string.hpp>
+#include <mm.hpp>
+#include <logging.hpp>  
 
 namespace Tasking{
     U64 CreateUserAddressSpace(){
@@ -111,7 +114,7 @@ namespace Tasking{
             return nullptr;
         }
 
-        NewTask->pid = 0; // will be set by SchedulerAddTask
+        NewTask->pid = (U64)-1; // will be set by SchedulerAddTask
         String::Strcpy(NewTask->Name, "KThread");
         NewTask->NextTask = nullptr;
 
@@ -147,31 +150,66 @@ namespace Tasking{
     }
 
     VOID SchedulerAddTask(Task *NewTask){
-        // Cari slot kosong di TaskArray
-        for(U64 i = 0; i < MAX_TASK; i++){
+        // KASUS 1: PID sudah di-request secara spesifik (Reserved)
+        // Contoh: Idle Task (0), Input Daemon (1)
+        if(NewTask->pid != (U64)-1) {
+            if(NewTask->pid < MAX_TASK && TaskArray[NewTask->pid] == nullptr) {
+                TaskArray[NewTask->pid] = NewTask;
+                // Jangan increment ActiveTask kalau Idle (opsional, tergantung logic load balancer)
+                if(NewTask->pid != Tasking::PID_IDLE) Tasking::ActiveTask++;
+                Printk::Write(Printk::Level::LOG_INFO, "Scheduler: Reserved Process Spawned PID %d\n", NewTask->pid);
+            } else {
+                Printk::Write(Printk::Level::LOG_ERR, "SchedulerAddTask: Slot %d busy/invalid for reserved task!\n", NewTask->pid);
+            }
+            return;
+        }
+
+        // KASUS 2: PID Auto-Assign (User Tasks & Generic KThreads)
+        // Kita cari slot kosong mulai dari PID_USER_START (100)
+        // Biar slot 0-99 aman bersih buat Kernel Services.
+        for(U64 i = Tasking::PID_USER_START; i < MAX_TASK; i++){
             if(TaskArray[i] == nullptr){
                 NewTask->pid = i;
+                
+                // Kalau PGID belum di-set, jadikan dia leader grup diri sendiri
+                if (NewTask->PGID == 0) NewTask->PGID = i; 
+
                 TaskArray[i] = NewTask;
-                // If this is the only task, make it loop to itself
-                if(Tasking::ActiveTask == 0){
-                    // Point to itself so scheduler loops when this is the only task
-                    NewTask->NextTask = NewTask;
-                }
-                //Printk::Write(Printk::Level::LOG_INFO, "Added new Task with PID %u at slot %u\n", NewTask->pid, i);
                 Tasking::ActiveTask++;
+                
+                // Debug log
+                Printk::Write(Printk::Level::LOG_DEBUG, "Scheduler: New Process Spawned PID %d\n", i);
                 return;
             }
         }
-        //Printk::Write(Printk::Level::LOG_ERR, "Failed to add new Task: TaskArray full\n");
+        
+        Printk::Write(Printk::Level::LOG_ERR, "Scheduler: Process Table Full! Cannot spawn PID >= 100\n");
+        // TODO: Handle failure (delete NewTask & free memory)
     }
 
     VOID CreateKThread(VOID (*Entry)(VOID)){
         Task *NewKThread = ConstructTask(Entry);
         if(NewKThread == nullptr){
             Printk::Write(Printk::Level::LOG_ERR, "Failed to create Kernel Thread\n");
-            return;
+            return; 
         }
-
+ 
         SchedulerAddTask(NewKThread);
+    }
+
+    VOID CreateIdleTask(VOID (*Entry)(VOID)){
+        Task *Idle = ConstructTask(Entry);
+        if(!Idle) return;
+        
+        // Paksa taruh di slot 0
+        Idle->pid = PID_IDLE;
+        Idle->Priority = MLFQ_LEVELS - 1; // Prioritas paling rendah
+        String::Strcpy(Idle->Name, "System Idle");
+        
+        if(TaskArray[PID_IDLE] == nullptr){
+            TaskArray[PID_IDLE] = Idle;
+        } else {
+             Printk::Write(Printk::Level::LOG_ERR, "PANIC: PID 0 already occupied!\n");
+        }
     }
 }

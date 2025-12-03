@@ -13,7 +13,8 @@
 
 #include "rosval.h"
 #include <cpu_context.hpp>
-#include <filesystem/filesystem.hpp>
+// Forward-declare File to avoid heavy include and circular dependencies
+class File;
 
 #define MAX_FILE_IN_PROCESS 16
 #define MLFQ_LEVELS 4
@@ -22,6 +23,18 @@
 // Ini harusnya adjustable terhadap kebutuhan sistem operasi kita
 // tapi untuk sekarang kita tetapkan 256 Task saja.
 #define MAX_TASK 256
+
+// FLAGS MLFQ
+#define TASK_SLEEPING (1 << 0)
+
+namespace Tasking {
+    constexpr U64 PID_IDLE = 0;
+    constexpr U64 PID_INPUT = 1;
+    constexpr U64 PID_DISK = 2; // Reserved masa depan
+    constexpr U64 PID_REAPD = 3; // Reserved masa depan
+    constexpr U64 DEFAULT_CONFIG_PID_START = 100; // Default user process start PID
+    constexpr U64 PID_USER_START = 100; // User process mulai dari sini
+}
 
 namespace Tasking{
     struct TaskState{
@@ -40,10 +53,10 @@ namespace Tasking{
         U64 PGID; // Process Group ID
         Task *PGIDTaskPtr; // Pointer ke task pertama di grup ini
         U32 Signals; // Pending Signals
+        U64 SignalHandlers[32]; // Signal Handlers (0 = Default/Terminate)
         CHAR8 Name[32]; // Task Name
 
-        U64 RSP; // Pointer ke konteks CpuContext_T yang siap di-iret
-
+        U64 RSP; // Pointer ke konteks CpuContext_T yang siap di-irestore
         U64 CR3; // Page Table Base Register (untuk virtual memory)
 
         VOID* StackBase; // Pointer ke base stack (HHDM virtual)
@@ -53,6 +66,13 @@ namespace Tasking{
         U64 TimeUsedInPriority;
 
         Tasking::TaskState::State State; // Current State of the Task
+        UFLAGS BlockReason; 
+
+        // untuk tidur berapa ya tick nya?
+        U64 SleepTick;
+        
+        Tasking::Task *NextWaitTask;
+
         U64 TimeSlice; // Time slice for scheduling
         U64 SleepUntil; // Waktu hingga task ini harus dibangunkan (jika tidur)
 
@@ -69,6 +89,7 @@ namespace Tasking{
 
     // Variabl global untuk task management
     extern Task *TaskArray[MAX_TASK];
+    extern Task *GraveyardArray[MAX_TASK];
     extern U64 ActiveTask;
     extern U64 CurrentTaskIndex;
     extern BOOL SchedulerActive;
@@ -103,4 +124,10 @@ namespace Tasking{
     VOID SetTaskSignal(U64 id, U32 signal, BOOL isGroup);
     VOID UnlinkFromProcGrp(Task *T);
     VOID UnblockTaskWithIOBoost(Task *T);
+    VOID CreateIdleTask(VOID (*Entry)(VOID));
+
+    // RESERVED TASK
+    VOID InputDaemonTask();
+    Task *ConstructTask(VOID (*Entry)(VOID));
+    VOID ReapDTask();
 }
