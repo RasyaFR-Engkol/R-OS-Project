@@ -1,5 +1,6 @@
 #pragma once
 
+#include "rossys.hpp"
 #include "rosval.h"
 
 namespace Arch {
@@ -25,5 +26,19 @@ namespace Arch {
 
         U64 GetTickCount();
         U64 GetSecCount();
+
+        U32 RTCToEpoch(Arch::CMOS::RTCTime T);
+
+        // Convert milliseconds to ticks based on current TickHz()
+        static inline U64 MsToTicks(U64 ms) {
+                U32 hz = TickHz();
+                if (hz == 0) hz = 100;
+                return (ms * (U64)hz + 999) / 1000ULL; // ceil
+        }
+
+        // convert detik ke milidetik
+        static inline U64 SecToMs(U64 s) {
+            return s * 1000;
+        }
     }
 }

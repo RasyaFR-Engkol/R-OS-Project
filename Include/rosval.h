@@ -15,6 +15,7 @@
 typedef void    VOID;
 typedef void*   POINTER;
 typedef void*   ZEROOBJ; /* user wanted to keep this */
+typedef void    NOOBJ;
 
 /* Fixed-width integer aliases (keep original short names for compatibility) */
 typedef uint8_t   U8;
@@ -27,6 +28,7 @@ typedef uint16_t  U16_T;
 typedef int16_t   VAL16;
 typedef int16_t   VAL16_T;
 
+typedef uint32_t  U32;
 typedef uint32_t  U32;
 typedef uint32_t  U32_T;
 typedef int32_t   VAL32;
@@ -65,6 +67,7 @@ typedef bool      BOOL;
 #define FALSE     false
 #endif
 typedef bool     FLAGS;
+typedef U64 UFLAGS;
 
 /* Untuk flags */
 typedef VAL32 FLAGS32;
@@ -121,6 +124,7 @@ typedef va_list VA_LIST;
 
 // MISC Macro
 #define UNUSED__ [[maybe_unused]] 
+#define __MAYBE_UNUSED UNUSED__
 #define ARRAY_SIZE(x) (sizeof(x) / sizeof((x)[0]))
 #define OFFSET_OF(type, member) ((SIZE_T)&(((type *)0)->member))
 #define PACKSTRUCT __attribute__((packed))

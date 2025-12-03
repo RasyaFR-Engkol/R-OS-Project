@@ -1,7 +1,7 @@
 #pragma once
 
 #include "../kernel/driver/pic/pic.hpp"
-#include "rostime.hpp"
+#include "port.hpp"
 #include "rosval.h"
 
 // Semua linker di atas harusnya berakhir disini setelah
@@ -18,6 +18,13 @@ namespace Arch {
 
         static inline void Sti() {
             asm volatile ("sti");
+        }
+
+        static inline void Hti() {
+            asm volatile (
+                "sti\n"
+                "hlt"
+            );
         }
 
         static inline void Cli() {
@@ -81,6 +88,31 @@ namespace Arch {
             asm volatile ("rdtsc" : "=a"(lo), "=d"(hi));
             return ((U64)hi << 32) | (U64)lo;
         }
+
+        static inline VOID Mfence(){
+            asm volatile ("mfence" ::: "memory");
+        }
+
+        static inline VOID Clflush(VOID* addr){
+            asm volatile ("clflush (%0)" :: "r"(addr) : "memory");
+        }
+
+                STATIC INLINE U64 __cpuid(U32 info, U32 &eax, U32 &ebx, U32 &ecx, U32 &edx) {
+            asm volatile (
+                "cpuid"
+                : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx)
+                : "a"(info)
+            );
+
+            return ((U64)edx << 32) | (U64)eax;
+        }
+
+        inline bool HasTSCDeadline() {
+            uint32_t eax, ebx, ecx, edx;
+            // CPUID Leaf 1, ECX Bit 24 = TSC-Deadline
+            __cpuid(1, eax, ebx, ecx, edx); 
+            return (ecx & (1 << 24));
+        }
     }
 
         // Model-specific register helpers (RDMSR/WRMSR) and convenient EFER/STAR accessors.
@@ -122,6 +154,106 @@ namespace Arch {
     static inline LOCKRFLAGS SaveAndDisableInterrupts() { return ASM::SaveAndDisballeInterrupts(); }
     static inline void RestoreInterrupts(LOCKRFLAGS rflags) { return ASM::RestoreInterrupts(rflags); }
     static inline bool AreInterruptsEnabled() { return ASM::AreInterruptsEnabled(); }
+
+    namespace CMOS {
+        #define CMOS_ADDRESS 0x70
+        #define CMOS_DATA    0x71
+
+        enum {
+            SECONDS = 0x00,
+            MINUTES = 0x02,
+            HOURS   = 0x04,
+            DAY     = 0x07,
+            MONTH   = 0x08,
+            YEAR    = 0x09,
+            STATUS_A = 0x0A,
+            STATUS_B = 0x0B
+        };
+
+        STATIC INLINE INTN GetUpdateInProgFlags(){
+            Port::Outb(CMOS_ADDRESS, STATUS_A);
+            return (Port::Inb(CMOS_DATA) & 0x80);
+        }
+
+        STATIC INLINE U8 GetRegister(INTN Reg){
+            Port::Outb(CMOS_ADDRESS, Reg);
+            return (Port::Inb(CMOS_DATA));
+        }
+
+        STATIC U8 BCDToBin(U8 bcd){
+            return ((bcd & 0xF0) >> 1) + ( (bcd & 0xF0) >> 3) + (bcd & 0x0f);
+        }
+
+        struct RTCTime {
+            U8 second;
+            U8 minute;
+            U8 hour;
+            U8 day;
+            U8 month;
+            U32 year;
+        };
+
+        STATIC INLINE RTCTime ReadRTC(){
+            RTCTime time;
+        
+        // Tunggu sampai bit "Update In Progress" clear
+        while (GetUpdateInProgFlags());
+
+        time.second = GetRegister(SECONDS);
+        time.minute = GetRegister(MINUTES);
+        time.hour   = GetRegister(HOURS);
+        time.day    = GetRegister(DAY);
+        time.month  = GetRegister(MONTH);
+        time.year   = GetRegister(YEAR);
+
+        // Cek Status Register B untuk mengetahui format datanya
+        uint8_t registerB = GetRegister(STATUS_B);
+
+        // Jika bit 2 (DM) adalah 0, maka data dalam format BCD -> perlu convert
+        if (!(registerB & 0x04)) {
+            time.second = BCDToBin(time.second);
+            time.minute = BCDToBin(time.minute);
+            time.hour   = BCDToBin(time.hour & 0x7F); // Masking bit tertinggi (PM/AM) kalau perlu
+            time.day    = BCDToBin(time.day);
+            time.month  = BCDToBin(time.month);
+            time.year   = BCDToBin(time.year);
+        }
+
+        // RTC biasanya cuma simpan 2 digit tahun (misal: 25 untuk 2025)
+        // Kita perlu nebak abadnya. Untuk sekarang, hardcode abad 21 (2000-an).
+        time.year += 2000; 
+
+        return time;
+        }
+    }
+
+    namespace Time {
+        // Return current tick counter. Prefer LAPIC ticks when available.
+        U64 NowTicks();
+
+        // Estimate current tick frequency in Hz (uses LAPIC when available).
+        U32 TickHz();
+
+        // Sleep for a number of ticks (uses NowTicks())
+        void SleepTicks(U64 ticks);
+
+        // Sleep for approximately ms milliseconds.
+        void SleepMs(U64 ms);
+
+        // Convenience aliases
+        void Sleep(U64 ms);
+        void SleepSeconds(U64 s);
+
+        // Whether LAPIC timing is active (LapicHz != 0)
+        bool LapicTimingActive();
+
+        U64 GetTickCount();
+        U64 GetSecCount();
+
+        U32 RTCToEpoch(Arch::CMOS::RTCTime T);
+
+        
+    }
 }
 
 // Time helpers (implemented in kernel/rostime.cpp).
