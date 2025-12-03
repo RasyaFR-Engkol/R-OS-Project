@@ -4,6 +4,7 @@
 #include <logging.hpp>
 #include "../pic/pic.hpp"
 #include "../../intidt/idt.hpp"
+#include <firmware/acpi.hpp>
 
 namespace PCI{
     using namespace Printk;
@@ -117,9 +118,11 @@ namespace PCI{
         // Unmask IRQ in PIC if legacy IRQ (<16). For IOAPIC/GSI >=16, more setup is required.
         if (irq < 16) {
             PIC::EnableIRQ(irq);
-        } else {
-            Printk::Write(Printk::Level::LOG_WARNING, " PCI: IRQ %u >=16 - IOAPIC routing may be required (not implemented here)\n", (unsigned)irq);
-        }
+        } 
+
+        // IOAPIC redirection would go here GSI 1:1 mapping assumed for simplicity.
+        Printk::Write(Printk::Level::LOG_INFO, " Remapping IRQ %u for %02x:%02x.%u to GSI %d.\n", (unsigned)irq, (unsigned)Bus, (unsigned)Device, (unsigned)Function, (unsigned)irq);
+        ACPI::IOAPIC::IOApicRedirect((U8)irq, (U8)(0x20 + irq), IOAPIC_FLAGS_DEFAULT);
 
         // Register handler on vector (PIC offset base is 0x20 -> vector = 0x20 + irq)
         U8 vector = (U8)(0x20 + irq);

@@ -3,6 +3,7 @@
 #define PRINTK_MODULE_NAME "MSI"
 #include "msixmsi.hpp"
 #include <logging.hpp>
+#include <mm.hpp>
 
 // Ini adalah "register" di dalam CPU kamu (Local APIC)
 // yang menerima interrupt. Alamat ini standar.

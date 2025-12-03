@@ -5,6 +5,8 @@
 #include <logging.hpp>
 #include "../ahci/ahci.hpp"
 #include "../xhci/xhci.hpp"
+#include "../nvme/nvme.hpp"
+#include "../e1000/e1000.hpp"
 
 /* module name provided via PRINTK_MODULE_NAME */
 
@@ -77,6 +79,27 @@ namespace PCI{
                         (int)bus, (int)device, (int)function);
                     xHCI::RegisterController(bus, device, function, 0);
 
+                }
+
+                // Mencari NVMe
+                if(ClassCode == 0x01 && SubClass == 0x08){
+                    if(ProgIF == 0x02){
+                        Printk::Write(Printk::Level::LOG_INFO, "NVMe Controller Found in %d:%d:%d!\n",
+                            (int)bus, (int)device, (int)function);
+
+                        NVMe::NVMeController::RegisterController(bus, device, function);
+                    }
+                }
+
+                if(VendorID == 0x8086){
+                    U32 devID = (Reg0 >> 16) & 0xFFFF;
+                    if (devID == 0x100E || devID == 0x1000 || devID == 0x153A) {
+                    Printk::Write(Printk::Level::LOG_INFO, "Intel E1000 NIC Found in %d:%d:%d!\n", 
+                        (int)bus, (int)device, (int)function);
+                        
+                    // Include header e1000.hpp di atas file pciscan.cpp
+                    Network::E1000::E1000Driver::RegisterDevice(bus, device, function);
+                    }
                 }
 
                 if (function == 0) {
