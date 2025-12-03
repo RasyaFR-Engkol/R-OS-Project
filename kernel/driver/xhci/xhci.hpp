@@ -4,6 +4,7 @@
 #include <rosval.h>
 #include "xhci_regs.hpp" // Uncomment this when we need it
 #include <mm.hpp>
+#include "../hid/usb_hid_key.hpp"
 
 namespace xHCI{
     #define XHCI_MAX_CONTROLLERS 4
@@ -59,15 +60,34 @@ namespace xHCI{
             BOOL EP0CycleState;
             U64 LastEP0DestPhys;
 
+            U64 InputContextPhys; // Alamat fisik Input Context untuk Address Device
+            PageAlloc::DMAAlloc::DMABuffer* IntBufferDMA; // DMA buffer untuk interrupt transfer
+
             U8 ActiveIntDCI;     // DCI untuk Interrupt IN (disimpan pas parsing)
+
             U8 LastKeyboardData[8]; 
             BOOL IsKeyboard; // Penanda kalau device ini keyboard
+            U8 RepeatKeyScancode; // Scancode tombol yang lagi ditahan
+            U32 RepeatCounter;    // Counter buat nunggu delay
+
+            U8 BulkInDCI;       // DCI buat Baca Data
+            U8 BulkOutDCI;      // DCI buat Kirim Command
+            BOOL IsMassStorage; // Flag penanda
+
+            BOOL IsMouse;        // Penanda kalau device ini mouse
+            U8 LastMouseButtons; // State tombol mouse terakhir
+
+            BOOL IsHub;          // Penanda kalau device ini hub
+
             U64 IntBufferPhys;   // Alamat fisik buffer data mouse
             U8* IntBufferVirt;   // Alamat virtual buffer data mouse
             U8 RootPortID;       // Port fisik di mana device nyolok (penting buat Slot Context)
             U8 PortSpeed;        // Speed ID (penting buat Slot Context)
 
             XHCIEndpointState Endpoints[32]; 
+
+            VOLATILE BOOL TransferComplete;
+            volatile BOOL PendingMSCInit;
 
             // future: add endpoint rings, address, config, speed, etc.
             XHCIDeviceState()
@@ -76,6 +96,12 @@ namespace xHCI{
               EP0CycleState = TRUE;
               LastEP0DestPhys = 0; 
               Stage = STAGE_NONE;
+              IsKeyboard = FALSE;
+              IsMassStorage = FALSE;
+              IsMouse = FALSE;
+              IsHub = FALSE;
+              TransferComplete = FALSE;
+              PendingMSCInit = FALSE;
 
               // Init endpoints
                 for(int i=0; i<32; i++) {
@@ -85,7 +111,7 @@ namespace xHCI{
                 }
             }
 
-            enum DeviceStage {
+            VOLATILE enum DeviceStage {
                 STAGE_NONE,
                 STAGE_GET_DESCRIPTOR_SENT,
                 STAGE_SET_CONFIG_SENT,
@@ -135,4 +161,14 @@ namespace xHCI{
     VOID GetDescriptor(xHCIDriver &DRV, U8 SlotID, U8 DescType, U8 DescIndex, U16 Length, U64 BufferPhys);
 
     VOID QueueInterruptTransfer(xHCIDriver &DRV, U8 SlotID, U8 DCI, U64 BufferPhys, U32 Length);
+    VOID QueueBulkTransfer(xHCIDriver &DRV, U8 SlotID, U8 DCI, U64 BufferPhys, U32 Length);
+    VOID CheckPendingMSC(xHCIDriver &DRV);
 }
+
+// non namespace such as helper. no need namespace caus it only used internally
+    VOID HandleIfHIDInput(xHCI::xHCIDriver::XHCIDeviceState &DevState, volatile xHCITRB *Event, U8 CCode, U8 dciSource);
+    BOOL HandleIfBulkStorage(xHCI::xHCIDriver::XHCIDeviceState &DevState, volatile xHCITRB *Event, U8 CCode, U8 dciSource);
+    U8 CalcDCISource(volatile xHCITRB *Event);
+    VOID FindClassAndEndpoint(U32 &offset, U16 &totalLen, U8 *buffer, xHCI::xHCIDriver &DRV, U8 SlotID, BOOL &found, U8 &currentInterfaceClass);
+    VOID ResetDevState(xHCI::xHCIDriver &DRV, U32 SlotID);
+    VOID FreeDeviceResources(xHCI::xHCIDriver &DRV, U32 SlotID);

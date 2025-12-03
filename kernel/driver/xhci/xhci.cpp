@@ -6,4 +6,5 @@
 // - xhci_cmd.cpp: command submission helpers
 // - xhci_dump.cpp: diagnostic dumps
 // - xhci_test.cpp: test helpers
+// - xhci_endpoint.cpp: endpoint management
 #define PRINTK_MODULE_NAME "XHCI"

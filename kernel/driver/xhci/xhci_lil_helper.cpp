@@ -1,0 +1,427 @@
+#include "string.hpp"
+#include "xhci.hpp"
+#include "xhci_internal.hpp"
+#include "xhci_regs.hpp"
+#include <logging.hpp>
+#include <mm.hpp>
+#include "../../dev/devicemanager.hpp"
+#include "../massusb/usbmsc.hpp"
+
+U8 CalcDCISource(volatile xHCITRB *Event){
+    return (Event->control >> 16) & 0x1F; // Ambil Endpoint ID dari TRB event
+}
+
+BOOL HandleIfBulkStorage(xHCI::xHCIDriver::XHCIDeviceState &DevState, volatile xHCITRB *Event, U8 CCode, U8 dciSource){
+    if(DevState.IsMassStorage){
+        UNUSED__ U32 transferred = Event->status & 0x00FFFFFF; // Residual count sebenernya
+            // Code '1' = Success, '13' = Short Packet (Masih dianggap sukses buat CSW)
+        if (CCode == 1 || CCode == 13) {
+            DevState.TransferComplete = TRUE;  
+        } else {
+            Write(Printk::Level::LOG_ERR, " [MSC] Transfer Failed Code %u DCI %u\n", CCode, dciSource);
+            DevState.TransferComplete = TRUE; // Anggap selesai biar gak nunggu terus
+        }
+
+        return TRUE;
+    } else {
+        return FALSE;
+    }
+}
+
+STATIC VOID CheckAndHandleIfKeyboardHID(xHCI::xHCIDriver::XHCIDeviceState &devState, U8 *data, U32 actualLength){
+    if(devState.IsKeyboard && actualLength == 8){
+        U8 OldMods = devState.LastKeyboardData[0];
+        U8 NewMods = data[0];
+        
+        // --- HELPER LAMBDA ---
+        auto PushKeyEvent = [](InputEventType type, U8 scancode) {
+            InputEvent ev;
+            ev.Type = type;
+            ev.Keycode.Scancode = scancode;
+            InputManager::PushEvent(ev);
+        };
+
+        BOOL IsChanged = FALSE;
+        for(int i=0; i<8; i++) {
+            if(devState.LastKeyboardData[i] != data[i]) {
+                IsChanged = TRUE; break;
+            }
+        }
+
+        if(IsChanged){
+            // === ADA PERUBAHAN ===
+            devState.RepeatCounter = 0;
+            devState.RepeatKeyScancode = 0;
+
+            // 1. Handle Modifiers (FIX: Pakai InputManager)
+            auto checkmod = [&](U8 Bitmask, U8 Scancode){
+                BOOL OldBit = (OldMods & Bitmask);
+                BOOL NewBit = (NewMods & Bitmask);
+                // Press
+                if(NewBit && !OldBit) PushKeyEvent(InputEventType::KEYBOARD_PRESS, Scancode);
+                // Release
+                if(!NewBit && OldBit) PushKeyEvent(InputEventType::KEYBOARD_RELEASE, Scancode);
+            };
+            checkmod(1, 0x1D); // Ctrl
+            checkmod(2, 0x2A); // Shift
+            checkmod(4, 0x38); // Alt
+
+            // 2. Handle Key Press
+            for(INTN Key = 2; Key < 8 ; Key++){
+                U8 Keycode = data[Key];
+                if(Keycode <= 3) continue; 
+
+                BOOL IsNew = TRUE;
+                for (int j = 2; j < 8; j++) {
+                    if (devState.LastKeyboardData[j] == Keycode) {
+                        IsNew = FALSE; break;
+                    }
+                }
+
+                if(IsNew){
+                    U8 PS2 = HID_to_PS2[Keycode];
+                    if(PS2 != 0){
+                        // FIX: Konsisten pakai PushKeyEvent
+                        PushKeyEvent(InputEventType::KEYBOARD_PRESS, PS2);
+                        devState.RepeatKeyScancode = PS2;
+                    }
+                }
+            }
+
+            // 3. Handle Key Release (FIX: Pakai InputManager)
+            for (int i = 2; i < 8; i++) {
+                U8 oldKey = devState.LastKeyboardData[i];
+                if (oldKey <= 3) continue;
+
+                bool isReleased = TRUE;
+                for (int j = 2; j < 8; j++) {
+                    if (data[j] == oldKey) {
+                        isReleased = FALSE; break;
+                    }
+                }
+
+                if (isReleased) {
+                    U8 ps2 = HID_to_PS2[oldKey];
+                    // Kirim Event RELEASE, bukan inject scancode | 0x80
+                    // Biar layer atas yang mutusin logic-nya.
+                    if (ps2 != 0) PushKeyEvent(InputEventType::KEYBOARD_RELEASE, ps2);
+                }
+            }
+
+            String::Memcpy(devState.LastKeyboardData, data, 8);
+
+        } else {
+            // === LOGIC REPEAT (FIX: Pakai InputManager) ===
+            if(devState.RepeatKeyScancode != 0){
+                devState.RepeatCounter++;
+                
+                const U32 DELAY_INITIAL = 25; // Delay agak lamaan dikit buat start
+                const U32 DELAY_REPEAT  = 2;  
+
+                if (devState.RepeatCounter > DELAY_INITIAL) {
+                    devState.RepeatCounter = DELAY_INITIAL - DELAY_REPEAT;
+                    // REPEAT ITU SAMA DENGAN PRESS BERULANG
+                    PushKeyEvent(InputEventType::KEYBOARD_PRESS, devState.RepeatKeyScancode);
+                }
+            }
+        }
+    }
+}
+
+STATIC VOID CheckAndHandleIfMouseHID(xHCI::xHCIDriver::XHCIDeviceState &devState, U8 actualLength, U8 *data){
+    if(!devState.IsMouse) return;
+
+    // Mouse Boot Protocol minimal 3 bytes
+    if (actualLength >= 3) {
+        // Byte 0: Buttons (Bit 0=L, 1=R, 2=M)
+        // Byte 1: X (Signed)
+        // Byte 2: Y (Signed)
+
+        U8 buttons = data[0];
+        I8 x_rel = (I8)data[1];
+        I8 y_rel = (I8)data[2];
+
+        // Cek apakah ada perubahan? (Gerak ATAU Klik)
+        // Kita butuh simpan last button state di devState buat ngecek perubahan klik
+        BOOL moved = (x_rel != 0 || y_rel != 0);
+        BOOL clicked = (buttons != devState.LastMouseButtons); // Asumsi kamu nambah variable ini di struct devState
+
+        if(moved || clicked) {
+            InputEvent ev;
+            ev.Type = InputEventType::MOUSE_MOVE; // Sederhanakan jadi MOVE aja, layer atas yang parse tombol
+            
+            ev.Mouse.dX = x_rel;
+            ev.Mouse.dY = y_rel;
+            ev.Mouse.Button = buttons; // Update status tombol terkini
+
+            // KIRIM KE DAEMON
+            InputManager::PushEvent(ev);
+            
+            // Simpan state
+            devState.LastMouseButtons = buttons;
+            
+            // Debug (Opsional)
+            // Serial::Printf("M: %d %d Btn: %x\n", x_rel, y_rel, buttons);
+        }
+    }
+}
+
+VOID HandleIfHIDInput(xHCI::xHCIDriver::XHCIDeviceState &DevState, volatile xHCITRB *Event, U8 CCode, U8 dciSource){
+    U8 *Data = DevState.IntBufferVirt;
+    U32 Residual = (Event->status & 0x00FFFFFF);
+    
+    // === FIX MATEMATIKA ===
+    // Jangan hardcode 8. Sesuaikan dengan Request kita.
+    // Kalau Mouse kita minta 64, kalau Keyboard kita minta 8.
+    U32 LengthRequested = 8;
+    
+    // Cegah Underflow kalau residual error (lebih gede dari request)
+    if (Residual > LengthRequested) Residual = LengthRequested;
+
+    U32 ActualLength = LengthRequested - Residual;
+
+    // Debugging print kalau mau liat angkanya
+    // if(DevState.IsMouse) Serial::Printf("Mouse Res: %d Actual: %d\n", Residual, ActualLength);
+
+    if (DevState.IsKeyboard) {
+        CheckAndHandleIfKeyboardHID(DevState, Data, ActualLength);
+    } 
+    else if (DevState.IsMouse) {
+        CheckAndHandleIfMouseHID(DevState, ActualLength, Data);
+    }
+}
+
+VOID FindClassAndEndpoint(U32 &offset, U16 &totalLen, U8 *buffer, xHCI::xHCIDriver &DRV, U8 SlotID, BOOL &found, U8 &currentInterfaceClass) {
+    
+    while (offset < totalLen) {
+        U8 len = buffer[offset];
+        U8 type = buffer[offset + 1];
+        
+        // Safety check biar gak infinite loop kalau buffer corrupt (len 0)
+        if (len == 0) break;
+
+        // ==========================================
+        // TYPE 5: ENDPOINT DESCRIPTOR
+        // ==========================================
+        if (type == 5) { 
+            U8 addr = buffer[offset + 2];
+            U8 attr = buffer[offset + 3];
+            U16 pkt = buffer[offset + 4] | (buffer[offset + 5] << 8);
+            U8 interval = buffer[offset + 6];
+
+            U8 EpNum = addr & 0xF;
+            U8 DirIn = (addr & 0x80) ? 1 : 0;
+            U8 TransferType = attr & 0x3;
+
+            switch (currentInterfaceClass) {
+                // --- HID (Mouse/Keyboard) ---
+                case 0x03: {
+                    if (TransferType == 3 && DirIn) {
+                        if (pkt < 8) pkt = 8;
+
+                        Write(Printk::Level::LOG_NOTICE, "   >>> FOUND INPUT ENDPOINT! DCI=%u (Addr=0x%x) MPS=%u\n", ((addr & 0xF) * 2) + 1, addr, pkt);
+
+                        DRV.Devs[SlotID].ActiveIntDCI = (EpNum * 2) + 1;
+                        ConfigureEndpoint(DRV, SlotID, addr, 7, pkt, interval);
+                        found = TRUE;
+                    }
+                    break;
+                }
+
+                // --- Mass Storage (Flashdisk) ---
+                case 0x08: {
+                    if (TransferType == 2) { // Bulk
+                        U8 DCI = (EpNum * 2) + DirIn;
+
+                        if (DirIn) {
+                            Printk::Write(Printk::Level::LOG_NOTICE, "   >>> FOUND MSC BULK IN! DCI=%u MPS=%u\n", DCI, pkt);
+                            DRV.Devs[SlotID].BulkInDCI = DCI;
+                        } else {
+                            Printk::Write(Printk::Level::LOG_NOTICE, "   >>> FOUND MSC BULK OUT! DCI=%u MPS=%u\n", DCI, pkt);
+                            DRV.Devs[SlotID].BulkOutDCI = DCI;
+                        }
+
+                        xHCI::ConfigureEndpoint(DRV, SlotID, addr, 0, pkt, interval);
+                    }
+                    break;
+                }
+
+                // --- USB HUB (Status Change) ---
+                case 0x09: {
+                    if (TransferType == 3 && DirIn) { // Interrupt IN
+                        Write(Printk::Level::LOG_NOTICE, "   >>> FOUND HUB STATUS ENDPOINT! DCI=%u MPS=%u Interval=%u\n",
+                              ((addr & 0xF) * 2) + 1, pkt, interval);
+
+                        DRV.Devs[SlotID].ActiveIntDCI = (EpNum * 2) + 1;
+                        ConfigureEndpoint(DRV, SlotID, addr, 7, pkt, interval);
+                        found = TRUE;
+                    }
+                    break;
+                }
+
+                default: {
+                    break;
+                }
+            }
+        } 
+        // ==========================================
+        // TYPE 4: INTERFACE DESCRIPTOR
+        // ==========================================
+        else if (type == 4) {
+            U8 interfaceClass = buffer[offset + 5];
+            U8 interfaceSubClass = buffer[offset + 6];
+            U8 interfaceProtocol = buffer[offset + 7];
+
+            // Update state class saat ini
+            currentInterfaceClass = interfaceClass;
+
+            switch (interfaceClass) {
+                case 0x03: {
+                    Write(Printk::Level::LOG_NOTICE, "   [DETECT] Found HID Device (Mouse/Keyboard)!\n");
+                    if (interfaceProtocol == 1) {
+                        Write(Printk::Level::LOG_NOTICE, "   [DETECT] Found HID Keyboard!\n");
+                        DRV.Devs[SlotID].IsKeyboard = TRUE;
+                        DRV.Devs[SlotID].IsMouse = FALSE;
+                    } else if (interfaceProtocol == 2) {
+                        Write(Printk::Level::LOG_NOTICE, "   [DETECT] Found HID Mouse!\n");
+                        DRV.Devs[SlotID].IsMouse = TRUE;
+                        DRV.Devs[SlotID].IsKeyboard = FALSE;
+                    } else {
+                        Write(Printk::Level::LOG_NOTICE, "   [DETECT] Found Generic HID (Joystick/Tablet) Protocol: %d\n", interfaceProtocol);
+                    }
+                    break;
+                }
+
+                case 0x08: {
+                    if (interfaceSubClass == 0x06 && interfaceProtocol == 0x50) {
+                        Write(Printk::Level::LOG_NOTICE, "   [DETECT] Found Mass Storage Device (SCSI/Bulk-Only)!\n");
+                        DRV.Devs[SlotID].IsMassStorage = TRUE;
+                    }
+                    break;
+                }
+
+                case 0x09: {
+                    Write(Printk::Level::LOG_NOTICE, "   [DETECT] Found HUB Device!\n");
+                    DRV.Devs[SlotID].IsHub = TRUE;
+                    break;
+                }
+
+                default:
+                    Write(Printk::Level::LOG_NOTICE, "   [DETECT] Found Unknown Interface Class: 0x%02X\n", interfaceClass);
+                    break;
+            }
+        }
+
+        // ==========================================
+        // NEXT DESCRIPTOR (CRUCIAL!)
+        // ==========================================
+        // Posisinya harus sejajar dengan IF/ELSE IF, 
+        // tapi di dalam WHILE.
+        offset += len;
+    }
+}
+
+VOID ResetDevState(xHCI::xHCIDriver &DRV, U32 SlotID){
+    DRV.Devs[SlotID].ActiveIntDCI = 0;
+    DRV.Devs[SlotID].BulkInDCI = 0;
+    DRV.Devs[SlotID].BulkOutDCI = 0;
+    DRV.Devs[SlotID].IsMassStorage = FALSE;
+    DRV.Devs[SlotID].IsKeyboard = FALSE; // Reset flag keyboard juga
+    DRV.Devs[SlotID].IsMouse = FALSE;    // Reset flag mouse juga
+    DRV.Devs[SlotID].LastMouseButtons = 0;
+    DRV.Devs[SlotID].RepeatCounter = 0;
+    DRV.Devs[SlotID].RepeatKeyScancode = 0;
+    DRV.Devs[SlotID].IsHub = FALSE;
+}
+
+VOID FreeDeviceResources(xHCI::xHCIDriver &DRV, U32 SlotID){
+    auto &dev = DRV.Devs[SlotID];
+
+    Write(Printk::Level::LOG_INFO, " xHCI: Freeing resources for Slot %u...\n", (unsigned)SlotID);
+
+    // 1. Free EP0 Ring
+    if(dev.EP0Ring){
+        PageAlloc::DMAAlloc::FreeDMABuffer(dev.EP0Ring);
+        dev.EP0Ring = nullptr;
+    }
+
+    // 2. Free Interrupt Buffer (Mouse/Keyboard data buffer)
+    if(dev.IntBufferDMA){
+        PageAlloc::DMAAlloc::FreeDMABuffer(dev.IntBufferDMA);
+        dev.IntBufferDMA = nullptr;
+        dev.IntBufferPhys = 0;
+        dev.IntBufferVirt = nullptr;
+    }
+
+    // 3. Free Endpoint Rings (Loop semua endpoint 1-31)
+    for(int i=0; i<32; i++){
+        if(dev.Endpoints[i].Ring){
+            PageAlloc::DMAAlloc::FreeDMABuffer(dev.Endpoints[i].Ring);
+            dev.Endpoints[i].Ring = nullptr;
+            dev.Endpoints[i].EnqueueIdx = 0;
+        }
+    }
+
+    U64 devCtxPhys = DRV.V_DCBAAP[SlotID];
+    if(devCtxPhys != 0) {
+        // Null-kan dulu di controller & flush
+        DRV.V_DCBAAP[SlotID] = 0;
+        asm volatile ("clflush (%0)" :: "r"(&DRV.V_DCBAAP[SlotID]) : "memory");
+        asm volatile ("mfence" ::: "memory");
+
+        // Free pakai PhysicalFreePages (1 Page)
+        PageAlloc::PhysicalFreePages(devCtxPhys, 1);
+    }
+
+    // 4. Free Device Context DMA Buffer
+    if(dev.InputContextPhys){
+        PageAlloc::PhysicalFreePages(dev.InputContextPhys, 1); // Asumsi 1 page
+        dev.InputContextPhys = 0;
+    }
+    
+    // Tapi kalau pake cara sekarang, pastikan kamu punya fungsi FreePhysicalPages(physAddr):
+    if (DRV.V_DCBAAP[SlotID]) {
+        // PageAlloc::FreePhysicalPages(DRV.V_DCBAAP[SlotID], 1); // Asumsi ada fungsi ini
+        DRV.V_DCBAAP[SlotID] = 0; // Null-kan entri di DCBAAP
+    }
+}
+
+VOID xHCI::CheckPendingMSC(xHCIDriver &DRV){
+    // Loop cek semua slot, ada yang minta di-init gak?
+        // (Optimasi: Bisa batasi loop sampai MAX_SLOTS atau pakai list)
+        for (U32 i = 1; i < xHCIDriver::MAX_SLOTS; i++) {
+            if (DRV.Devs[i].PendingMSCInit) {
+                // Reset flag biar gak dipanggil berkali-kali
+                DRV.Devs[i].PendingMSCInit = FALSE;
+
+                Printk::Write(Printk::Level::LOG_NOTICE, " xHCI: Defer-Initializing MSC for Slot %u...\n", i);
+
+                // Ambil info endpoints
+                U8 inDCI = DRV.Devs[i].BulkInDCI;
+                U8 outDCI = DRV.Devs[i].BulkOutDCI;
+
+                if (inDCI && outDCI) {
+                    // Create Driver
+                    auto *mscDriver = new USBMassStorage(&DRV, (U8)i, inDCI, outDCI);
+                    
+                    if (mscDriver) {
+                        // Initialize (Sekarang aman karena Interrupt Enabled!)
+                        if (mscDriver->Initialize()) {
+                            // Register ke Device Manager
+                            if (DeviceManager::RegisterBlockDevice(mscDriver)) {
+                                Printk::Write(Printk::Level::LOG_NOTICE, " xHCI: USB Disk Registered Successfully! (/dev/USBDisk...)\n");
+                                
+                                // Opsional: Panggil GPTFS::InitFs() lagi buat scan partisi baru
+                                // GPTFS::InitFs(); 
+                            } else {
+                                Printk::Write(Printk::Level::LOG_ERR, " xHCI: Failed to register MSC device.\n");
+                            }
+                        } else {
+                            Printk::Write(Printk::Level::LOG_ERR, " xHCI: MSC Initialization Failed.\n");
+                            delete mscDriver;
+                        }
+                    }
+                }
+            }
+        }
+}

@@ -1,4 +1,5 @@
 #include <rosval.h>
+#include "rossys.hpp"
 #include "xhci_internal.hpp"
 #include "xhci.hpp"
 #include "xhci_isr.hpp"
@@ -66,6 +67,9 @@ namespace xHCI{
         
 
         U64 InputContextPhys = PageAlloc::PhysicalAllocPages(PAGE_SIZE);
+
+        DRV.Devs[SlotID].InputContextPhys = InputContextPhys;
+
         VOLATILE U32 *InputContextBase = (volatile U32*)HHDM_PhysToVirt(InputContextPhys);
 
         String::Memset((VOID*)InputContextBase, 0, PAGE_SIZE);
@@ -111,9 +115,9 @@ namespace xHCI{
         // Setup EP0 Context (endpoint characteristics are in dword 0)
         U32 MaxPaketSize = GetMaxPacketSize(Speed);
 
-        Ep0Context[0] |= (3 << 1); // Error Count = 3
-        Ep0Context[0] |= (4 << 3); // EP Type = Control
-        Ep0Context[0] |= (MaxPaketSize << 16);
+        Ep0Context[1] |= (3 << 1); // Error Count = 3
+        Ep0Context[1] |= (4 << 3); // EP Type = Control
+        Ep0Context[1] |= (MaxPaketSize << 16);
 
         // Debug: dump the populated Input Context dwords (helpful for controller troubleshooting)
         {
@@ -347,6 +351,11 @@ namespace xHCI{
         // Push sisa TRB...
         DRV.Devs[SlotID].Stage = xHCIDriver::XHCIDeviceState::STAGE_GET_DESCRIPTOR_SENT;
 
+        Arch::ASM::Mfence();
+
+        Printk::Write(Printk::Level::LOG_DEBUG, " [DEBUG] Set Stage to %d for Slot %u (Addr: 0x%016llx)\n", 
+        (int)DRV.Devs[SlotID].Stage, (unsigned)SlotID, (unsigned long long)&DRV.Devs[SlotID].Stage);
+
         PushEP0TRB(DRV, SlotID, DataTRB);
         PushEP0TRB(DRV, SlotID, StatusTRB);
 
@@ -379,6 +388,7 @@ namespace xHCI{
         // Target: DB[SlotID]
         // Value: DCI (Device Context Index).
         // DCI untuk Endpoint 0 Control Bidirectional selalu = 1.
+        Arch::ASM::Mfence();
         DRV.doorbell_regs[SlotID] = 1;
         Printk::Write(Printk::Level::LOG_INFO, " GetDeviceDescriptor: doorbell rung slot=%u\n", (unsigned)SlotID);
     }

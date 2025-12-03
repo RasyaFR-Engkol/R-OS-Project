@@ -172,4 +172,46 @@ namespace xHCI{
 
         DRV.doorbell_regs[SlotID] = DCI;
     }
+
+    VOID QueueBulkTransfer(xHCIDriver &DRV, U8 SlotID, U8 DCI, U64 BufferPhys, U32 Length) {
+        if (SlotID >= 255 || DCI >= 32) return;
+        
+        auto &ep = DRV.Devs[SlotID].Endpoints[DCI];
+        if (!ep.Ring) {
+            Printk::Write(Printk::Level::LOG_ERR, " QueueInt: No Ring for Slot %u DCI %u\n", SlotID, DCI);
+            return;
+        }
+
+        xHCITRB *ringBase = (xHCITRB*)ep.Ring->VirtAddr;
+        U32 entries = (U32)(ep.Ring->Size / sizeof(xHCITRB));
+        U32 idx = ep.EnqueueIdx;
+
+        // Handle Link TRB Wrap
+        if (idx == entries - 1) {
+            xHCITRB *link = &ringBase[idx];
+            // Toggle Cycle (TC) bit harus diset biar controller tau dia harus flip cycle bit internalnya
+            link->control = (6u << 10) | (1u << 1) | (ep.CycleState ? 1u : 0u);
+
+            asm volatile("clflush (%0)" :: "r"(link) : "memory");
+            asm volatile("mfence" ::: "memory");
+
+            idx = 0;
+            ep.CycleState = !ep.CycleState;
+        }
+
+        xHCITRB *trb = &ringBase[idx];
+        trb->parameter = BufferPhys;
+        trb->status    = Length; // Transfer Length
+        
+        // IOC=1 (Interrupt), ISP=1 (Short Packet OK), Type=1 (Normal)
+        trb->control   = (1u << 10) | (1u << 5) | (ep.CycleState ? 1u : 0u);
+
+        asm volatile("clflush (%0)" :: "r"(trb) : "memory");    
+        asm volatile("mfence" ::: "memory");
+
+        ep.EnqueueIdx = idx + 1;
+        ep.CycleState = ep.CycleState; // Tetap sama untuk Bulk
+
+        DRV.doorbell_regs[SlotID] = DCI;
+    }
 }
