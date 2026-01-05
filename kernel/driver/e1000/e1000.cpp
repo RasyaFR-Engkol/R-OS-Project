@@ -110,7 +110,7 @@ namespace Network{
             WriteCommand(REG_IMS, (1 << 2) | (1 << 7)); // enable link status & rx timer
 
             U32 Ctrl = ReadCommand(REG_CTRL);
-            WriteCommand(REG_CTRL, Ctrl | (1 << 26)); // SLU
+            WriteCommand(REG_CTRL, Ctrl | (1 << 6)); // SLU
 
             this->SetPacketHandler(Network::EthernetInput);
 
@@ -122,6 +122,17 @@ namespace Network{
             // 3. Baru Gas Kirim DHCP Discover
             Write(Level::LOG_INFO, "[E1000] Starting DHCP Discovery...\n");
             Network::SendDHCPDiscover(this);
+
+            for(int i = 0; i < 100000000; i++) {
+                U32 status = ReadCommand(REG_ICR); // Baca penyebab interrupt manual
+                
+                // Cek bit 7 (RXT0 - Receiver Timer Interrupt)
+                if(status & (1<<7)) {
+                    Write(Level::LOG_INFO, "[DEBUG] Polling detected packet! Calling handler...\n");
+                    HandleInterrupt(); // Panggil paksa
+                    break; 
+                }
+            }
 
             /*this->IP = IPv4::ToU32(192, 168, 100, 2);
             this->SubnetMask = IPv4::ToU32(255, 255, 255, 0);
@@ -329,10 +340,8 @@ namespace Network{
 
             if(Cause & (1 << 2)){
                 Write(Level::LOG_CRIT, "[E1000] Link Status Changed.\n");
-                // Reload CTRL register, check bit 'Link Up'
             }
 
-            if(Cause & (1 << 7) || Cause & (1 << 6)){
                 while((RXDescs[RXTail].Status & 1)){
                     U8 *Buf = (U8*)RxBuffer[RXTail];
                     U16 PktLen = RXDescs[RXTail].Length;
@@ -356,8 +365,7 @@ namespace Network{
 
                     RXTail = (RXTail + 1) % E1000_NUM_RX_DESC;
                 }
-            }
-        } 
+        }
 
 
         VOID E1000Driver::DebugDumpTX() {
