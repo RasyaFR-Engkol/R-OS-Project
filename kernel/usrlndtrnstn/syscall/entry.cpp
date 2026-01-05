@@ -4,6 +4,7 @@
 #include "syscall/fs.hpp"
 #include "syscall/process.hpp"
 #include "syscall/network.hpp"
+#include "syscall/mm.hpp"
 #define PRINTK_MODULE_NAME "SYSCALL"
 #include <logging.hpp>
 #include <task.hpp>
@@ -35,10 +36,13 @@ ABI_C VOID Syscall_Entry(CpuContext_T *CPUContext){
         //               (unsigned long long)CurTask->Signals);
             // Cek Bitmask SIGINT (Bit 2)
         if (CurTask->Signals & (1 << 2)) {
-            CurTask->Signals &= ~(1 << 2); // Clear SIGINT bit
 
             // Check if Custom Handler exists
             if (CurTask->SignalHandlers[2] != 0) {
+                /*Printk::Write(Printk::Level::LOG_DEBUG,
+                              "Scheduler: Delivering SIGINT to PID %llu via custom handler at 0x%llx\n",
+                              CurTask->pid,
+                              (unsigned long long)CurTask->SignalHandlers[2]);*/
                 // --- HANDLE SIGNAL (User Mode Handler) ---
                 
                 // 1. Save Context to User Stack (Red Zone safe)
@@ -59,8 +63,8 @@ ABI_C VOID Syscall_Entry(CpuContext_T *CPUContext){
                 // Note: Handler harus panggil syscall 'sigreturn' untuk restore context dari stack
                 // atau exit() kalau memang tujuannya terminate (seperti ping).
             } else {
-                // --- DEFAULT ACTION (TERMINATE) ---
-                CurTask->State = Tasking::TaskState::ZOMBIE;
+                CurTask->Priority = 0;
+                CurTask->TimeSlice = Tasking::GetTimeSliceForPriority(0);
 
                 // Wake parent
                 U64 ppid = CurTask->ppid;
@@ -73,17 +77,11 @@ ABI_C VOID Syscall_Entry(CpuContext_T *CPUContext){
                 }
 
                 Tasking::GraveyardArray[CurTask->pid] = CurTask;
+                Tasking::ForceReschedule = TRUE;
 
                 // panggil REAPD biar bersihin
                 // nanti REAPD yang free resources-nya
                 // kita gak boleh free di syscall context
-                Tasking::Task *Reapd = Tasking::GetTaskPID(Tasking::PID_REAPD);
-                if (Reapd != nullptr && Reapd->State == Tasking::TaskState::BLOCKED) {
-                    Reapd->State = Tasking::TaskState::READY;
-                    Reapd->Priority = 0;
-                    Reapd->TimeSlice = Tasking::GetTimeSliceForPriority(0);
-                    Tasking::ForceReschedule = TRUE;
-                }
 
                 Tasking::SchedulerYield(); // Bye bye world
             }
