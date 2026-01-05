@@ -5,86 +5,149 @@
 #include "rng/entrophy.hpp"
 #define PRINTK_MODULE_NAME "StdDvc"
 #include <logging.hpp>
+#include <string.hpp>
 #include "std_devices.hpp"
 #include "../../log/fbcon/fbcon.hpp"
 #include "../../dev/devicemanager.hpp"
 #include <task.hpp>
 
-VOID TTY::OnInput(char c){
-    if(c & 0x80) return;
+VOID TTY::OnInput(U8 c){
+    if(c == 0x05){
+        Tasking::Debug_DumpProcessState();
+    }
+    else if(c == 0x06){
+        Tasking::Debug_MinorAndMajorFaultsBelowPID10();
+    } else if(c == 0x07){
+        Printk::Panic("Triggered panic VIA TTY.\n");
+    }
+    Serial::Printf("Char: 0x%x.\n", (unsigned char)c);
+
+    if((m_Termios.c_iflag & IXON)){
+        if(c == m_Termios.c_cc[VSTOP]){
+            m_OutputStopped = TRUE;
+            return;
+        }
+        if(c == m_Termios.c_cc[VSTART]){
+            // TODO: Kalau lo punya Task yang lagi BLOCKED di TTY::Write, bangunin disini!
+            return;
+        }
+    }
+
     if (c == 0) return;
 
     UNUSED__ bool canonical = (m_Termios.c_lflag & ICANON);
     bool echo      = (m_Termios.c_lflag & ECHO);
     bool mapCRNL   = (m_Termios.c_iflag & ICRNL);
+    bool ignoreCR = (m_Termios.c_iflag & IGNCR);
 
-    if ((m_Termios.c_lflag & ISIG) && c == m_Termios.c_cc[VINTR]) {
-        U64 fgPID = GetForegroundPID();
-        
-        // Kirim Signal ke Foreground Process (Target PID, bukan Group dulu biar aman)
-        if (fgPID > 0) {
-            Tasking::SetTaskSignal(fgPID, 2 /* SIGINT */, TRUE);
-            
-            // Opsional: Echo "^C"
-            if (echo) {
-                this->Write((U8*)"^C\n", 3);
-            }
-            
-            // Flush buffer input baris ini (opsional, behavior unix)
-            m_LineWritePos = 0; 
-            m_LineReadPos = 0;
+    if(m_Termios.c_lflag & ISIG){
+        INTN SignalToSend = 0;
+        CHAR8 Visual = 0;
+
+        // CTRL + C Handling
+        if(c == m_Termios.c_cc[VINTR]){
+            SignalToSend = 2;
+            Visual = 'C';
         }
-        return; // JANGAN simpan karakter ini ke buffer
+        else if(c == m_Termios.c_cc[VQUIT]){
+            SignalToSend = 3;
+            Visual = '\\';
+        }
+
+        if(SignalToSend != 0){
+            U64 FGPid = GetForegroundPID();
+            if(FGPid >= DEFAULT_CONFIG_PID_START){
+                Tasking::SetTaskSignal(FGPid, SignalToSend, TRUE);
+
+                if(echo){
+                    CHAR8 Tmp[4] = {'^', Visual, '\n', 0,};
+                    this->Write(NULL, (U8*)Tmp, 4);
+                }
+
+                m_LineWritePos = 0;
+                m_LineReadPos = 0;
+            }
+            return;
+        }
     }
 
-    if (c == '\r' && mapCRNL) c = '\n';
+    if (c == '\r' && ignoreCR) return;
+    if (c == '\r' && mapCRNL && !ignoreCR) c = '\n';
 
-    // 3. Handle Backspace
-    if (c == '\b' || c == 0x7F) {
-        if (m_LineWritePos > 0) {
-            m_LineWritePos--;
-            if (echo) {
-                CHAR8 bs[] = "\b \b";
-                this->Write((U8*)bs, 3);
-            }
-        }
+    // Don't handle backspace here - let userland application handle it
+    // Backspace will be passed through to the line buffer
+
+    if (m_LineWritePos >= LINE_BUFFER_SIZE - 1) {
         return;
     }
 
-    if (m_LineWritePos >= LINE_BUFFER_SIZE - 1) {
-        c = '\n'; // Force newline
-    }
-
-    // 5. Simpan ke Buffer Internal
     m_LineBuffer[m_LineWritePos++] = c;
 
-    // 6. Echo ke layar
     if (echo) {
-        this->Write((U8*)&c, 1);
+        this->Write(nullptr, (U8*)&c, 1);
+
+        if (c == '\n' && !echo && (m_Termios.c_lflag & ECHONL)) {
+             this->Write(nullptr, (U8*)&c, 1);
+        }
+    }
+
+    // --- WAKE UP LOGIC (Normal Input) ---
+    BOOL Canonical = (m_Termios.c_lflag & ICANON);
+    BOOL MustWake = !Canonical;
+
+    if(Canonical){
+        if(c == '\n' || c == m_Termios.c_cc[VEOF]){
+            MustWake = TRUE;
+        }
+    }
+    else {
+        MustWake = TRUE;
+    }
+
+    if(MustWake){
+        U64 fgPID = GetForegroundPID();
+        Tasking::Task* task = Tasking::GetTaskPID(fgPID);
+        
+        if (task && task->State == Tasking::TaskState::BLOCKED) {
+            task->State = Tasking::TaskState::READY;
+            
+            // Boost Priority biar interaktif
+            task->Priority = 0; 
+            task->TimeSlice = Tasking::GetTimeSliceForPriority(0);
+
+            Tasking::Enqueue(task);
+            
+            // Preemption
+            Tasking::ForceReschedule = TRUE; 
+        }
     }
 }
 
-U32 TTY::Read(U8* buffer, U32 size){
+U32 TTY::Read(File *file, U8* buffer, U32 size){
     if (size == 0) return 0;
 
     // Reset posisi read lokal user
     U32 UserBytesCopied = 0;
-
     bool canonical = (m_Termios.c_lflag & ICANON);
-
     Tasking::Task* CurrentTask = Tasking::GetCurrentTaskPtr();
+
+    U32 MinCharsToRead = canonical ? 1 : m_Termios.c_cc[VMIN];
+    if(MinCharsToRead == 0) MinCharsToRead = 1;
+    // Note: VTIME (timeout) butuh timer OS, skip dulu buat skrg (anggap blocking forever).
 
     // --- LOOP UTAMA ---
     while (UserBytesCopied < size) {
 
         if (CurrentTask->Signals != 0) {
-            // Biasanya return -1 (Error) dengan errno = EINTR (Interrupted)
-            // Tapi karena return type U32, kita return -1 (Max U32) 
-            // nanti di syscall handler di cast ke int.
             return (U32)-1; 
         }
 
         bool DataReady = false;
+        U32 CurrentAvail = 0;
+
+        if (m_LineWritePos >= m_LineReadPos) {
+            CurrentAvail = m_LineWritePos - m_LineReadPos;
+        }
 
         if (canonical) {
              // Cek apakah ada newline di buffer yang belum dibaca
@@ -96,13 +159,16 @@ U32 TTY::Read(U8* buffer, U32 size){
              }
         } else {
              // Raw mode: ada karakter apapun, sikat.
-             if(m_LineReadPos < m_LineWritePos) DataReady = true;
+             if(CurrentAvail >= 1) DataReady = TRUE;
         }
 
         if (!DataReady) {
-            // Belum ada data (atau belum di-Enter). 
-            // Yield CPU biar task lain (seperti hexdump) bisa jalan.
-            // JANGAN BLOCKING DI SINI TANPA YIELD!
+            Tasking::Task* current = Tasking::GetCurrentTaskPtr();
+            if (current) {
+                current->State = Tasking::TaskState::BLOCKED;
+            }
+
+            //Printk::Write(Printk::Level::LOG_INFO, "TTY Read: No data available, blocking task PID %llu\n", current ? current->pid : 0);
             Tasking::SchedulerYield(); 
             continue;
         }
@@ -110,34 +176,58 @@ U32 TTY::Read(U8* buffer, U32 size){
         // B. SALIN DATA (Sama kayak kodemu yg lama)
         while (m_LineReadPos < m_LineWritePos && UserBytesCopied < size) {
             char c = m_LineBuffer[m_LineReadPos++];
+
+            if (c == m_Termios.c_cc[VEOF]) {
+                 if(m_LineReadPos == m_LineWritePos){
+                    m_LineReadPos = 0; m_LineWritePos = 0;
+                 }
+                 return UserBytesCopied; 
+            }
+
             buffer[UserBytesCopied++] = c;
             
             // Canonical mode break on newline
-            if (canonical && (c == '\n' || c == m_Termios.c_cc[VEOF])) {
+            if (canonical && c == '\n') {
+                if(m_LineReadPos == m_LineWritePos){
+                    m_LineReadPos = 0; m_LineWritePos = 0;
+                }
                 return UserBytesCopied;
             }
         }
         
-        // Reset buffer jika kosong (Circular buffer implementation lebih bagus sebenernya)
+        // if line read position equals line write position, reset both
         if(m_LineReadPos == m_LineWritePos){
             m_LineReadPos = 0;
             m_LineWritePos = 0;
         }
 
+        // if no canonical mode and line read position is bigger or
+        // equal to write position, break
         if (!canonical && m_LineReadPos >= m_LineWritePos) break;
     }
 
     return UserBytesCopied;
 }
 
-U32 TTY::Write(U8* Buffer, U32 Size){
+U32 TTY::Write(File *file, U8* Buffer, U32 Size){
     if(!Buffer || !Size) return -ROS_INVALID;
+    (void)file;
 
     // Cek flag output processing
     bool opost = (m_Termios.c_oflag & OPOST);
     bool onlcr = (m_Termios.c_oflag & ONLCR);
 
     U32 BytesWritten = 0;
+
+    while (m_OutputStopped) {
+         // Cek signal biar bisa di-kill pas lagi stuck
+        Tasking::Task* current = Tasking::GetCurrentTaskPtr();
+        if (current->Signals != 0) return (U32)-1;
+
+        current->State = Tasking::TaskState::BLOCKED;
+        Tasking::SchedulerYield(); 
+        // Pas bangun, cek lagi while(m_OutputStopped)...
+    }
     
     for(U32 i = 0; i < Size; i++) {
         CHAR8 c = (CHAR8)Buffer[i];
@@ -189,7 +279,6 @@ INTN TTY::Ioctl(File* file, U32 command, U64 arg){
             U64* pgid = (U64*)(UPTR)arg;
             if(!pgid) return -ROS_INVALID;
 
-            Printk::Write(Printk::Level::LOG_INFO, "StdinDevice: Setting foreground PID to %llu\n", *pgid);
             SetForegroundPID(*pgid);
             return 0; // success
             break;
@@ -212,7 +301,7 @@ INTN TTY::Ioctl(File* file, U32 command, U64 arg){
             winsize *ws = (winsize*)(UPTR)arg;
             if(!ws) return -ROS_INVALID;
             
-            Printk::Write(Printk::Level::LOG_WARNING, "TTY Ioctl: TIOCSWINSZ not supported yet\n");
+            Printk::Write(Printk::Level::LOG_DOK, "TTY Ioctl: TIOCSWINSZ not supported yet\n");
             return -ROS_UNSUPPORTED;
         }
         case TCGETS: {
@@ -230,6 +319,8 @@ INTN TTY::Ioctl(File* file, U32 command, U64 arg){
             if(!tio) return -ROS_INVALID;
 
             m_Termios = *tio;
+
+            m_Termios = *tio;
             return 0; // success
             break;
         }
@@ -238,8 +329,6 @@ INTN TTY::Ioctl(File* file, U32 command, U64 arg){
             termios* tio = (termios*)(UPTR)arg;
             if(!tio) return -ROS_INVALID;
 
-            // Since our TTY is immediate mode, no need to wait for drain
-            m_Termios = *tio;
             return 0; // success
             break;
         }
@@ -256,8 +345,46 @@ INTN TTY::Ioctl(File* file, U32 command, U64 arg){
             break;
         }
         default:
+            Printk::Write(Printk::Level::LOG_DERR, "Unknown IOCTL fot TTY: %llu", command);
             return -ROS_UNSUPPORTED;
     }
+}
+
+short TTY::Poll(File *file, short events){
+    short revents = 0;
+
+    if(events & POLLIN){
+        bool Canonical = (m_Termios.c_lflag & ICANON);
+
+        if(Canonical){
+            // --- CANONICAL MODE ---
+            // Kita baru bilang "READY" kalau di buffer ada Newline (\n) atau EOF.
+            // Persis sama kayak logic di TTY::Read lo.
+
+            BOOL LineReady = FALSE;
+            for(U32 i = m_LineReadPos; i < m_LineWritePos; i++){
+                CHAR8 C = m_LineBuffer[i];
+                if(C == '\n' || C == m_Termios.c_cc[VEOF]){
+                    LineReady = TRUE;
+                    break;
+                }
+            }
+
+            if(LineReady){
+                revents |= POLLIN;
+            }
+        } else {
+            if (m_LineReadPos < m_LineWritePos) {
+                revents |= POLLIN;
+            }
+        }
+    }
+
+    if(events & POLLOUT){
+        revents |= POLLOUT;
+    }
+
+    return revents;
 }
 
 TTY::TTY(){
@@ -272,17 +399,26 @@ TTY::TTY(){
     // Copy into member buffer (size 32)
     String::Strcpy(m_name, TempNameTTY);
     StdDvc::TTYActive++;
-    ForegroundPGID = 0;
+    ForegroundPGID = DEFAULT_CONFIG_PID_START;
+    SetForegroundPID(ForegroundPGID);
 
-    m_Termios.c_iflag = ICRNL;
-    m_Termios.c_lflag = ICANON | ECHO | ISIG | ECHOE;
+    m_OutputStopped = FALSE;
+
+    m_Termios.c_iflag = ICRNL | IXON;
+    m_Termios.c_lflag = ICANON | ISIG | ECHOE | ECHO | IEXTEN;
     m_Termios.c_oflag = OPOST | ONLCR;
 
     String::Memset(m_Termios.c_cc, 0, NCCS);
     m_Termios.c_cc[VINTR]  = 0x03; // Ctrl+C
-    m_Termios.c_cc[VEOF]   = 0x04; // Ctrl+D
-    m_Termios.c_cc[VERASE] = 0x7F; // Backspace (kadang 0x08 tergantung keyboard driver lo)
+    m_Termios.c_cc[VQUIT]  = 0x1C; // Ctrl+\ (SIGQUIT) -> Fitur baru
+    m_Termios.c_cc[VERASE] = 0x7F; // Backspace
     m_Termios.c_cc[VKILL]  = 0x15; // Ctrl+U
+    m_Termios.c_cc[VEOF]   = 0x04; // Ctrl+D
+    m_Termios.c_cc[VSTART] = 0x11; // Ctrl+Q (XON)  -> Fitur baru
+    m_Termios.c_cc[VSTOP]  = 0x13; // Ctrl+S (XOFF) -> Fitur baru
+    m_Termios.c_cc[VMIN]   = 1;    // Min 1 char (Standard blocking read)
+    m_Termios.c_cc[VTIME]  = 0;    // No timeout
+
     m_LineReadPos = 0;
     m_LineWritePos = 0;
     String::Memset(m_LineBuffer, 0, LINE_BUFFER_SIZE);
@@ -310,7 +446,7 @@ U32 RandomDevice::NextRand() {
     return x;
 }
 
-U32 RandomDevice::Read(U8* buffer, U32 size){
+U32 RandomDevice::Read(File *file, U8* buffer, U32 size){
     if (size == 0) return 0;
 
     // Isi buffer user dengan angka acak byte-per-byte
@@ -322,10 +458,11 @@ U32 RandomDevice::Read(U8* buffer, U32 size){
     return size;
 }
 
-U32 RandomDevice::Write(U8* buffer, U32 size){
+U32 RandomDevice::Write(File* file, U8* buffer, U32 size){
     // Biasanya nulis ke /dev/random itu buat nambah entropy pool.
     // Tapi karena kita PRNG simple, kita mix aja input user ke seed
     // biar makin acak.
+    (void)file;
     for(U32 i = 0; i < size; i++) {
         m_Seed ^= buffer[i];
         NextRand(); // Shuffle dikit

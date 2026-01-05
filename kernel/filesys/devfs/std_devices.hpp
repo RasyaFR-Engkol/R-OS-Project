@@ -3,6 +3,7 @@
 #include <rosval.h>
 #include "devfs.hpp"
 #include <task.hpp>
+#include "../../dev/circularbuffer.hpp"
 
 //STDIN
 #define FIONREAD 0x541B // Get bytes available in input buffer
@@ -14,6 +15,8 @@
 
 // Use the foreground PID from the Tasking namespace
 // (declared in `kernel/task/task.hpp`)
+
+#define DEFAULT_CONFIG_PID_START 100
 
 typedef unsigned char  cc_t;
 typedef unsigned int   speed_t;
@@ -41,6 +44,7 @@ struct winsize {
 
 class TTY : public ICharDevice {
     private:
+        BOOL m_OutputStopped;
         U64 ForegroundPGID;
         CHAR8 m_name[32];
         termios m_Termios;
@@ -53,11 +57,12 @@ class TTY : public ICharDevice {
         TTY();
         virtual ~TTY();
 
-        virtual U32 Read(U8* buffer, U32 size) override; 
-        virtual U32 Write(U8* buffer, U32 size) override;
+        virtual U32 Read(File *file, U8* buffer, U32 size) override; 
+        virtual U32 Write(File *file, U8* buffer, U32 size) override;
         virtual const CHAR8* GetDeviceName() override { return m_name; }
         virtual INTN Ioctl(File* file, U32 command, U64 arg) override;
-        virtual VOID OnInput(char c);
+        virtual short Poll(File *file, short events) override;
+        virtual VOID OnInput(unsigned char c);
 
         VOID SetForegroundPID(U64 pid) {
             Tasking::g_ForegroundPID = pid;
@@ -73,15 +78,23 @@ class NullDevice : public ICharDevice {
         NullDevice(){}
         virtual ~NullDevice(){}
 
-        virtual U32 Read(U8* buffer, U32 size) override {
+        virtual U32 Read(File *file, U8* buffer, U32 size) override {
             (void)buffer; (void)size; return 0; // EOF
         }
-        virtual U32 Write(U8* buffer, U32 size) override {
+        virtual U32 Write(File *file, U8* buffer, U32 size) override {
             (void)buffer; return size; // discard data
         }
         virtual const CHAR8* GetDeviceName() override { return "null"; }
         virtual INTN Ioctl(File* file, U32 command, U64 arg) override {
             (void)file; (void)command; (void)arg; return -ROS_UNSUPPORTED;
+        }
+        virtual short Poll(File *file, short events) override {
+            short revents = 0;
+            // Null device selalu siap dibaca (hasilnya EOF immediate)
+            if (events & POLLIN)  revents |= POLLIN;
+            // Null device selalu siap ditulisi (data dibuang immediate)
+            if (events & POLLOUT) revents |= POLLOUT;
+            return revents;
         }
 };
 
@@ -94,11 +107,19 @@ class RandomDevice : public ICharDevice{
         RandomDevice(const CHAR8* Name);
         virtual ~RandomDevice(){}
 
-        virtual U32 Read(U8* buffer, U32 size) override;
-        virtual U32 Write(U8* buffer, U32 size) override;
+        virtual U32 Read(File *file, U8* buffer, U32 size) override;
+        virtual U32 Write(File *file, U8* buffer, U32 size) override;
         virtual const CHAR8* GetDeviceName() override { return m_name; }
         virtual INTN Ioctl(File* file, U32 command, U64 arg) override {
             (void)file; (void)command; (void)arg; return -ROS_UNSUPPORTED;
+        }
+        virtual short Poll(File *file, short events) override {
+            short revents = 0;
+            // Random stream gak pernah abis
+            if (events & POLLIN)  revents |= POLLIN;
+            // Seed mixing selalu bisa dilakukan
+            if (events & POLLOUT) revents |= POLLOUT;
+            return revents;
         }
 };
 
