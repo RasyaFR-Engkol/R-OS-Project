@@ -22,6 +22,9 @@ typedef U32 IOAPICFLAGS;
 // - IOAPIC_FLAG_MASKED: Mask the redirection entry (sets the mask bit)
 #define IOAPIC_FLAGS_DEFAULT  ((IOAPICFLAGS)0x00000000)
 #define IOAPIC_FLAG_MASKED    ((IOAPICFLAGS)0x00010000)
+#define IOAPIC_FLAGS_LEVEL (1 << 15)
+#define IOAPIC_FLAGS_LOW (1 << 13)
+
 
 #define CONFIG_TIMER_HEXA_GLOBAL 0xEE
 
