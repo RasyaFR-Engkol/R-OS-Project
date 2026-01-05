@@ -20,6 +20,8 @@
     /* module name provided via PRINTK_MODULE_NAME */
 
 namespace AHCI {
+
+    Mutex DiskLock;
     // Core AHCI controller globals remain here; other translation units
     // will reference these via the internal header.
     AHCIDriver g_ahci_controllers[MAX_AHCI_CONTROLLERS];
@@ -66,8 +68,6 @@ namespace AHCI {
                 DRV.IntVector = Vector;
                 DRV.using_msi = TRUE;
                 DRV.msi_cap_offset = MSICapOffset;
-                Printk::Write(Printk::Level::LOG_DEBUG, " Enabled MSI on AHCI Controller %02X:%02X:%02X with vector 0x%02x\n",
-                    (unsigned)Bus, (unsigned)Device, (unsigned)Function, (unsigned)Vector);
             } else {
                 Printk::Write(Printk::Level::LOG_ERR, " Failed to enable MSI on AHCI Controller %02X:%02X:%02X\n",
                     (unsigned)Bus, (unsigned)Device, (unsigned)Function);
@@ -91,10 +91,6 @@ namespace AHCI {
         g_ahci_controller_count++;
 
         Arch::RestoreInterrupts(_ahci_rflags);
-
-        Printk::Write(Printk::Level::LOG_DEBUG, " Registered AHCI Controller at %02X:%02X:%02X, ABAR phys=%p virt=%p\n",
-            (unsigned)Bus, (unsigned)Device, (unsigned)Function,
-            (void*)(uintptr_t)ABAR_Phys, VirtAddr);
     }
 
     BOOL RerouteControllerInterrupt(U8 Index, U8 apicId){
@@ -213,7 +209,6 @@ namespace AHCI {
     }
 
     VOID InitializeAllControllers() {
-        Printk::Write(Printk::Level::LOG_NOTICE, " Initializing all AHCI controllers (%d found)\n", g_ahci_controller_count);
 
         for(int i = 0; i < g_ahci_controller_count; i++) {
             AHCIDriver &DRV = g_ahci_controllers[i];
@@ -223,9 +218,9 @@ namespace AHCI {
 
             U32 PortImplemented = DRV.regs->pi;
 
-            Printk::Write(Printk::Level::LOG_DEBUG, " Controller %d at %02X:%02X:%02X - Ports Implemented: 0x%08X\n",
+            /*Printk::Write(Printk::Level::LOG_DEBUG, " Controller %d at %02X:%02X:%02X - Ports Implemented: 0x%08X\n",
                 i, (unsigned)DRV.bus, (unsigned)DRV.dev, (unsigned)DRV.func,
-                (unsigned)PortImplemented);
+                (unsigned)PortImplemented);*/
 
             for(int portnum = 0; portnum < 32; portnum++) {
                 if(PortImplemented & (1 << portnum)) {
@@ -239,9 +234,9 @@ namespace AHCI {
                             }
                             SendIdentify(DRV, portnum);
 
-                            Printk::Write(Printk::Level::LOG_INFO, " Controller %d Port %d initialized as SATA drive\n", i, portnum);
+                            //Printk::Write(Printk::Level::LOG_INFO, " Controller %d Port %d initialized as SATA drive\n", i, portnum);
 
-                            IBlockDevice *NewDisk = new AHCIBlockDevice(DRV, (U8)portnum);
+                            IBlockDevice *NewDisk = new AHCIBlockDevice(&DRV, (U8)portnum);
 
                             if(DeviceManager::RegisterBlockDevice(NewDisk)){
                                 Printk::Write(Printk::Level::LOG_DEBUG, " AHCI: Registered block device for Controller %d Port %d\n", i, portnum);

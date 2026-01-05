@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ahci_regs.hpp"
+#include <spinlock/mutex.hpp>
 #include <mm.hpp>
 #include <task.hpp>
 
@@ -65,6 +66,7 @@ namespace AHCI {
     // Ini daftarnya
     extern AHCIDriver g_ahci_controllers[MAX_AHCI_CONTROLLERS];
     extern int g_ahci_controller_count;
+    extern Mutex DiskLock;
 
     // Fungsi inilah yang akan dipanggil oleh ScanBus
     VOID RegisterAHCIController(U8 Bus, U8 Device, U8 Function, U8 MSICapOffset);

@@ -2,6 +2,8 @@
 #include "ahci.hpp"
 #include "string.hpp"
 
+#define ATA_CMD_FLUSH_CACHE_EXT 0xEA
+
 namespace AHCI {
     // Globals shared across AHCI compilation units
     extern AHCIDriver g_ahci_controllers[MAX_AHCI_CONTROLLERS];
@@ -24,4 +26,5 @@ namespace AHCI {
     BOOL WriteSectors(AHCIDriver &Driver, VAL32 PortNum, U64 lba, U32 count,
                       PageAlloc::DMAAlloc::DMABuffer *buf);
     VOID TestReadLBA0();
+    BOOL FlushCache(AHCIDriver &Driver, VAL32 PortNum);
 }
