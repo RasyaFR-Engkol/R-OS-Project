@@ -12,48 +12,49 @@
 // - Reserves a contiguous range of virtual pages and maps them to the pool
 // - Uses a bitmap to sub-allocate contiguous runs of pages for callers
 // - Places mfence barriers around allocation/free for ordering
+namespace PageAlloc{
+    namespace DMAAlloc{
+        // Default pool size (pages). We'll try this and fall back smaller if needed.
+        constexpr SIZE_T DMA_POOL_PAGES_DEFAULT = 4096; // 16 MiB
+        // Upper cap for DMA pool (pages) to avoid starving system; default 256 MiB
+        constexpr SIZE_T DMA_POOL_PAGES_MAX = 65536; // 256 MiB
+        constexpr SIZE_T DMA_GUARD_PAGES_DEFAULT = 1; // add a guard page per allocation by default
+        constexpr U8 DMA_GUARD_PATTERN = 0xA5;
 
-namespace {
-    // Default pool size (pages). We'll try this and fall back smaller if needed.
-    constexpr SIZE_T DMA_POOL_PAGES_DEFAULT = 4096; // 16 MiB
-    // Upper cap for DMA pool (pages) to avoid starving system; default 256 MiB
-    constexpr SIZE_T DMA_POOL_PAGES_MAX = 65536; // 256 MiB
-    constexpr SIZE_T DMA_GUARD_PAGES_DEFAULT = 1; // add a guard page per allocation by default
-    constexpr U8 DMA_GUARD_PATTERN = 0xA5;
+        // Pool state
+        static UPTR   g_poolPhys = 0;
+        static UPTR   g_poolVirt = 0;
+        static SIZE_T g_poolPages = 0;
+        static U8*    g_bitmap = nullptr; // size = (g_poolPages + 7) / 8
 
-    // Pool state
-    static UPTR   g_poolPhys = 0;
-    static UPTR   g_poolVirt = 0;
-    static SIZE_T g_poolPages = 0;
-    static U8*    g_bitmap = nullptr; // size = (g_poolPages + 7) / 8
-
-    inline void mfence() {
-        asm volatile("mfence" ::: "memory");
-    }
-
-    inline void bmp_set(SIZE_T idx)   { g_bitmap[idx >> 3] |=  (U8)(1u << (idx & 7)); }
-    inline void bmp_clear(SIZE_T idx) { g_bitmap[idx >> 3] &= (U8)~(1u << (idx & 7)); }
-    inline bool bmp_test(SIZE_T idx)  { return (g_bitmap[idx >> 3] >> (idx & 7)) & 1u; }
-
-    static inline SIZE_T guard_bytes(const PageAlloc::DMAAlloc::DMABuffer* buf) {
-        return (buf && buf->GuardPages) ? buf->GuardPages * PAGE_SIZE : 0;
-    }
-
-    static inline void fill_guard_region(PageAlloc::DMAAlloc::DMABuffer* buf) {
-        SIZE_T bytes = guard_bytes(buf);
-        if (!bytes) return;
-        void* guardPtr = (void*)(uintptr_t)(buf->VirtAddr + buf->Pages * PAGE_SIZE);
-        String::Memset(guardPtr, DMA_GUARD_PATTERN, (unsigned long long)bytes);
-    }
-
-    static inline bool guard_region_intact(const PageAlloc::DMAAlloc::DMABuffer* buf) {
-        SIZE_T bytes = guard_bytes(buf);
-        if (!bytes) return true;
-        const U8* guardPtr = (const U8*)(uintptr_t)(buf->VirtAddr + buf->Pages * PAGE_SIZE);
-        for (SIZE_T i = 0; i < bytes; ++i) {
-            if (guardPtr[i] != DMA_GUARD_PATTERN) return false;
+        inline void mfence() {
+            asm volatile("mfence" ::: "memory");
         }
-        return true;
+
+        inline void bmp_set(SIZE_T idx)   { g_bitmap[idx >> 3] |=  (U8)(1u << (idx & 7)); }
+        inline void bmp_clear(SIZE_T idx) { g_bitmap[idx >> 3] &= (U8)~(1u << (idx & 7)); }
+        inline bool bmp_test(SIZE_T idx)  { return (g_bitmap[idx >> 3] >> (idx & 7)) & 1u; }
+
+        SIZE_T guard_bytes(const PageAlloc::DMAAlloc::DMABuffer* buf) {
+            return (buf && buf->GuardPages) ? buf->GuardPages * PAGE_SIZE : 0;
+        }
+
+        void fill_guard_region(PageAlloc::DMAAlloc::DMABuffer* buf) {
+            SIZE_T bytes = guard_bytes(buf);
+            if (!bytes) return;
+            void* guardPtr = (void*)(uintptr_t)(buf->VirtAddr + buf->Pages * PAGE_SIZE);
+            String::Memset(guardPtr, DMA_GUARD_PATTERN, (unsigned long long)bytes);
+        }
+
+        bool guard_region_intact(const PageAlloc::DMAAlloc::DMABuffer* buf) {
+            SIZE_T bytes = guard_bytes(buf);
+            if (!bytes) return true;
+            const U8* guardPtr = (const U8*)(uintptr_t)(buf->VirtAddr + buf->Pages * PAGE_SIZE);
+            for (SIZE_T i = 0; i < bytes; ++i) {
+                if (guardPtr[i] != DMA_GUARD_PATTERN) return false;
+            }
+            return true;
+        }
     }
 }
 

@@ -77,8 +77,10 @@ namespace PageAlloc{
     void PhysicalFreeLowPages(UPTR addr, SIZE_T count);
     void PhysicalReserveLow(UPTR addr, SIZE_T count);
 
+    UPTR GetPhysicalAddress(U64 *PML4Virt, UPTR VirtAddr);
     BOOL MapPages(U64 *PML4Virt, UPTR PhysAddr, UPTR VirtAddr, SIZE_T Count, U64 Flags);
     BOOL UnMapPages(U64 *PML4Virt, UPTR VirtAddr);
+    BOOL SetFlags(U64 *PML4Virt, UPTR VirtAddr, U64 Flags);
     // Safe user/kernel copy helpers. UserPML4 is the PML4 virtual pointer
     // for the user's address space (HHDM_PhysToVirt(cr3_phys)). These routines
     // validate that pages are present and user-accessible before copying.
@@ -86,14 +88,24 @@ namespace PageAlloc{
     BOOL CopyToUser(U64 *UserPML4, void* dstUser, const void* srcKernel, SIZE_T len);
     namespace DMAAlloc{
         struct DMABuffer{
+            public:
             UPTR PhysAddr;
             UPTR VirtAddr;
             SIZE_T Size;
+
+            private:
             SIZE_T Pages;
             SIZE_T GuardPages;
             SIZE_T TotalPages; // usable pages + guard pages (for pool bookkeeping)
             SIZE_T RequestedBytes; // original caller size (bytes) for diagnostics
             SIZE_T FirstIndex;
+
+            friend DMABuffer* AllocateDMAPages(SIZE_T);
+            friend DMABuffer *AllocateDMABytes(SIZE_T bytes);
+            friend void FreeDMABuffer(DMABuffer*);
+            friend SIZE_T guard_bytes(const DMABuffer* buf);
+            friend void fill_guard_region(DMABuffer* buf);
+            friend bool guard_region_intact(const DMABuffer* buf);
         };
         void InitializeDMA();
         DMABuffer *AllocateDMAPages(SIZE_T count);
@@ -107,6 +119,10 @@ namespace PageAlloc{
         // Debug/statistics helper for runtime inspection
         void GetStats(SIZE_T *poolPages, SIZE_T *freePages, SIZE_T *allocCalls,
                       SIZE_T *fallbacks, SIZE_T *failed, SIZE_T *freed);
+
+        SIZE_T guard_bytes(const PageAlloc::DMAAlloc::DMABuffer* buf);
+        void fill_guard_region(PageAlloc::DMAAlloc::DMABuffer* buf);
+        bool guard_region_intact(const PageAlloc::DMAAlloc::DMABuffer* buf);
     }
 
 }
