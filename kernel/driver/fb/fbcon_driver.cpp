@@ -13,7 +13,7 @@ ttyFB0::ttyFB0(){}
 
 ttyFB0::~ttyFB0(){}
 
-File* ttyFB0::Open(const char* path){
+File* ttyFB0::Open(const char* path, U32 Flags){
     File* f = new File();
     // Initialize fields explicitly (avoid memset that would clobber vptr)
     f->FileSize = 0;
@@ -65,3 +65,5 @@ void ttyFB0::Close(File* file){
     if(!file) return;
     delete file;
 }
+
+

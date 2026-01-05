@@ -14,8 +14,10 @@
 
 namespace FB {
     static Arch::Spinlock::Spinlock g_fb_lock;
+    static FlushCallback g_hw_flush_cb = nullptr;
     // Cached framebuffer state to avoid repeated BootInfo/HHDM lookups
     static struct {
+        U64 phys_base;
         U8 *fb_base;        // HHDM-mapped framebuffer base (frontbuffer)
         U8 *backbuffer;     // software backbuffer (linear, tightly packed)
         U32 back_pitch;     // bytes per scanline in backbuffer (width * bpp/8)
@@ -76,6 +78,7 @@ namespace FB {
         }
 
         // Cache state for fast access in PutPixel/Rect
+        state.phys_base = bi->framebuffer.address;
         state.fb_base = fb_virt;
         state.width = FBWidth;
         state.height = FBHeight;
@@ -136,9 +139,132 @@ namespace FB {
         Printk::Write(Printk::Level::LOG_INFO, "[GOPFB] Framebuffer initialized: %ux%u %u bpp at phys %p (HHDM virt %p)\n",
             (unsigned)FBWidth, (unsigned)FBHeight, (unsigned)FBBitsPerPixel,
             (void*)(UPTR)phys, fb_virt);
+
+        SIZE_T calculated_stride = FBWidth * ((FBBitsPerPixel + 7) / 8);
+        Printk::Write(Printk::Level::LOG_INFO, "Pitch: %u, Calculated Stride: %u\n", FBPitch, calculated_stride);
+
+        if (FBPitch == FBWidth * 4 && FBBitsPerPixel == 24) {
+            Printk::Write(Printk::Level::LOG_WARNING, "Aneh: Lapor 24BPP tapi Pitch setara 32BPP. Cek pixel format!\n");
+        }
     }
 
-    const Info* Get(){
+    VOID Reconfigure(ConsoleConfig *Config){
+        if(!Config) return;
+
+        // --- TAHAP 1: PERSIAPAN (Di luar Lock) ---
+        // Kita siapkan mapping dan backbuffer baru dulu biar gak nge-block sistem lama-lama.
+        
+        // A. Map VRAM Baru (Driver GPU ngasih Alamat Fisik, CPU butuh Virtual)
+        U8* new_fb_virt = nullptr;
+        SIZE_T fb_bytes = (SIZE_T)Config->Pitch * (SIZE_T)Config->Height;
+        SIZE_T pages = (fb_bytes + PAGE_SIZE - 1) / PAGE_SIZE;
+
+        // Coba alokasi virtual address range baru
+        void* virt = PageAlloc::VirtualAllocPages(pages);
+        if (virt) {
+            // Map Physical VRAM ke Virtual baru.
+            // PENTING: Gunakan PAGE_PCD (Cache Disable) atau Write-Combining kalau ada,
+            // karena ini VRAM GPU. Kalau di-cache CPU, gambar gak bakal muncul real-time.
+            if (PageAlloc::MapPages(KernelPML4, Config->FrameBufferAddr, (UPTR)virt, pages, PAGE_PRESENT | PAGE_RW)) {
+                 new_fb_virt = (U8*)virt;
+            } else {
+                 PageAlloc::VirtualFreePages(virt, pages);
+            }
+        }
+
+        // Fallback: Kalau gagal alloc virtual, pake HHDM (Direct Map)
+        if (!new_fb_virt) {
+             new_fb_virt = (U8*)HHDM_PhysToVirt(Config->FrameBufferAddr);
+             Printk::Write(Printk::Level::LOG_WARNING, "[FB] Reconfigure: Fallback to HHDM mapping\n");
+        }
+
+        // B. Buat Backbuffer Baru (Sesuai resolusi baru)
+        U8* new_backbuffer = nullptr;
+        
+        // Alloc Backbuffer Virtual
+        void* vback = PageAlloc::VirtualAllocPages(pages);
+        if (vback) {
+            // Alloc Backbuffer Physical (RAM biasa, jadi boleh di-cache -> Hapus PAGE_PCD)
+            UPTR pback = PageAlloc::PhysicalAllocPages(pages);
+            if (pback) {
+                if (PageAlloc::MapPages(KernelPML4, pback, (UPTR)vback, pages, PAGE_PRESENT | PAGE_RW)) {
+                     new_backbuffer = (U8*)vback;
+                     // Bersihkan backbuffer baru jadi hitam biar gak sampah
+                     String::Memset(new_backbuffer, 0, fb_bytes);
+                } else {
+                     PageAlloc::PhysicalFreePages(pback, pages);
+                     PageAlloc::VirtualFreePages(vback, pages);
+                }
+            } else {
+                 PageAlloc::VirtualFreePages(vback, pages);
+            }
+        }
+
+        if(!new_backbuffer) {
+             Printk::Write(Printk::Level::LOG_WARNING, "[FB] Failed to allocate new backbuffer, direct drawing enabled.\n");
+        }
+
+        // --- TAHAP 2: EKSEKUSI (CRITICAL SECTION) ---
+        // Sekarang kita matikan interupsi (lewat spinlock) dan tukar pointer.
+        {
+            Arch::Spinlock::SpinlockGuard Guard(g_fb_lock);
+
+            // [TODO]: Disini idealnya kita Free old_backbuffer & old_fb_virt kalau bukan HHDM.
+            // Tapi karena kernel allocator kamu mungkin belum punya `IsHHDM()` check, 
+            // kita leak dulu yang lama (GOP framebuffer biasanya kecil, gak fatal).
+            // U8* old_backbuffer = state.backbuffer;
+            
+            // 1. Update State Internal (yang dipake PutPixel)
+            state.fb_base = new_fb_virt;
+            state.backbuffer = new_backbuffer;
+            state.width = Config->Width;
+            state.height = Config->Height;
+            state.pitch = Config->Pitch;
+            state.bpp = Config->Bpp;
+            state.bytes_per_pixel = (Config->Bpp + 7) / 8;
+            state.back_pitch = state.pitch; // Samakan pitch backbuffer
+            state.phys_base = Config->FrameBufferAddr;
+
+            // 2. Update Info Public (yang dipake Compositor/User)
+            g_fb_info.base = (volatile U8*)state.fb_base;
+            g_fb_info.width = state.width;
+            g_fb_info.height = state.height;
+            g_fb_info.pitch = state.pitch;
+            g_fb_info.bpp = state.bpp;
+            
+            // Info warna (RGB) biasanya standar, tapi kalau GPU aneh bisa diupdate disini
+            state.initialized = TRUE;
+
+            g_hw_flush_cb = Config->OnFlush;
+        }
+
+        // Karena masih state FBCon, kita harus bersihin layar dulu sebelum tampilin
+        // write string
+        FB::Rect(0, 0, state.width, state.height, 0xFF000000);
+        FB::Flush(0, 0, state.width, state.height);
+
+        FBConsole::FBConCursorPosition CurPos = FBConsole::GetCursorPosition();
+        CurPos.CursorCol = 0;
+        CurPos.CursorRow = 0;
+        FBConsole::SetCursorPosition(CurPos);
+
+        Printk::Write(Printk::Level::LOG_INFO, "[FB] Reconfigured to %ux%u (Phys: %p, Virt: %p)\n",
+            Config->Width, Config->Height, (void*)Config->FrameBufferAddr, new_fb_virt);
+    }
+
+    U64 GetPhysAddr() {
+        // Kalau mau super strict, pake lock, tapi untuk baca U64 usually atomic enough
+        return state.phys_base;
+    }
+
+    // Perbaiki FBGetState (kembalikan Value copy, bukan pointer null)
+    FB::Info GetStateCopy() {
+        Arch::Spinlock::SpinlockGuard Guard(g_fb_lock);
+        return g_fb_info; // Return by value (copy struct)
+    }
+    
+    // Atau kalau cuma butuh pointer ke static info yang udah ada:
+    const Info* Get() {
         return &g_fb_info;
     }
 
@@ -226,11 +352,24 @@ namespace FB {
             U8* dst = state.fb_base + (U64)(y + row) * state.pitch + (U64)x * state.bytes_per_pixel;
             String::Memcpy(dst, src, bytes);
         }
+
+        if (g_hw_flush_cb) {
+            g_hw_flush_cb(x, y, w, h);
+        }
     }
 
     void Flush(U32 x, U32 y, U32 w, U32 h) {
         Arch::Spinlock::SpinlockGuard FlushGuard(g_fb_lock);
         Flush_NoLock(x, y, w, h);
+    }
+
+    void FlushHW(U32 x, U32 y, U32 w, U32 h) {
+        if (!state.initialized) return;
+        
+        // Langsung panggil callback hardware (Virtio Transfer)
+        if (g_hw_flush_cb) {
+            g_hw_flush_cb(x, y, w, h);
+        }
     }
 
     // Copy region within surface (backbuffer if present, else frontbuffer), overlap-safe
@@ -274,6 +413,10 @@ namespace FB {
             }
         }
 
-        // If using backbuffer, caller should Flush the destination region as needed.
+        Flush(dst_x, dst_y, w, h);
+    }
+
+    VOID Clear(U32 AARRGGBB){
+        Rect(0, 0, state.width, state.height, AARRGGBB);
     }
 }

@@ -10,7 +10,7 @@ class ttyFB0 : public FileSystem{
         ttyFB0();
         virtual ~ttyFB0();
 
-        virtual File *Open(const char* path) override;
+        virtual File *Open(const char* path, U32 Flags) override;
         virtual U32 Read(File* file, U8* buffer, U32 size) override; 
         virtual U32 Write(File *File, U8 *Buffer, U32 Size) override;
         virtual void Close(File* file) override;
