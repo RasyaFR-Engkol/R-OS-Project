@@ -3,6 +3,7 @@
 #include <string.hpp>
 #include "../../../Include/serial.hpp"
 #include "../../dev/devicemanager.hpp"
+#include "../../dev/circularbuffer.hpp"
 
 // ICharDevice wrapper for the COM1 serial port (ttyS0)
 class SerialCharDevice : public ICharDevice {
@@ -16,7 +17,8 @@ public:
 
     virtual ~SerialCharDevice(){}
 
-    virtual U32 Read(U8* buffer, U32 size) override {
+    virtual U32 Read(File *file, U8* buffer, U32 size) override {
+        (void)file;
         if(!buffer || size == 0) return 0;
         U32 count = 0;
         char ch;
@@ -29,8 +31,9 @@ public:
         return count;
     }
 
-    virtual U32 Write(U8* buffer, U32 size) override {
+    virtual U32 Write(File *file, U8* buffer, U32 size) override {
         if(!buffer || size == 0) return 0;
+        (void) file;
         // Write each byte to serial port
         for(U32 i=0;i<size;i++) {
             Serial::SerialPutC((char)buffer[i]);
@@ -46,8 +49,28 @@ public:
         (void)file; (void)command; (void)arg; return -ROS_UNSUPPORTED;
     }
 
+    virtual short Poll(File *file, short events) override {
+        short revents = 0;
+
+        if(events & POLLIN){
+            if(!rxBuffer.IsEmpty()){
+                revents |= POLLIN;
+            }
+        }
+
+        if (events & POLLOUT) {
+            // Cek register hardware: Transmitter Holding Register Empty?
+            if (Port::Inb(0x3FD) & 0x20) { 
+                revents |= POLLOUT;
+            }
+        }
+
+        return revents;
+    }
+
 private:
     CHAR8 m_Name[64];
+    CircularBuffer<128> rxBuffer;
 };
 
 namespace SerialDriver {
