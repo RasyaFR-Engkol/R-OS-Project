@@ -13,3 +13,7 @@ VOID Sys_GetCWD(CpuContext_T *CPUContext);
 VOID Sys_Pipe(CpuContext_T *CPUContext);
 VOID Sys_Ioctl(CpuContext_T *CPUContext);
 VOID Sys_Sync(CpuContext_T *CPUContext);
+VOID Sys_Seek(CpuContext_T *CPUContext);
+VOID Sys_Stat(CpuContext_T *CPUContext);
+VOID Sys_Fstat(CpuContext_T *CPUContext);
+VOID Sys_Lstat(CpuContext_T *CPUContext);
