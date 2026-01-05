@@ -12,6 +12,7 @@ namespace DeviceManager{
 
     ICharDevice *g_CharDevices[MAX_CHAR_DEVICE];
     U32 g_CharDeviceCount = 0;
+    DevOBJManaager ObjectManager;
 
     BOOL RegisterBlockDevice(IBlockDevice *Device){
         if(g_BlockDeviceCount >= MAX_BLOCK_DEVICE){
@@ -20,13 +21,6 @@ namespace DeviceManager{
         }
         g_BlockDevices[g_BlockDeviceCount] = Device;
         g_BlockDeviceCount++;
-        Printk::Write(Printk::Level::LOG_INFO, " DeviceManager: Registered block device='%s'.\n", Device->GetDeviceName());
-        // Extra debug: print addresses to detect duplicate/ODR issues or memory corruption
-        Printk::Write(Printk::Level::LOG_DEBUG, " DeviceManager: Debug addr g_BlockDeviceCount=%p g_BlockDevices=%p device=%p\n",
-            (void*)&g_BlockDeviceCount,
-            (void*)g_BlockDevices,
-            (void*)Device
-        );
 
         return TRUE;
     }
@@ -38,17 +32,10 @@ namespace DeviceManager{
         }
         g_CharDevices[g_CharDeviceCount] = Device;
         g_CharDeviceCount++;
-        Printk::Write(Printk::Level::LOG_INFO, " DeviceManager: Registered char device '%s'.\n", Device->GetDeviceName());
         return TRUE;
     }
 
     U32 GetBlockDeviceCount(){
-        Printk::Write(Printk::Level::LOG_DEBUG, " DeviceManager: Current block device count: %u\n", g_BlockDeviceCount);
-        // Extra debug: print addresses to correlate with register-time addresses
-        Printk::Write(Printk::Level::LOG_DEBUG, " DeviceManager: Debug addr (query) g_BlockDeviceCount=%p g_BlockDevices=%p\n",
-            (void*)&g_BlockDeviceCount,
-            (void*)g_BlockDevices
-        );
         return g_BlockDeviceCount;
     }   
 
@@ -96,4 +83,9 @@ namespace DeviceManager{
         }
         return nullptr;
     }
+}
+
+// buat namespace baru khusus untuk Device Object Manager
+namespace DeviceManager{
+    
 }
