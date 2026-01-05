@@ -19,9 +19,6 @@ namespace Arch {
 
         U32 TickHz() {
             if (LapicTimingActive()) {
-                Printk::Write(Printk::Level::LOG_DEBUG,
-                    " Arch::Time::TickHz: using LAPIC timing at %u Hz\n",
-                    (unsigned)ACPI::Timer::LapicHz);
                 return ACPI::Timer::LapicHz;
             }
             U16 reload = PIT::PITReload;
@@ -31,26 +28,15 @@ namespace Arch {
         }
 
         void SleepTicks(U64 ticks) {
-            Printk::Write(Printk::Level::LOG_DEBUG,
-                " Arch::Time::SleepTicks: sleeping for %llu ticks\n", 
-                (unsigned long long)ticks);
             U64 target = NowTicks() + ticks;
             if (Arch::AreInterruptsEnabled()) {
                 while (NowTicks() < target) asm volatile ("hlt");
             } else {
                 while (NowTicks() < target) Arch::CPURelax();
             }
-
-            Printk::Write(Printk::Level::LOG_DEBUG,
-                " Arch::Time::SleepTicks: woke up at %llu ticks (target was %llu)\n",
-                (unsigned long long)NowTicks(),
-                (unsigned long long)target);
         }
 
         void SleepMs(U64 ms) {
-            Printk::Write(Printk::Level::LOG_DEBUG,
-                " Arch::Time::SleepMs: sleeping for %llu ms\n",
-                (unsigned long long)ms);
             U32 hz = TickHz();
             if (hz == 0) hz = 100;
             U64 ticks = (ms * (U64)hz + 999) / 1000ULL; // ceil

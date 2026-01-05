@@ -1,5 +1,6 @@
 #pragma once
 
+#include "rossys.hpp"
 #include "rosval.h"
 typedef volatile int SPINLOCK_T;
 
@@ -11,17 +12,22 @@ namespace Arch{
         class Spinlock {
         private:
             SPINLOCK_T _v;
+            LOCKRFLAGS _flags;
 
         public:
-            constexpr Spinlock() : _v(0) {}
+            constexpr Spinlock() : _v(0), _flags(0) {}
 
             // initialize to unlocked
             inline void Init() { _v = 0; }
 
             // acquire the lock (busy-wait)
             inline void Acquire() {
-                VAL32 One = 1;
-                VAL32 OldVal;
+                _flags = SaveAndDisableInterrupts();
+
+                I32 One = 1;
+                I32 OldVal;
+
+                // 2. Coba rebut lock sekali
                 __asm__ volatile(
                     "xchgl %0, %1"
                     : "=r"(OldVal), "+m"(_v)
@@ -29,27 +35,33 @@ namespace Arch{
                     : "memory"
                 );
 
+                // 3. Kalau gagal, muter (spin)
                 while (OldVal != 0) {
-                    // spin until we get the lock
                     __asm__ volatile("pause");
-                    __asm__ volatile(
-                        "xchgl %0, %1"
-                        : "=r"(OldVal), "+m"(_v)
-                        : "0"(One)
-                        : "memory"
-                    );
+                    
+                    // Cek nilai dulu biar gak spam write (Test-and-Test-and-Set optim)
+                    if (_v == 0) {
+                         __asm__ volatile(
+                            "xchgl %0, %1"
+                            : "=r"(OldVal), "+m"(_v)
+                            : "0"(One)
+                            : "memory"
+                        );
+                    }
                 }
             }
 
             // release the lock
             inline void Release() {
-                VAL32 Zero = 0;
+                I32 Zero = 0;
                 __asm__ volatile(
                     "xchgl %0, %1"
                     : "=r"(Zero), "+m"(_v)
                     : "0"(Zero)
                     : "memory"
                 );
+
+                Arch::RestoreInterrupts(_flags);
             }
 
             // Access raw pointer if caller needs C-style API interop
