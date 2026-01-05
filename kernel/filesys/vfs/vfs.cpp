@@ -8,6 +8,68 @@
 #define MAX_FS_DRIVERS 10
 #define MAX_MOUNT_POINTS 20
 
+VOID CanonicalizePath(const char* cwd, const char* input, char* output) {
+    char temp[256];
+    
+    // 1. Handle Absolute vs Relative
+    if (input[0] == '/') {
+        // Absolute path
+        String::Strcpy(temp, input);
+    } else {
+        // Relative path: Gabung CWD + Input
+        String::Strcpy(temp, cwd);
+        int len = String::Strlen(temp);
+        if (len > 0 && temp[len-1] != '/') String::Strcat(temp, "/");
+        String::Strcat(temp, input);
+    }
+
+    // 2. Tokenize dan Rebuild
+    // Kita pakai stack sederhana untuk handle ".."
+    char* tokens[32]; // Max depth 32
+    int top = 0;
+    
+    char work_buf[256];
+    String::Strcpy(work_buf, temp);
+
+    UNUSED__ char* context = nullptr;
+    // Asumsi lu punya String::Strtok atau sejenisnya. 
+    // Kalau pakai Tokenize lu yg di userland tadi, sesuaikan logicnya.
+    // Disini saya pakai logic manual parsing "/" biar aman.
+    
+    int len = String::Strlen(work_buf);
+    char* start = work_buf;
+    
+    for (int i = 0; i <= len; i++) {
+        if (work_buf[i] == '/' || work_buf[i] == '\0') {
+            work_buf[i] = '\0';
+            if (String::Strlen(start) > 0) {
+                if (String::Strcmp(start, ".") == 0) {
+                    // Ignore "."
+                } else if (String::Strcmp(start, "..") == 0) {
+                    // Pop stack
+                    if (top > 0) top--;
+                } else {
+                    // Push stack
+                    tokens[top++] = start;
+                }
+            }
+            start = &work_buf[i+1];
+        }
+    }
+
+    // 3. Reconstruct Output
+    if (top == 0) {
+        String::Strcpy(output, "/");
+        return;
+    }
+
+    output[0] = '\0';
+    for (int i = 0; i < top; i++) {
+        String::Strcat(output, "/");
+        String::Strcat(output, tokens[i]);
+    }
+}
+
 namespace VFSManager{
     struct FSDriver{
         char name[32];
@@ -102,50 +164,38 @@ namespace VFSManager{
     // Not implemented auto-mount variant; stub returning FALSE for now
     BOOL Mount(Partition *Part){ (void)Part; return FALSE; }
 
-    BOOL ResolvePath(const char *path, FileSystem** outFS, char *OutRelativePath){
-        if(outFS) {
-            *outFS = nullptr;
-        }
-        if(OutRelativePath) {
-            OutRelativePath[0] = '\0';
-        }
+    BOOL FindMountPoint(const char *path, FileSystem** outFS, char *OutRelativePath){
+        if(outFS) *outFS = nullptr;
+        if(OutRelativePath) OutRelativePath[0] = '\0';
         
-        // Validasi dasar
+        // 1. Validasi & Pre-Check (Asumsi Path sudah Canonical / bersih dari '..')
         if(!path || path[0] != '/') return FALSE;
 
-        // Longest-prefix match logic
         int bestIdx = -1; 
         unsigned long long bestLen = 0;
 
+        // 2. Find Mount Point (Longest Prefix Match)
         for(U32 i = 0; i < g_MountPointCount; i++){
             const char* mp = g_MountPoints[i].path;
             unsigned long long mpl = String::Strlen(mp);
             
-            // Kita cari match yang paling panjang
-            // (Tapi logic match-nya harus bener dulu)
-            
-            // Cek apakah mount point ini adalah prefix dari path user
+            // Optimasi: Kalau path user lebih pendek dari mount point, gak mungkin match
+            // (Kecuali mount pointnya root)
+            if (mpl > 1 && String::Strlen(path) < mpl) continue;
+
             if(String::Strncmp(path, mp, mpl) == 0) {
-                
                 BOOL isMatch = FALSE;
 
-                // KASUS 1: Mount Point adalah ROOT ("/")
-                // Root selalu match dengan apapun yang diawali "/"
+                // Logic Boundary Check lo udah bener banget disini
                 if (mpl == 1 && mp[0] == '/') {
-                    isMatch = TRUE;
+                    isMatch = TRUE; 
                 }
-                // KASUS 2: Mount Point Normal (misal "/mnt/data")
-                // Harus diikuti End-of-String ATAU Separator "/"
-                // Contoh: "/mnt/data" cocok dengan "/mnt/data" atau "/mnt/data/file"
-                // TIDAK cocok dengan "/mnt/database"
                 else if (path[mpl] == '\0' || path[mpl] == '/') {
                     isMatch = TRUE;
                 }
 
                 if (isMatch) {
-                    // Kalau ini match lebih panjang (lebih spesifik) dari sebelumnya, ambil ini.
-                    // (Mencegah Root "/" ngambil jatah "/mnt/data")
-                    if (mpl > bestLen || bestIdx == -1) { // Tambah bestIdx == -1 buat inisial
+                    if (mpl > bestLen || bestIdx == -1) {
                         bestIdx = (int)i;
                         bestLen = mpl;
                     }
@@ -155,56 +205,116 @@ namespace VFSManager{
 
         if(bestIdx < 0) return FALSE;
 
+        // 3. Output Assignment
         if(outFS) *outFS = g_MountPoints[bestIdx].fs;
 
         if(OutRelativePath){
             const char* rest = path + bestLen;
             
-            // Kalau sisa path diawali '/', skip dulu biar gak double slash
-            // KECUALI kalau bestLen == 1 (Root), rest-nya bakal "init.elf" (tanpa slash depan)
-            if(rest[0] == '/') rest++; 
+            // Logic path stripping
+            // Kalau bestLen = 1 (Root "/"), path "/bin" -> rest "bin".
+            // Kalau bestLen > 1 ("/mnt"), path "/mnt/bin" -> rest "/bin".
             
-            String::Strncpy(OutRelativePath, rest, 255);
+            // Kita mau hasil akhirnya selalu diawali '/'
+            // Contoh target: "/bin"
+            
+            OutRelativePath[0] = '/';
+            int writeOffset = 1;
+            
+            // Kalau rest diawali '/', skip biar gak jadi "//bin"
+            if(rest[0] == '/') rest++;
+            
+            // Copy sisa string
+            String::Strncpy(OutRelativePath + writeOffset, rest, 255 - writeOffset);
+            
+            // Safety Termination
             OutRelativePath[255] = '\0';
-
-            // Pastikan Relative Path selalu diawali '/' sesuai standar driver lo
-            // Kalau path kosong (user buka root mountpoint), jadi "/"
-            if(OutRelativePath[0] == '\0') {
-                OutRelativePath[0] = '/';
-                OutRelativePath[1] = '\0';
-            }
-            else if(OutRelativePath[0] != '/'){
-                // Shift kanan buat nambahin slash di depan
-                unsigned long long cur = String::Strlen(OutRelativePath);
-                if(cur + 1 < 256){
-                    for(long long i = (long long)cur; i >= 0; --i){ 
-                        OutRelativePath[i+1] = OutRelativePath[i];
-                    }
-                    OutRelativePath[0] = '/';
-                }
-            }
         }
+        
         return TRUE;
     }
 
-    File* Open(const char* path){
+    BOOL ResolvePath(const char *path, FileSystem **outFS, char *OutRelativePath, BOOL FollowLastSymlink){
+        ANSI_STRING CurrentPath[256];
+        ANSI_STRING LinkTarget[256];
+        ANSI_STRING TempPath[256];
+
+        CanonicalizePath("/", path, CurrentPath);
+        INTN LoopCount = 0;
+
+        while(LoopCount < MAX_SYMLINK_DEPTH){
+            FileSystem* fs = nullptr;
+            char rel[256];
+            if (!FindMountPoint(CurrentPath, &fs, rel)) {
+                return FALSE; // Gak ketemu mount point
+            }
+
+            FileInfo Info;
+
+            if (!fs->Stat(rel, &Info)) {
+                if(outFS) *outFS = fs;
+                if(OutRelativePath) String::Strncpy(OutRelativePath, rel, 255);
+                return TRUE; 
+            }
+
+            if (Info.Type == FT_SYMLINK) {
+                
+                // LOGIC UTAMA LSTAT VS STAT DISINI
+                // Kalau ini link, dan user minta JANGAN di-follow (lstat), stop disini.
+                if (!FollowLastSymlink) {
+                    if(outFS) *outFS = fs;
+                    if(OutRelativePath) String::Strncpy(OutRelativePath, rel, 255);
+                    return TRUE;
+                }
+
+                // Kalau user minta follow (stat/open), kita BACA isinya.
+                // Driver harus implement ReadLink!
+                I64 len = fs->ReadLink(rel, LinkTarget, 255);
+                if (len < 0) return FALSE; // Error baca link
+                LinkTarget[len] = '\0';
+
+                // D. Rakit Path Baru
+                if (LinkTarget[0] == '/') {
+                    // Symlink Absolute: "/var" -> "/mnt/data/var"
+                    // Kita ganti total current_path jadi target
+                    String::Strncpy(CurrentPath, LinkTarget, 255);
+                } else {
+                    // Symlink Relative: "log" -> "../tmp/log"
+                    // Ini agak tricky, kita harus gabungin (DirName current) + (Target)
+                    // Implementasi simple:
+                    // 1. Cari slash terakhir di current_path
+                    CHAR8* last_slash = (CHAR8*)String::Strrchr(CurrentPath, '/');
+                    if (last_slash) {
+                        *(last_slash + 1) = '\0'; // Potong nama file lama
+                    } else {
+                        CurrentPath[0] = '/'; CurrentPath[1] = '\0';
+                    }
+                    
+                    // 2. Gabungin
+                    //String::Snprintf(TempPath, 255, "%s%s", CurrentPath, LinkTarget);
+                    
+                    // 3. Canonicalize lagi (biar ".." di tengah ilang)
+                    CanonicalizePath("/", TempPath, CurrentPath);
+                }
+
+                LoopCount++;
+                continue; // ULANGI LOOP DENGAN PATH BARU
+            }
+
+            if(outFS) *outFS = fs;
+            if(OutRelativePath) String::Strncpy(OutRelativePath, rel, 255);
+            return TRUE;
+        }
+        return FALSE; // ga ketemu apa apa kan?
+    }
+
+    File* Open(const char* path, U32 Flags){
         FileSystem* fs = nullptr; char rel[256];
         if(!ResolvePath(path, &fs, rel)) {
             Printk::Write(Printk::Level::LOG_ERR, "VFS: Open - ResolvePath failed for '%s'\n", path);
             return nullptr;
         }
-        Printk::Write(Printk::Level::LOG_DEBUG, "VFS: Open - path='%s' rel='%s' fs=%p\n", path, rel, (void*)fs);
-        return fs->Open(rel);
-    }
-
-    File* Create(const char *Path){
-        FileSystem* fs = nullptr; char rel[256];
-        if(!ResolvePath(Path, &fs, rel)){
-            Printk::Write(Printk::Level::LOG_DEBUG, "VFS: Create - ResolvePath failed for '%s'\n", Path);
-            return nullptr;
-        }
-        Printk::Write(Printk::Level::LOG_DEBUG, "VFS: Create - path='%s' rel='%s' fs=%p\n", Path, rel, (void*)fs);
-        return fs->Create(rel);
+        return fs->Open(rel, Flags);
     }
 
     // Ensure parent directories exist inside the filesystem for the given relative path.
@@ -243,7 +353,7 @@ namespace VFSManager{
             pos += compLen; accum[pos] = '\0';
 
             // Check if exists by trying to open
-            File* f = fs->Open(accum);
+            File* f = fs->Open(accum, O_RDWR);
             if(f){
                 // exists; ensure it's a directory
                 if(!f->IsDirectory){ fs->Close(f); return FALSE; }
@@ -252,7 +362,7 @@ namespace VFSManager{
                 // try to create directory
                 if(!fs->MKDir(accum)){
                     // If MKDir failed, maybe it now exists (race) -> try Open again
-                    File* f2 = fs->Open(accum);
+                    File* f2 = fs->Open(accum, O_RDWR);
                     if(!f2) return FALSE;
                     if(!f2->IsDirectory){ fs->Close(f2); return FALSE; }
                     fs->Close(f2);
@@ -275,15 +385,17 @@ namespace VFSManager{
             Printk::Write(Printk::Level::LOG_WARNING, "VFS: CreateWithParents - failed to ensure parents for '%s'\n", rel);
             return nullptr;
         }
-        return fs->Create(rel);
+        return fs->Open(rel, O_RDWR | O_CREAT);
     }
 
     void Close(File* file){
         if(!file) return;
-        if(!file->FSOwner) {
-            return;
+        if(file->FSOwner) {
+            file->FSOwner->Close(file);
+        } else {
+            // No filesystem owner: free the File object directly.
+            delete file;
         }
-        file->FSOwner->Close(file);
     }
 
     U32 Read(File* file, U8* buffer, U32 size){ if(!file || !file->FSOwner) return 0; return file->FSOwner->Read(file, buffer, size); }
@@ -302,14 +414,10 @@ namespace VFSManager{
         FileSystem* fs = nullptr; char rel[256];
         if(!ResolvePath(path, &fs, rel)) return 0;
         // Try to open existing; if not exists, create
-        File* f = fs->Open(rel);
-        if(!f){
-            f = fs->Create(rel);
-            if(!f) return 0;
-        }
+        File* f = fs->Open(rel, O_RDWR | O_APPEND | O_CREAT);
         if(f->IsDirectory){ fs->Close(f); return 0; }
         // Seek to end
-        (void)Seek(f, f->FileSize);
+        (void)Seek(f, f->FileSize, SEEK_END);
         U32 written = fs->Write(f, Buffer, Size);
         fs->Close(f);
         return written;
@@ -333,10 +441,10 @@ namespace VFSManager{
         return fsOld->Rename(relOld, relNew);
     }
 
-    BOOL Seek(File* file, U64 position){
+    BOOL Seek(File* file, U64 position, U32 origin){
         if(!file || !file->FSOwner) return FALSE;
         // Delegate to filesystem so it can update cluster cursor/state correctly
-        return file->FSOwner->Seek(file, position);
+        return file->FSOwner->Seek(file, position, origin);
     }
 
     BOOL Truncate(File* file, U64 size){

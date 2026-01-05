@@ -34,12 +34,12 @@ RootFS::RootFS(){
 VOID RootFS::SetBackingFileSystem(FileSystem *fs){
     this->m_BackendFS = fs;
     if(fs){
-        this->m_BackendRootHandle = fs->Open("/");
+        this->m_BackendRootHandle = fs->Open("/", O_RDWR);
         Printk::Write(Printk::Level::LOG_INFO, "RootFS: Set backing filesystem successfully.\n");
     }
 }
 
-File *RootFS::Open(const char* path){
+File *RootFS::Open(const char* path, U32 Flags){
     // [FIX] Handle variasi input path: kosong ("") atau slash ("/")
     // Dua-duanya harus dianggap sebagai request buka ROOT directory virtual
     if(path[0] == '\0' || (path[0] == '/' && path[1] == '\0')){
@@ -55,6 +55,7 @@ File *RootFS::Open(const char* path){
         // [PENTING] Ownernya harus THIS (RootFS), biar ReadDir manggil RootFS::ReadDir
         froot->FSOwner = this; 
         froot->RefCount = 1;
+        froot->type = FT_DIR;
         
         // Printk::Write(Printk::Level::LOG_DEBUG, "RootFS: Opened Virtual Root Handle\n");
         return froot;
@@ -63,7 +64,7 @@ File *RootFS::Open(const char* path){
     // Kalau bukan root (misal /etc/config), baru oper ke EXT2
     if(m_BackendFS){
         // Printk::Write(Printk::Level::LOG_DEBUG, "RootFS: Forwarding '%s' to Backend\n", path);
-        return m_BackendFS->Open(path);
+        return m_BackendFS->Open(path, Flags);
     }
 
     return nullptr; 
