@@ -86,7 +86,7 @@ namespace AHCI {
         U8 DET = (U8)(SSTS & 0x0F);
 
         if(DET != 0x03) {
-            Printk::Write(Printk::Level::LOG_DEBUG, " Port %d: No device detected (DET=%u)\n", (unsigned)PortNum, (unsigned)DET);
+            //Printk::Write(Printk::Level::LOG_DEBUG, " Port %d: No device detected (DET=%u)\n", (unsigned)PortNum, (unsigned)DET);
             return DeviceType::NONE;
         }
 
@@ -94,19 +94,19 @@ namespace AHCI {
 
         switch(Sign){
             case 0x00000101:
-                Printk::Write(Printk::Level::LOG_INFO, " Port %d: SATA device detected\n", (unsigned)PortNum);
+                //Printk::Write(Printk::Level::LOG_INFO, " Port %d: SATA device detected\n", (unsigned)PortNum);
                 return DeviceType::SATA;
             case 0xEB140101:
-                Printk::Write(Printk::Level::LOG_INFO, " Port %d: SEMB device detected\n", (unsigned)PortNum);
+                //Printk::Write(Printk::Level::LOG_INFO, " Port %d: SEMB device detected\n", (unsigned)PortNum);
                 return DeviceType::SEMB;
             case 0x96690101:
-                Printk::Write(Printk::Level::LOG_INFO, " Port %d: Port Multiplier device detected\n", (unsigned)PortNum);
+                //Printk::Write(Printk::Level::LOG_INFO, " Port %d: Port Multiplier device detected\n", (unsigned)PortNum);
                 return DeviceType::PM;
             case 0x00000002:
-                Printk::Write(Printk::Level::LOG_INFO, " Port %d: SATAPI device detected\n", (unsigned)PortNum);
+                //Printk::Write(Printk::Level::LOG_INFO, " Port %d: SATAPI device detected\n", (unsigned)PortNum);
                 return DeviceType::SATAPI;
             default:
-                Printk::Write(Printk::Level::LOG_INFO, " Port %d: Unknown device signature: 0x%08X\n", (unsigned)PortNum, (unsigned)Sign);
+                //Printk::Write(Printk::Level::LOG_INFO, " Port %d: Unknown device signature: 0x%08X\n", (unsigned)PortNum, (unsigned)Sign);
                 return DeviceType::NONE;
         }
     }
