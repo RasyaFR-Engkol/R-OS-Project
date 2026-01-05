@@ -18,15 +18,14 @@
 extern "C" VOID Context_Restore(VOID *Context);
 
 // Helper to open file via VFS
-static File* VFS_Open(const char* Path) {
+static File* VFS_Open(const char* Path, U32 flags) {
     FileSystem* FS = nullptr;
     char RelativePath[256];
     if (!VFSManager::ResolvePath(Path, &FS, RelativePath)) {
         Printk::Write(Printk::Level::LOG_DEBUG, "VFS_Open - Failed to resolve path %s\n", Path);
         return nullptr;
     }
-    Printk::Write(Printk::Level::LOG_DEBUG, "VFS_Open - Resolved path %s to relative %s\n", Path, RelativePath);
-    return FS->Open(RelativePath);
+    return FS->Open(RelativePath, flags);
 }
 
 VOID Sys_Exit(CpuContext_T *CPUContext) {
@@ -114,6 +113,25 @@ VOID Sys_Fork(CpuContext_T *CPUContext) {
     U64 ChildContextAddr = ChildStackTop - sizeof(CpuContext_T);
     
     String::Memcpy((void*)ChildContextAddr, CPUContext, sizeof(CpuContext_T));
+
+    Child->VMHead = nullptr;
+    Tasking::VMArea *Node = Current->VMHead;
+    while(Node){
+        Tasking::VMArea* NewNode = new Tasking::VMArea();
+        *NewNode = *Node; // Copy isi datanya (Start, End, Flags)
+        NewNode->Next = nullptr; // Putus rantai copy-an
+        
+        // Masukkan ke list Child
+        if (!Child->VMHead) {
+            Child->VMHead = NewNode;
+        } else {
+            Tasking::VMArea* Temp = Child->VMHead;
+            while(Temp->Next) Temp = Temp->Next;
+            Temp->Next = NewNode;
+        }
+        
+        Node = Node->Next;
+    }
     
     // Set Child's RSP to point to this context
     Child->RSP = ChildContextAddr;
@@ -123,9 +141,17 @@ VOID Sys_Fork(CpuContext_T *CPUContext) {
     ChildContext->rax = 0;
     
     // 6. Set PID/PPID/PGID
+    Child->NextRunQueue = nullptr;
+    Child->PrevRunQueue = nullptr;
+    Child->NextSleepQueue = nullptr;
+    Child->NextWaitTask = nullptr;
     Child->ppid = Current->pid;
     Child->pid = (U64)-1; // Will be set by SchedulerAddTask
     Child->State = Tasking::TaskState::READY;
+    Child->Priority = 0;
+    Child->TimeSlice = Tasking::GetTimeSliceForPriority(0);
+    Child->TimeUsedInPriority = 0;
+    Child->LastBoostEpoch = GlobalBoostEpoch; // Sync epoch biar gak langsung reset lagi
     Child->PGID = Current->PGID;
     Child->PGIDTaskPtr = nullptr; // Safety awal
 
@@ -144,7 +170,7 @@ VOID Sys_Fork(CpuContext_T *CPUContext) {
         } else {
             // Edge case aneh: Leader mati pas fork?
             // Ya udah Child jadi solo player dulu
-            Child->PGID = Child->pid; // Jadi leader sendiri
+            Child->PGID = 0;
             Child->PGIDTaskPtr = nullptr;
         }
     }
@@ -181,8 +207,7 @@ VOID Sys_Execve(CpuContext_T *CPUContext) {
     // We copy 256 bytes to ensure we get the full path. 
     // TODO: Implement safer StrncpyFromUser to avoid reading past valid pages if string is short.
     if (!PageAlloc::CopyFromUser(UserPML4, KernelPath, (void*)CPUContext->rdi, 256)) {
-         // If strict copy fails, we might want to try copying byte-by-byte or handle it better.
-         // For now, assume failure means bad pointer.
+        Printk::Write(Printk::Level::LOG_DERR, "FAILED WHILE COPYING FROM USER.\n");
          CPUContext->rax = -1;
          return;
     }
@@ -190,15 +215,23 @@ VOID Sys_Execve(CpuContext_T *CPUContext) {
     KernelPath[255] = '\0';
     
     // 1. Open File
-    File* F = VFS_Open(KernelPath);
-    if (!F) { CPUContext->rax = -1; return; }
+    File* F = VFS_Open(KernelPath, O_RDONLY);
+    if (!F) { 
+        Printk::Write(Printk::Level::LOG_DERR, "FAILED WHILE OPENING FROM VFS: No such file or directory.\n");
+        CPUContext->rax = -1; return; 
+    }
     
     // 2. Read File (Load ELF)
     U64 Size = F->FileSize;
     void* Buffer = Kmalloc::Alloc(Size);
-    if (!Buffer) { F->FSOwner->Close(F); CPUContext->rax = -1; return; }
+    if (!Buffer) { 
+        Printk::Write(Printk::Level::LOG_DERR, "FAILED WHILE ALLOCATING BUFFER: Run out of memory.\n");
+        F->FSOwner->Close(F); 
+        CPUContext->rax = -1; return; 
+    }
     
     if (F->FSOwner->Read(F, (U8*)Buffer, Size) != Size) {
+        Printk::Write(Printk::Level::LOG_DERR, "FAILED WHILE READING FROM VFS: Unknown.\n");
         Kmalloc::Free(Buffer);
         F->FSOwner->Close(F);
         CPUContext->rax = -1;
@@ -290,29 +323,6 @@ VOID Sys_Execve(CpuContext_T *CPUContext) {
     // CPUContext->rsi is argv (user pointer to char*[]), CPUContext->rdx is envp
     U64 user_argv = CPUContext->rsi;
     U64 user_envp = CPUContext->rdx;
-
-    // Probe logs temporarily disabled to reduce noisy kernel output.
-    // If you need them again, re-enable by removing the surrounding
-    // comment markers.
-    /*
-    if (user_argv != 0) {
-        U64 probe = 0;
-        BOOL ok = PageAlloc::CopyFromUser(UserPML4, &probe, (void*)user_argv, sizeof(probe));
-        if (!ok) {
-            Printk::Write(Printk::Level::LOG_ERR, "[SYSCALL_PROC] probe: CopyFromUser(user_argv=%p) FAILED\n", (void*)user_argv);
-        } else {
-            Printk::Write(Printk::Level::LOG_INFO, "[SYSCALL_PROC] probe: user_argv@%p -> %p\n", (void*)user_argv, (void*)probe);
-        }
-        // Also try a couple of nearby addresses
-        for (int pi = 1; pi <= 3; ++pi) {
-            U64 paddr = user_argv + pi * sizeof(U64);
-            U64 pval = 0;
-            BOOL ok2 = PageAlloc::CopyFromUser(UserPML4, &pval, (void*)paddr, sizeof(pval));
-            if (!ok2) Printk::Write(Printk::Level::LOG_ERR, "[SYSCALL_PROC] probe: CopyFromUser(%p) FAILED\n", (void*)paddr);
-            else Printk::Write(Printk::Level::LOG_INFO, "[SYSCALL_PROC] probe: %p -> %p\n", (void*)paddr, (void*)pval);
-        }
-    }
-    */
 
     // Helper to copy a user string (up to bufsize) into a temp buffer then
     // push into newstack and return destination virtual address
@@ -487,8 +497,70 @@ VOID Sys_Execve(CpuContext_T *CPUContext) {
         }
     }
     
-    // 6. Switch Address Space
-    // Tasking::Task* Current = Tasking::GetCurrentTaskPtr(); // Already defined at top
+    // =========================================================================
+    // 6. UPDATE PROCESS METADATA (VMA & Address Space)
+    // =========================================================================
+    using namespace Tasking;
+
+    // A. Bersihkan VMA Lama (PENTING! Jangan sampai sampah fork tertinggal)
+    // Kita harus menghapus semua node VMA lama agar bersih.
+    VMArea* OldNode = Current->VMHead;
+    while (OldNode) {
+        VMArea* Next = OldNode->Next;
+        delete OldNode; // Asumsi kamu punya operator delete kernel
+        OldNode = Next;
+    }
+    Current->VMHead = nullptr; // Reset Head
+
+    // B. Catat VMA Baru: IMAGE (Code/Data dari ELF)
+    // ImageBase & ImageEnd didapat dari output ELF::LoadELF64 di atas
+    VMArea* ElfVma = new VMArea();
+    if (ElfVma) {
+        // Align Up End address ke Page Size
+        U64 AlignedEnd = (ImageEnd + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+        
+        ElfVma->Start = ImageBase;
+        ElfVma->End   = AlignedEnd;
+        // Simplifikasi permissions: RWX (Read Write Exec). 
+        // Idealnya baca dari ELF Header per segmen, tapi RWX cukup untuk run.
+        ElfVma->Prot  = 0x7; 
+        ElfVma->Flags = 0x02; // MAP_PRIVATE
+        ElfVma->Next  = nullptr;
+        
+        Current->VMHead = ElfVma; // Masukkan sebagai Head
+    }
+
+    // C. Catat VMA Baru: STACK
+    // stack_base & USER_STACK_TOP didapat dari Step 5
+    VMArea* StackVma = new VMArea();
+    if (StackVma) {
+        StackVma->Start = stack_base;
+        StackVma->End   = USER_STACK_TOP;
+        StackVma->Prot  = 0x3; // Read | Write (Stack tidak butuh Exec)
+        StackVma->Flags = 0x02 | 0x20; // MAP_PRIVATE | MAP_STACK (jika ada flag stack)
+        StackVma->Next  = nullptr;
+
+        // Append ke list (setelah ElfVma)
+        if (Current->VMHead) {
+            VMArea* Temp = Current->VMHead;
+            while (Temp->Next) Temp = Temp->Next;
+            Temp->Next = StackVma;
+        } else {
+            Current->VMHead = StackVma;
+        }
+    }
+
+    // D. Reset Heap Pointer (brk/mmap start)
+    // Kita set start heap di atas area ELF agar tidak menimpa program.
+    // Gunakan logika yang sama dengan TaskUserConstructor.
+    constexpr U64 USER_HEAP_START = 0x0000000200000000ULL;
+    U64 CandidateHeap = (ImageEnd + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+    Current->MMapNextAddr = (CandidateHeap > USER_HEAP_START) ? CandidateHeap : USER_HEAP_START;
+
+    // =========================================================================
+    // 7. SWITCH CONTEXT (Hardware)
+    // =========================================================================
+
     U64 OldCR3 = Current->CR3;
     
     // Move context to Kernel Stack before switching CR3
@@ -497,24 +569,27 @@ VOID Sys_Execve(CpuContext_T *CPUContext) {
     String::Memcpy((void*)NewContextAddr, CPUContext, sizeof(CpuContext_T));
     CpuContext_T* NewContext = (CpuContext_T*)NewContextAddr;
 
-    // Update Context
+    // Update Context Registers
     NewContext->rip = Entry;
     NewContext->rsp = InitialRSP;
-    NewContext->cs = 0x4B;
-    NewContext->ss = 0x43;
-    NewContext->rflags = 0x202;
-    NewContext->rax = 0;
-    // Set up argc/argv registers per SysV for the new program
+    NewContext->cs = 0x4B;      // User Code (Ring 3)
+    NewContext->ss = 0x43;      // User Data (Ring 3)
+    NewContext->rflags = 0x202; // IF = 1
+    NewContext->rax = 0;        // Return 0 di userland
+    
+    // Set up SysV ABI arguments (RDI=argc, RSI=argv, RDX=envp)
     NewContext->rdi = argc_val;
     NewContext->rsi = argv_user_ptr;
-        NewContext->rdx = envp_user_ptr; // Set envp to user pointer
+    NewContext->rdx = envp_user_ptr; 
 
+    // Commit Hardware Change
     Current->CR3 = NewCR3;
-    DoCR3::Load((U64*)NewCR3);
+    DoCR3::Load((U64*)NewCR3); // Flush TLB & Switch Page Table
 
+    // Cleanup Old Hardware Resources
     Tasking::FreeUserAddressSpace(OldCR3);
 
-    // Restore from Kernel Stack (never returns to wrapper)
+    // Jump to User Mode!
     Context_Restore(NewContext);
 }
 
@@ -523,44 +598,50 @@ VOID Sys_Wait(CpuContext_T *CPUContext) {
     if (!Current) { CPUContext->rax = -1; return; }
 
     while (true) {
-        // 1. Scan ZOMBIE
+        // 1. AMBIL LOCK DULUAN!
+        LOCKRFLAGS irq = Arch::SaveAndDisableInterrupts();
+
+        // 2. Scan ZOMBIE (Di dalam Lock)
         bool HasChildren = false;
+        Tasking::Task* ZombieFound = nullptr;
+
         for (int i = 0; i < MAX_TASK; ++i) {
             Tasking::Task* T = Tasking::TaskArray[i];
             if (T && T->ppid == Current->pid) {
                 HasChildren = true;
                 if (T->State == Tasking::TaskState::ZOMBIE) {
-                    // Normal Exit (SysExit)
-                    U64 ChildPID = T->pid;
-                    Tasking::DestroyTask(T);
-                    CPUContext->rax = ChildPID;
-                    return;
+                    ZombieFound = T;
+                    break;
                 }
             }
         }
 
-        // 2. Cek apakah anak Tiba-Tiba Hilang? (Kasus SIGINT)
-        // Kalau 'HasChildren' jadi false padahal tadi true, berarti anak mati paksa.
-        // TAPI, loop di atas sudah ngecek kondisi real-time.
-        
+        // KASUS A: Nemu Zombie
+        if (ZombieFound) {
+            U64 ChildPID = ZombieFound->pid;
+            Tasking::DestroyTask(ZombieFound);
+            
+            Arch::RestoreInterrupts(irq); // UNLOCK sebelum return
+            
+            CPUContext->rax = ChildPID;
+            return;
+        }
+
+        // KASUS B: Gak punya anak (ECHILD)
         if (!HasChildren) { 
-            // Gak punya anak sama sekali.
-            // Ini bisa terjadi kalau anak dimatiin paksa oleh SchedulerTick (SIGINT)
-            // dan langsung dihapus dari TaskArray.
-            // Parent harusnya return -1 (ECHILD) biar shell tau "Oh, anak gw dah abis".
+            Arch::RestoreInterrupts(irq); // UNLOCK
             CPUContext->rax = -1; 
             return; 
         }
 
-        // 3. Tidur
-        LOCKRFLAGS irq = Arch::SaveAndDisableInterrupts();
+        // KASUS C: Anak masih hidup semua -> TIDUR
+        // Karena kita pegang LOCK, gak mungkin ada anak yang mati dan ngirim sinyal
+        // di sela-sela pengecekan tadi dan baris di bawah ini. AMAN.
         Current->State = Tasking::TaskState::BLOCKED;
-        Arch::RestoreInterrupts(irq);
+        
+        Arch::RestoreInterrupts(irq); // UNLOCK (Sekarang aman buat tidur)
 
         Tasking::SchedulerYield();
-        
-        // [FIX] Pas bangun, kalau ternyata anak hilang karena SIGINT, loop akan muter ke atas,
-        // HasChildren jadi false, dan return -1. Shell akan nerima -1 dan lanjut jalan.
     }
 }
 
@@ -666,29 +747,19 @@ struct kernel_timespec {
 };
 
 VOID Sys_SleepNs(CpuContext_T *CPUContext){
-    // Argumen dari register (Linux System V ABI)
-    // RDI = struct timespec *req
-    // RSI = struct timespec *rem
     UPTR req_addr = CPUContext->rdi;
-    UPTR rem_addr = CPUContext->rsi;
+    __MAYBE_UNUSED UPTR rem_addr = CPUContext->rsi;
 
-    if(req_addr == 0){
-        CPUContext->rax = -14; // EFAULT
-        return;
-    }
+    if(req_addr == 0){ CPUContext->rax = -14; return; }
 
-    // --- SAFETY FIRST: CopyFromUser ---
-    kernel_timespec kreq;
     Tasking::Task* Current = Tasking::GetCurrentTaskPtr();
     if (!Current) { CPUContext->rax = -1; return; }
 
-    // Gunakan PML4 process yang sedang jalan untuk translate address
-    if (!PageAlloc::CopyFromUser((U64*)Current->CR3 /* Atau simpen PML4 Virtual di Task Struct */, 
-                                 &kreq, 
-                                 (void*)req_addr, 
-                                 sizeof(kernel_timespec))) 
-    {
-        Printk::Write(Printk::Level::LOG_DEBUG, "Sys_SleepNs: Segfault accessing req\n");
+    // --- SAFETY FIRST: CopyFromUser ---
+    U64* UserPML4 = HHDM_PhysToVirt(Current->CR3);
+    kernel_timespec kreq;
+
+    if (!PageAlloc::CopyFromUser(UserPML4, &kreq, (void*)req_addr, sizeof(kernel_timespec))) {
         CPUContext->rax = -14; // EFAULT
         return;
     }
@@ -696,69 +767,29 @@ VOID Sys_SleepNs(CpuContext_T *CPUContext){
     I64 Seconds = kreq.tv_sec;
     I64 Nanoseconds = kreq.tv_nsec;
 
-    // Validasi standar POSIX
-    if(Nanoseconds < 0 || Nanoseconds >= 1000000000){
-        CPUContext->rax = -22; // EINVAL
-        return;
+    if(Nanoseconds < 0 || Nanoseconds >= 1000000000){ CPUContext->rax = -22; return; }
+
+    U64 TargetFreq = ACPI::Timer::LapicHz; 
+    U64 TicksFromSec = (U64)Seconds * TargetFreq;
+    U64 TicksFromNs = ((U64)Nanoseconds * TargetFreq) / 1000000000ULL;
+    U64 TicksToSleep = TicksFromSec + TicksFromNs;
+
+    if (TicksToSleep == 0 && (Seconds > 0 || Nanoseconds > 0)) {
+        TicksToSleep = 1;
     }
 
-    U64 TotalNs = (U64)Seconds * 1000000000ULL + (U64)Nanoseconds;
-    U64 TicksToSleep = ACPI::Timer::NanosecondsToTicks(TotalNs);
-
-    // Jangan tidur 0 tick, minimal 1 biar sempet yield
-    if (TicksToSleep == 0 && TotalNs > 0) TicksToSleep = 1;
-
-    // --- CRITICAL FIX: Absolute Time ---
-    // SleepTick adalah TARGET WAKTU BANGUN, bukan durasi.
-    // Jadi harus ditambah waktu sekarang.
     Current->BlockReason |= TASK_SLEEPING;
     Current->SleepTick = ACPI::Timer::LapicTicks + TicksToSleep; 
     Current->State = Tasking::TaskState::BLOCKED;   
 
-    // Bye! Panggil Scheduler
-    Tasking::SchedulerYield();
+    // [WAJIB DITAMBAH]
+    // Masukin ke Linked List O(1) biar dicek sama CheckSleepingTasks()
+    Tasking::AddToSleepList(Current); 
 
-    // --- Pas Bangun (Resumed) ---
-    
-    // Kalau user minta sisa waktu (rem), kita null-in aja karena asumsi tidur pules (ga kena signal)
-    if(rem_addr){
-        kernel_timespec krem = {0, 0};
-        // Copy balik ke user space (ignore error kalo user kasih pointer busuk di sini, opsional)
-        PageAlloc::CopyToUser((U64*)Current->CR3, (void*)rem_addr, &krem, sizeof(krem));
-    }
+    Tasking::SchedulerYield(); 
 
     CPUContext->rax = 0;
 }
-
-
-// ===================================
-// Custom syscall
-// ===================================
-
-// tidurkan task berdasarkan ms
-VOID SysSleepMS(CpuContext_T *CPUContext){
-    U64 ms = CPUContext->rdi;
-
-    Tasking::Task* Current = Tasking::GetCurrentTaskPtr();
-    if (!Current) { CPUContext->rax = -1; return; }
-
-    U64 ticks = Arch::Time::MsToTicks(ms);
-    if (ticks == 0 && ms > 0) {
-        ticks = 1; // Minimal tidur 1 tick (10ms) kalau diminta > 0
-    }
-
-    Current->BlockReason |= TASK_SLEEPING;
-    Current->SleepTick = ticks;
-    Current->State = Tasking::TaskState::BLOCKED;
-
-    Tasking::SchedulerYield();
-}
-
-// |=====================================|
-// |                                     |
-// |         End Custom Syscalls         |
-// |                                     |
-// |=====================================|
 
 VOID Sys_Signal(CpuContext_T *CPUContext){
     U64 signum = CPUContext->rdi;
@@ -864,5 +895,197 @@ VOID Sys_RtSigAction(CpuContext_T *CPUContext) {
                   "PID %d set signal handler for signal %d to %p\n",
                   Current->pid, sig,
                   (void*)Current->SignalHandlers[sig]);
+    CPUContext->rax = 0;
+}
+
+VOID Sys_Poll(CpuContext_T *CPUContext){
+    U64 fds_addr = CPUContext->rdi;
+    U64 nfds     = CPUContext->rsi;
+    I64 timeout  = (I64)CPUContext->rdx;
+
+    Tasking::Task *Current = Tasking::GetCurrentTaskPtr();
+    if(!Current){
+        CPUContext->rax = -10;
+        return;
+    }
+
+    if(nfds > 64){
+        CPUContext->rax = -22; // EINVAL (Terlalu banyak) 
+        return;
+    }
+
+    kernel_pollfd kfds[64];
+
+    U64 *UserPML4 = HHDM_PhysToVirt(Current->CR3);
+    if(!PageAlloc::CopyFromUser(UserPML4, kfds, (void*)fds_addr, nfds * sizeof(kernel_pollfd))){
+        CPUContext->rax = -14;
+        return;
+    }
+
+    U64 StartTick = ACPI::Timer::LapicTicks;
+    U64 TimeoutTicks = (timeout >= 0) ? ACPI::Timer::MillisecondsToTicks(timeout) : 0;
+    U64 Deadline = StartTick + TimeoutTicks;
+
+    INTN ReadyCount = 0;
+
+    while(TRUE){
+        ReadyCount = 0;
+
+        for(U64 i = 0; i < nfds; i++){
+            kfds[i].revents = 0;
+
+            short mask = Tasking::CheckFileDesc(kfds[i].fd, kfds[i].events);
+
+            if(mask){
+                kfds[i].revents = mask;
+                ReadyCount++;
+            }
+        }
+
+        if (ReadyCount > 0) break;
+
+        // 2. Timeout habis? (Dan bukan infinite wait)
+        if (timeout >= 0 && ACPI::Timer::LapicTicks >= Deadline) break;
+        
+        // 3. User minta Non-Blocking (Timeout 0)? Return immediately
+        if (timeout == 0) break;
+
+        if (timeout < 0) {
+            Tasking::SchedulerYield(); 
+            continue; 
+        }
+
+        Current->BlockReason |= TASK_SLEEPING;
+
+        Current->SleepTick = 1; // 1 Tick relatif pendek
+        Current->State = Tasking::TaskState::BLOCKED;
+
+        Tasking::AddToSleepList(Current);    
+        Tasking::SchedulerYield();
+    }
+
+    if (!PageAlloc::CopyToUser(UserPML4, (void*)fds_addr, kfds, nfds * sizeof(kernel_pollfd))) {
+        CPUContext->rax = -14; // EFAULT
+        return;
+    }
+
+    CPUContext->rax = ReadyCount;
+}
+
+VOID Sys_Yield(CpuContext_T *CPUContext){
+    Tasking::SchedulerYield();
+    CPUContext->rax = 0;
+}
+
+// ===================================
+// Custom syscall
+// ===================================
+
+// tidurkan task berdasarkan ms
+VOID SysSleepMS(CpuContext_T *CPUContext){
+    U64 ms = CPUContext->rdi;
+
+    Tasking::Task* Current = Tasking::GetCurrentTaskPtr();
+    if (!Current) { CPUContext->rax = -1; return; }
+
+    // Konversi MS ke Ticks
+    // Pastikan fungsi ini nerima MS. Kalau dia nerima Microseconds, harus dikali 1000.
+    // Asumsi: ACPI::Timer::MillisecondsToTicks ada, atau pake rumus manual:
+    // U64 ticks = (ms * ACPI::Timer::LapicHz) / 1000;
+    
+    // Anggap lu pake helper yang bener:
+    U64 ticks = (ms * ACPI::Timer::LapicHz) / 1000; 
+    
+    if (ticks == 0 && ms > 0) {
+        ticks = 1; 
+    }
+
+    Current->BlockReason |= TASK_SLEEPING;
+    Current->SleepTick = ACPI::Timer::LapicTicks + ticks;
+    Current->State = Tasking::TaskState::BLOCKED;
+
+    // [WAJIB DITAMBAH]
+    Tasking::AddToSleepList(Current);
+
+    Tasking::SchedulerYield();
+}
+
+VOID Sys_SetAppPerm(CpuContext_T *CPUContext){
+    U32 Permission = (U32)CPUContext->rdi;
+
+    if(!Permission){
+        CPUContext->rax = (U64)-10;
+        return;
+    }
+
+    Tasking::Task *Current = Tasking::GetCurrentTaskPtr();
+    if(!Current){
+        CPUContext->rax = (U64)-4;
+        return;
+    }
+
+    Tasking::SettingAppPerm(Current, Permission);
+
+    CPUContext->rax = 0;
+}
+
+// |=====================================|
+// |                                     |
+// |         End Custom Syscalls         |
+// |                                     |
+// |=====================================|
+
+#define CLOCK_REALTIME  0
+#define CLOCK_MONOTONIC 1
+
+VOID Sys_GetClockTime(CpuContext_T *CPUContext){
+    U64 WhatToTake = CPUContext->rdi;
+    UPTR TPAddress = CPUContext->rsi;
+
+    if(!TPAddress) {
+        CPUContext->rax = -ROS_INVALID;
+        return;
+    }
+
+    Tasking::Task *Current = Tasking::GetCurrentTaskPtr();
+    if(!Current){
+        CPUContext->rax = -ROS_BUSY;
+        return;
+    }
+
+    // Prepare kernel-local timespec to copy to user
+    struct kernel_timespec kt;
+    kt.tv_sec = 0;
+    kt.tv_nsec = 0;
+
+    if (WhatToTake == CLOCK_MONOTONIC) {
+        U64 TSCNow = Arch::ASM::RdTSC();
+        U64 DeltaTSC = TSCNow - ACPI::Timer::BootTSC;
+        U64 Freq = ACPI::Timer::TSCFrequencyHz;
+        if (Freq == 0) Freq = 1; // avoid div-by-zero (shouldn't happen)
+
+        U64 Sec = DeltaTSC / Freq;
+        U64 RemainderTicks = DeltaTSC % Freq;
+        U64 Nanoseconds = (RemainderTicks * 1000000000ULL) / Freq;
+
+        kt.tv_sec = (I64)Sec;
+        kt.tv_nsec = (I64)Nanoseconds;
+    }
+    else if (WhatToTake == CLOCK_REALTIME) {
+        Printk::Write(Printk::Level::LOG_ALERT, "Unimplemented.\n");
+        CPUContext->rax = -ROS_NOTFOUND;
+        return;
+    } else {
+        CPUContext->rax = -ROS_INVALID;
+        return;
+    }
+
+    // Copy result back to userland
+    U64* UserPML4 = HHDM_PhysToVirt(Current->CR3);
+    if (!PageAlloc::CopyToUser(UserPML4, (void*)TPAddress, &kt, sizeof(kt))) {
+        CPUContext->rax = -14; // EFAULT
+        return;
+    }
+
     CPUContext->rax = 0;
 }

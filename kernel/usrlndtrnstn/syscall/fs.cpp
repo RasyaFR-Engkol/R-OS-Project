@@ -5,6 +5,8 @@
 #include <filesystem/filesystem.hpp>
 #include <task.hpp>
 #include <filesystem/linux_dirent.hpp>
+#include <ros_linux/kernelstat.hpp>
+#include "syscall/sysarg.hpp"
 
 // forward declaration for CanonicalizePath defined later in this file
 VOID CanonicalizePath(const char* cwd, const char* input, char* output);
@@ -33,7 +35,7 @@ VOID Sys_Read(CpuContext_T *CPUContext){
 
     VOID *Buffer = Kmalloc::Alloc(count);
     if(!Buffer){
-        CPUContext->rax = (U64)(-1); // Error
+        CPUContext->rax = 0;
         return;
     }
 
@@ -43,9 +45,6 @@ VOID Sys_Read(CpuContext_T *CPUContext){
         CPUContext->rax = (U64)(-1);
         return;
     }
-
-    // Asumsi udah kebuka oleh sys_open
-    // File *FileDescriptor = (File*)fd;
     
     // FIX: Ambil dari FDTable milik task
     if (fd >= MAX_FILE_IN_PROCESS || !Curtask->FDTable[fd]) {
@@ -80,7 +79,7 @@ VOID Sys_Read(CpuContext_T *CPUContext){
 
 VOID Sys_Write(CpuContext_T *CPUContext){
     U64 fd = CPUContext->rdi;
-    UNUSED__ U64 buf = CPUContext->rsi;
+    U64 buf = CPUContext->rsi;
     U64 count = CPUContext->rdx;
 
     VOID *Buffer = Kmalloc::Alloc(count);
@@ -130,10 +129,35 @@ VOID Sys_Write(CpuContext_T *CPUContext){
     CPUContext->rax = (U64)WrittenBytes;
 }
 
+VOID Sys_Seek(CpuContext_T *CPUContext){
+    // 1. Ambil Argumen dari Register
+    U64 fd = CPUContext->rdi;          // Arg 1: File Descriptor
+    U64 offset = CPUContext->rsi;      // Arg 2: Offset
+    U32 origin = (U32)CPUContext->rdx; // Arg 3: Origin (SEEK_SET/CUR/END)
+
+    // 2. Validasi Task dan FD Table (Sama kayak Sys_Close)
+    Tasking::Task *Curtask = Tasking::GetCurrentTaskPtr();
+    
+    // Cek batas MAX_FILE dan apakah slot FD tersebut kosong
+    if (!Curtask || fd >= MAX_FILE_IN_PROCESS || !Curtask->FDTable[fd]) {
+        CPUContext->rax = (U64)(-1); // EBADF (Bad File Descriptor)
+        return;
+    }
+
+    File *FileDescriptor = Curtask->FDTable[fd];
+    BOOL result = VFSManager::Seek(FileDescriptor, offset, origin);
+
+    if (result == FALSE) {
+        CPUContext->rax = (U64)(-1); // EINVAL atau ESPIPE
+    } else {
+        CPUContext->rax = FileDescriptor->CurrentPosition; 
+    }
+}
+
 VOID Sys_Open(CpuContext_T *CPUContext){
     U64 pathname_ptr =CPUContext->rdi;
     U64 flags = CPUContext->rsi;
-    UNUSED__ U64 mode = CPUContext->rdx;
+    __MAYBE_UNUSED U64 mode = CPUContext->rdx;
 
     // Copy pathname dari user
     CHAR8 PathName[256];
@@ -177,7 +201,7 @@ VOID Sys_Open(CpuContext_T *CPUContext){
     CHAR8 FinalPath[256];
     CanonicalizePath(Curtask->CWD, (const char*)PathName, (char*)FinalPath);
 
-    File *OpenedFile = VFSManager::Open((const char*)FinalPath);
+    File *OpenedFile = VFSManager::Open((const char*)FinalPath, flags);
     if(!OpenedFile){
         if(flags & 64){
             OpenedFile = VFSManager::CreateWithParents((const char*)FinalPath);
@@ -204,8 +228,6 @@ VOID Sys_Open(CpuContext_T *CPUContext){
     }
 
     Curtask->FDTable[FdIDX] = OpenedFile;
-    // Increment RefCount
-    OpenedFile->RefCount++;
     CPUContext->rax = (U64)FdIDX; // Success
 }
 
@@ -214,7 +236,8 @@ VOID Sys_Close(CpuContext_T *CPUContext){
 
     Tasking::Task *Curtask = Tasking::GetCurrentTaskPtr();
     if (!Curtask || fd >= MAX_FILE_IN_PROCESS || !Curtask->FDTable[fd]) {
-        CPUContext->rax = (U64)(-1); // Bad FD
+        CPUContext->rax = -ROS_ERROR_BAD_FD;
+        Printk::Write(Printk::Level::LOG_DERR, "BAD FD, NO CURTASK, MAXIMAL FD.\n");
         return;
     }
 
@@ -228,10 +251,9 @@ VOID Sys_Close(CpuContext_T *CPUContext){
     if (FileDescriptor->RefCount == 0) {
         VFSManager::Close(FileDescriptor);
     }
-    
     Curtask->FDTable[fd] = nullptr;
 
-    CPUContext->rax = 0; // Success
+    CPUContext->rax = ROS_OK; // Success
 }
 
 VOID Sys_Dup2(CpuContext_T *CPUContext){
@@ -383,70 +405,9 @@ VOID Sys_Getdents64(CpuContext_T *CPUContext){
 }
 
 // untuk CD
-VOID CanonicalizePath(const char* cwd, const char* input, char* output) {
-    char temp[256];
-    
-    // 1. Handle Absolute vs Relative
-    if (input[0] == '/') {
-        // Absolute path
-        String::Strcpy(temp, input);
-    } else {
-        // Relative path: Gabung CWD + Input
-        String::Strcpy(temp, cwd);
-        int len = String::Strlen(temp);
-        if (len > 0 && temp[len-1] != '/') String::Strcat(temp, "/");
-        String::Strcat(temp, input);
-    }
-
-    // 2. Tokenize dan Rebuild
-    // Kita pakai stack sederhana untuk handle ".."
-    char* tokens[32]; // Max depth 32
-    int top = 0;
-    
-    char work_buf[256];
-    String::Strcpy(work_buf, temp);
-
-    UNUSED__ char* context = nullptr;
-    // Asumsi lu punya String::Strtok atau sejenisnya. 
-    // Kalau pakai Tokenize lu yg di userland tadi, sesuaikan logicnya.
-    // Disini saya pakai logic manual parsing "/" biar aman.
-    
-    int len = String::Strlen(work_buf);
-    char* start = work_buf;
-    
-    for (int i = 0; i <= len; i++) {
-        if (work_buf[i] == '/' || work_buf[i] == '\0') {
-            work_buf[i] = '\0';
-            if (String::Strlen(start) > 0) {
-                if (String::Strcmp(start, ".") == 0) {
-                    // Ignore "."
-                } else if (String::Strcmp(start, "..") == 0) {
-                    // Pop stack
-                    if (top > 0) top--;
-                } else {
-                    // Push stack
-                    tokens[top++] = start;
-                }
-            }
-            start = &work_buf[i+1];
-        }
-    }
-
-    // 3. Reconstruct Output
-    if (top == 0) {
-        String::Strcpy(output, "/");
-        return;
-    }
-
-    output[0] = '\0';
-    for (int i = 0; i < top; i++) {
-        String::Strcat(output, "/");
-        String::Strcat(output, tokens[i]);
-    }
-}
 
 I64 IsDirectory(const char* path) {
-    File* f = VFSManager::Open(path); // Atau VFSManager::GetNode(path)
+    File* f = VFSManager::Open(path, O_RDONLY); // Atau VFSManager::GetNode(path)
     if (!f) return -ROS_NOTFOUND;
     
     if(f->IsDirectory == FALSE){
@@ -597,10 +558,6 @@ VOID Sys_Ioctl(CpuContext_T *CPUContext){
     }
 
     File *FileDescriptor = Curtask->FDTable[fd];
-    //Printk::Write(Printk::Level::LOG_INFO, "Sys_Ioctl: fd=%llu request=0x%llx argp=0x%llx\n",
-    //              (unsigned long long)fd,
-    //              (unsigned long long)request,
-    //              (unsigned long long)argp);
     INTN Result = VFSManager::Ioctl(FileDescriptor, (U32)request, argp);
     if (Result == -1) {
         CPUContext->rax = (U64)(-1); // Error
@@ -615,4 +572,251 @@ VOID Sys_Sync(CpuContext_T *CPUContext){
     VFSManager::SyncAll();
 
     CPUContext->rax = 0; // Success
+}
+
+VOID Sys_Stat(CpuContext_T *CPUContext){
+    CONSTANT CHAR8 *UserPath = (CONSTANT CHAR8*) CATCHARG1(CPUContext);
+    struct kernel_stat *UserStatBuf = (struct kernel_stat*) CATCHARG2(CPUContext);
+
+    Tasking::Task *Curtask = Tasking::GetCurrentTaskPtr();
+
+    CHAR8 KernelPath[256];
+    U64 *user_pml4 = HHDM_PhysToVirt(Curtask->CR3);
+    UNUSED__ BOOL copy_success = false;
+    for (int i = 0; i < (int)sizeof(KernelPath) - 1; i++) {
+        char c;
+        // Copy 1 byte saja dari user
+        if (!PageAlloc::CopyFromUser(user_pml4, &c, (void*)(UserPath + i), 1)) {
+            // Kalau gagal baca di tengah jalan, berarti segfault
+            RETVAL(CPUContext) = -ROS_ERROR_FAULTY_ADDRESS;
+            Printk::Write(Printk::Level::LOG_ERR, "Sys_Open: Segfault reading path at offset %d\n", i);
+            return;
+        }
+
+        KernelPath[i] = c;
+        
+        // Kalau ketemu null terminator, stop! Kita sudah dapat stringnya.
+        if (c == '\0') {
+            copy_success = true;
+            break;
+        }
+    }
+
+    FileSystem *FS_PTR = nullptr;
+    CHAR8 RelativePath[256];
+
+    if(!VFSManager::ResolvePath(KernelPath, &FS_PTR, RelativePath)){
+        RETVAL(CPUContext) = -ROS_ERROR_NO_ENTRY;
+        return;
+    }
+
+    FileInfo info;
+    if(FS_PTR->Stat(RelativePath, &info) != 0){
+        RETVAL(CPUContext) = -ROS_ERROR_NO_ENTRY;
+        return;
+    }
+
+    struct kernel_stat kstat;
+    String::Memset(&kstat, 0, sizeof(kstat));
+
+    kstat.st_size = info.Size;
+    kstat.st_ino = info.InodeID;
+
+    U32 mode_type = 0;
+    U32 mode_perm = 0644; // Default rw-r--r--
+
+    switch(info.Type) {
+        case FT_DIR:
+            mode_type = 0040000; // S_IFDIR (Directory)
+            mode_perm = 0755;    // Biasanya rwxr-xr-x
+            break;
+
+        case FT_DEVCHAR:
+            mode_type = 0020000; // S_IFCHR (Character Device, misal /dev/tty)
+            mode_perm = 0600;    // Biasanya root only
+            break;
+
+        case FT_DEVBLOK:
+            mode_type = 0060000; // S_IFBLK (Block Device, misal /dev/sda)
+            mode_perm = 0600;
+            break;
+
+        case FT_PIPE:
+            mode_type = 0010000; // S_IFIFO (Named Pipe / FIFO)
+            mode_perm = 0666;
+            break;
+
+        case FT_SOCK:
+            mode_type = 0140000; // S_IFSOCK (Socket file, misal /var/run/docker.sock)
+            mode_perm = 0777;
+            break;
+
+        case FT_SYMLINK:
+            // Sys_Stat biasanya nge-follow link, jadi harusnya info.Type
+            // udah berubah jadi target aslinya.
+            // TAPI, kalau link-nya broken (target gak ada),
+            // ResolvePath biasanya tetep return info symlink itu sendiri (tergantung implementasi).
+            mode_type = 0120000; // S_IFLNK
+            mode_perm = 0777;
+            break;
+
+        case FT_NORMAL:
+        default:
+            mode_type = 0100000; // S_IFREG (Regular File)
+            break;
+    }
+
+    kstat.st_mode = mode_type | mode_perm;
+
+    if(!PageAlloc::CopyToUser(user_pml4, UserStatBuf, &kstat, sizeof(kernel_stat))){
+        RETVAL(CPUContext) = -ROS_ERROR_FAULTY_ADDRESS;
+        return;
+    }
+
+    RETVAL(CPUContext) = 0;
+}
+
+VOID Sys_Fstat(CpuContext_T *CPUContext){
+    // Argument 1: File Descriptor (int)
+    I64 fd = (I64) CATCHARG1(CPUContext); 
+    // Argument 2: Struct Stat Buffer
+    struct kernel_stat *UserStatBuf = (struct kernel_stat*) CATCHARG2(CPUContext);
+
+    Tasking::Task *Curtask = Tasking::GetCurrentTaskPtr();
+    
+    // 1. Validasi File Descriptor
+    // Cek range dan apakah slotnya kosong
+    if(fd < 0 || fd >= MAX_FILE_IN_PROCESS || Curtask->FDTable[fd] == nullptr){
+        RETVAL(CPUContext) = -ROS_ERROR_BAD_FD;
+        return;
+    }
+
+    // 2. Ambil Pointer File yang udah ada di Memory
+    File *Handle = Curtask->FDTable[fd];
+
+    // 3. Isi struct kernel_stat langsung dari File Handle
+    struct kernel_stat kstat;
+    String::Memset(&kstat, 0, sizeof(kstat));
+
+    kstat.st_size = Handle->FileSize;
+    kstat.st_ino  = Handle->InodeID; // Pastikan struct File udah diupdate
+
+    // 4. Tentukan Mode (File Biasa, Folder, atau Pipe/Socket?)
+    // Ini penting biar 'ls' atau shell tau cara treat fd ini.
+    
+    // Default permission bits
+    U32 mode_perm = 0644; 
+    U32 mode_type = 0;
+
+    switch(Handle->type){ // atau info.Type
+        case FT_DIR:
+            mode_type = 0040000; // S_IFDIR
+            mode_perm = 0755;    // Folder biasanya rwx
+            break;
+
+        case FT_NORMAL:
+        case FT_SHM: // SHM diperlakukan sbg file biasa (tmpfs)
+            mode_type = 0100000; // S_IFREG
+            break;
+
+        case FT_SOCK:
+            mode_type = 0140000; // S_IFSOCK
+            break;
+
+        case FT_SYMLINK:
+            mode_type = 0120000; // S_IFLNK
+            mode_perm = 0777;    // Symlink biasanya 777 (permission ikut target)
+            break;
+
+        case FT_DEVBLOK:
+            mode_type = 0060000; // S_IFBLK
+            break;
+
+        case FT_DEVCHAR:
+            mode_type = 0020000; // S_IFCHR
+            break;
+
+        case FT_PIPE:
+            mode_type = 0010000; // S_IFIFO
+            break;
+            
+        default:
+            // Fallback ke file biasa kalau tipe aneh
+            mode_type = 0100000; 
+            break;
+    }
+
+    kstat.st_mode = mode_type | mode_perm;
+
+    // 5. Copy ke User Memory
+    U64 *user_pml4 = HHDM_PhysToVirt(Curtask->CR3);
+    if(!PageAlloc::CopyToUser(user_pml4, UserStatBuf, &kstat, sizeof(kernel_stat))){
+        RETVAL(CPUContext) = -ROS_ERROR_FAULTY_ADDRESS;
+        return;
+    }
+
+    RETVAL(CPUContext) = 0; // Success
+}
+
+VOID Sys_Lstat(CpuContext_T *CPUContext){
+    CONSTANT CHAR8 *UserPath = (CONSTANT CHAR8*) CATCHARG1(CPUContext);
+    struct kernel_stat *UserStatBuf = (struct kernel_stat*) CATCHARG2(CPUContext);
+
+    Tasking::Task *Curtask = Tasking::GetCurrentTaskPtr();
+
+    CHAR8 KernelPath[256];
+    U64 *user_pml4 = HHDM_PhysToVirt(Curtask->CR3);
+    UNUSED__ BOOL copy_success = false;
+    for (int i = 0; i < (int)sizeof(KernelPath) - 1; i++) {
+        char c;
+        // Copy 1 byte saja dari user
+        if (!PageAlloc::CopyFromUser(user_pml4, &c, (void*)(UserPath + i), 1)) {
+            // Kalau gagal baca di tengah jalan, berarti segfault
+            RETVAL(CPUContext) = -ROS_ERROR_FAULTY_ADDRESS;
+            Printk::Write(Printk::Level::LOG_ERR, "Sys_Open: Segfault reading path at offset %d\n", i);
+            return;
+        }
+
+        KernelPath[i] = c;
+        
+        // Kalau ketemu null terminator, stop! Kita sudah dapat stringnya.
+        if (c == '\0') {
+            copy_success = true;
+            break;
+        }
+    }
+
+    FileSystem *FS_PTR = nullptr;
+    CHAR8 RelativePath[256];
+
+    if(!VFSManager::ResolvePath(KernelPath, &FS_PTR, RelativePath, FALSE)){
+        RETVAL(CPUContext) = -ROS_ERROR_NO_ENTRY;
+        return;
+    }
+
+    FileInfo info;
+    if(FS_PTR->Stat(RelativePath, &info) != 0){
+        RETVAL(CPUContext) = -ROS_ERROR_NO_ENTRY;
+        return;
+    }
+
+    struct kernel_stat kstat;
+    String::Memset(&kstat, 0, sizeof(kstat));
+
+    if (info.Type == FT_SYMLINK) {
+        kstat.st_mode = 0120000 | 0777; // <--- INI PENTING
+    } 
+    else if (info.IsDirectory || info.Type == FT_DIR) {
+        kstat.st_mode = 0040000 | 0755; 
+    } 
+    else {
+        kstat.st_mode = 0100000 | 0644; 
+    }
+
+    if(!PageAlloc::CopyToUser(user_pml4, UserStatBuf, &kstat, sizeof(kernel_stat))){
+        RETVAL(CPUContext) = -ROS_ERROR_FAULTY_ADDRESS;
+        return;
+    }
+
+    RETVAL(CPUContext) = 0;
 }
