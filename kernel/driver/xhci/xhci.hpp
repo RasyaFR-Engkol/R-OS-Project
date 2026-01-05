@@ -84,6 +84,8 @@ namespace xHCI{
             U8 RootPortID;       // Port fisik di mana device nyolok (penting buat Slot Context)
             U8 PortSpeed;        // Speed ID (penting buat Slot Context)
 
+            U16 IntMaxPacketSize;    // Untuk keperluan random (misal MSC)
+
             XHCIEndpointState Endpoints[32]; 
 
             VOLATILE BOOL TransferComplete;
@@ -115,6 +117,7 @@ namespace xHCI{
                 STAGE_NONE,
                 STAGE_GET_DESCRIPTOR_SENT,
                 STAGE_SET_CONFIG_SENT,
+                STAGE_SET_PROTOCOL_SENT,
                 STAGE_CONFIGURED,
                 STAGE_GET_CONFIG_DESC_SENT,
                 STAGE_ENDPOINT_CONFIG_SENT,
@@ -140,7 +143,7 @@ namespace xHCI{
             PORT_STATE_ADDRESSING = 4,
             PORT_STATE_ENABLE_SENT = 5 // per-port: Enable Slot command already sent
         };
-    };
+    } ;
 
     // TODO: Define global xHCI controller array
 
@@ -163,6 +166,7 @@ namespace xHCI{
     VOID QueueInterruptTransfer(xHCIDriver &DRV, U8 SlotID, U8 DCI, U64 BufferPhys, U32 Length);
     VOID QueueBulkTransfer(xHCIDriver &DRV, U8 SlotID, U8 DCI, U64 BufferPhys, U32 Length);
     VOID CheckPendingMSC(xHCIDriver &DRV);
+    VOID SetBootProtocol(xHCIDriver &DRV, U8 SlotID);
 }
 
 // non namespace such as helper. no need namespace caus it only used internally

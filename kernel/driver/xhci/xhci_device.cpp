@@ -42,15 +42,15 @@ namespace xHCI{
         }
         // Debug: verify DCBAAP write/readback and controller op_regs DCBAAP
         {
-            U64 rb = DRV.V_DCBAAP[SlotID];
-            U64 op_dcbaap = DRV.op_regs->dcbaap;
-            Write(Printk::Level::LOG_INFO, " DCBAAP write check: slot=%u wrote=0x%016llx readback=0x%016llx op_dcbaap=0x%016llx\n",
-                  (unsigned)SlotID, (unsigned long long)DeviceContextPhys, (unsigned long long)rb, (unsigned long long)op_dcbaap);
+            //U64 rb = DRV.V_DCBAAP[SlotID];
+            //U64 op_dcbaap = DRV.op_regs->dcbaap;
+            //Write(Printk::Level::LOG_INFO, " DCBAAP write check: slot=%u wrote=0x%016llx readback=0x%016llx op_dcbaap=0x%016llx\n",
+            //      (unsigned)SlotID, (unsigned long long)DeviceContextPhys, (unsigned long long)rb, (unsigned long long)op_dcbaap);
             // Dump first few DCBAAP entries (virt) to help inspect what's in DMA buffer
             if (DRV.V_DCBAAP) {
                 for (int di = 0; di < 4; ++di) {
-                    U64 v = DRV.V_DCBAAP[di];
-                    Write(Printk::Level::LOG_INFO, " DCBAAP[%d]=0x%016llx\n", di, (unsigned long long)v);
+                    //U64 v = DRV.V_DCBAAP[di];
+                    //Write(Printk::Level::LOG_INFO, " DCBAAP[%d]=0x%016llx\n", di, (unsigned long long)v);
                 }
             }
             // Flush the entire DCBAAP DMA buffer so controller sees updates
@@ -121,11 +121,11 @@ namespace xHCI{
 
         // Debug: dump the populated Input Context dwords (helpful for controller troubleshooting)
         {
-            volatile U32 *inp = (volatile U32*)HHDM_PhysToVirt((UPTR)InputContextPhys);
-            Write(Printk::Level::LOG_INFO, " InputContext populated (slot=%u):\n", (unsigned)SlotID);
+            //volatile U32 *inp = (volatile U32*)HHDM_PhysToVirt((UPTR)InputContextPhys);
+            //Write(Printk::Level::LOG_INFO, " InputContext populated (slot=%u):\n", (unsigned)SlotID);
             for (int ii = 0; ii < (int)(CtxSize/4 * 3); ++ii) {
                 if (ii >= 16) break; // limit spam
-                Write(Printk::Level::LOG_INFO, "  IC[%d]=0x%08x\n", ii, (unsigned)inp[ii]);
+                //Write(Printk::Level::LOG_INFO, "  IC[%d]=0x%08x\n", ii, (unsigned)inp[ii]);
             }
         }
 
@@ -179,8 +179,8 @@ namespace xHCI{
         // Avg TRB Length
         Ep0Context[4] = (8 << 0);
 
-        Printk::Write(Printk::Level::LOG_DEBUG, " xHCI: Sending Address Device Slot %u Port %u (CtxSize: %u)\n",
-            (unsigned)SlotID, (unsigned)RootPortID, (unsigned)CtxSize);
+        //Printk::Write(Printk::Level::LOG_DEBUG, " xHCI: Sending Address Device Slot %u Port %u (CtxSize: %u)\n",
+        //    (unsigned)SlotID, (unsigned)RootPortID, (unsigned)CtxSize);
 
         // --- COMMAND SUBMISSION LOGIC (Udah bener) ---
         U32 Index = DRV.CmdRingEnqueueIndex;
@@ -258,8 +258,8 @@ namespace xHCI{
         xHCITRB *dest = &table[idx];
 
         // Debug: log TRB push (slot, idx, type)
-        Printk::Write(Printk::Level::LOG_INFO, " PushEP0TRB: slot=%u idx=%u control=0x%08x param=0x%016llx\n",
-            (unsigned)SlotID, (unsigned)idx, (unsigned)TRB.control, (unsigned long long)TRB.parameter);
+        //Printk::Write(Printk::Level::LOG_INFO, " PushEP0TRB: slot=%u idx=%u control=0x%08x param=0x%016llx\n",
+        //    (unsigned)SlotID, (unsigned)idx, (unsigned)TRB.control, (unsigned long long)TRB.parameter);
         dest->parameter = TRB.parameter;
         dest->status    = TRB.status;
 
@@ -291,8 +291,8 @@ namespace xHCI{
         // Remember destination physical address for ISR to inspect on completion
         DRV.Devs[SlotID].LastEP0DestPhys = DestBuffer->PhysAddr;
 
-        Printk::Write(Printk::Level::LOG_DEBUG, " GetDeviceDescriptor: slot=%u destPhys=0x%016llx\n",
-            (unsigned)SlotID, (unsigned long long)DestBuffer->PhysAddr);
+        //Printk::Write(Printk::Level::LOG_DEBUG, " GetDeviceDescriptor: slot=%u destPhys=0x%016llx\n",
+        //    (unsigned)SlotID, (unsigned long long)DestBuffer->PhysAddr);
 
         xHCITRB SetupTRB;
         
@@ -363,16 +363,16 @@ namespace xHCI{
         {
             PageAlloc::DMAAlloc::DMABuffer *r = DRV.Devs[SlotID].EP0Ring;
             if (r) {
-                xHCITRB *table = (xHCITRB*)r->VirtAddr;
+                //xHCITRB *table = (xHCITRB*)r->VirtAddr;
                 U32 entries = (U32)(r->Size / sizeof(xHCITRB));
-                Printk::Write(Printk::Level::LOG_DEBUG, " EP0Ring dump slot=%u entries=%u enq_idx=%u cycle=%u phys=0x%016llx\n",
-                    (unsigned)SlotID, (unsigned)entries, (unsigned)DRV.Devs[SlotID].EP0EnqueueIdx, (unsigned)DRV.Devs[SlotID].EP0CycleState, (unsigned long long)r->PhysAddr);
+                //Printk::Write(Printk::Level::LOG_DEBUG, " EP0Ring dump slot=%u entries=%u enq_idx=%u cycle=%u phys=0x%016llx\n",
+                 //   (unsigned)SlotID, (unsigned)entries, (unsigned)DRV.Devs[SlotID].EP0EnqueueIdx, (unsigned)DRV.Devs[SlotID].EP0CycleState, (unsigned long long)r->PhysAddr);
                 U32 dumpCount = DRV.Devs[SlotID].EP0EnqueueIdx + 2;
                 if (dumpCount > entries) dumpCount = entries;
                 for (U32 i = 0; i < dumpCount; ++i) {
-                    xHCITRB *t = &table[i];
-                    Write(Printk::Level::LOG_DEBUG, "  TRB[%u] param=0x%016llx status=0x%08x ctl=0x%08x\n",
-                        (unsigned)i, (unsigned long long)t->parameter, (unsigned)t->status, (unsigned)t->control);
+                    //xHCITRB *t = &table[i];
+                    //Write(Printk::Level::LOG_DEBUG, "  TRB[%u] param=0x%016llx status=0x%08x ctl=0x%08x\n",
+                    //    (unsigned)i, (unsigned long long)t->parameter, (unsigned)t->status, (unsigned)t->control);
                 }
                 // Flush the ring again to make sure recent pushes reached memory
                 for (UPTR p = (UPTR)r->VirtAddr; p < (UPTR)r->VirtAddr + r->Size; p += 64) {
@@ -390,11 +390,11 @@ namespace xHCI{
         // DCI untuk Endpoint 0 Control Bidirectional selalu = 1.
         Arch::ASM::Mfence();
         DRV.doorbell_regs[SlotID] = 1;
-        Printk::Write(Printk::Level::LOG_INFO, " GetDeviceDescriptor: doorbell rung slot=%u\n", (unsigned)SlotID);
+        //Printk::Write(Printk::Level::LOG_INFO, " GetDeviceDescriptor: doorbell rung slot=%u\n", (unsigned)SlotID);
     }
 
     VOID SetDeviceConfiguration(xHCIDriver &DRV, U8 SlotID, U8 ConfigValue){
-        Printk::Write(Printk::Level::LOG_INFO, " xHCI: Setting Configuration %u for Slot %u\n", (unsigned)ConfigValue, (unsigned)SlotID);
+        //Printk::Write(Printk::Level::LOG_INFO, " xHCI: Setting Configuration %u for Slot %u\n", (unsigned)ConfigValue, (unsigned)SlotID);
 
         // Format Setup Packet: SET_CONFIGURATION
         // bmRequestType = 0x00 (Host to Device, Standard, Device)
@@ -426,12 +426,48 @@ namespace xHCI{
         StatusTRB.control   = (4u << 10) | (1u << 16) | (1u << 5) |
                               (DRV.Devs[SlotID].EP0CycleState ? 1u : 0u);
 
-        DRV.Devs[SlotID].Stage = xHCIDriver::XHCIDeviceState::STAGE_SET_CONFIG_SENT;
-
         PushEP0TRB(DRV, SlotID, StatusTRB);
 
         // Ring Doorbell
-        Printk::Write(Printk::Level::LOG_INFO, " xHCI: SetDeviceConfiguration - Ringing Doorbell for Slot %u\n", (unsigned)SlotID);
+        //Printk::Write(Printk::Level::LOG_INFO, " xHCI: SetDeviceConfiguration - Ringing Doorbell for Slot %u\n", (unsigned)SlotID);
+        DRV.doorbell_regs[SlotID] = 1;
+    }
+
+    VOID SetBootProtocol(xHCIDriver &DRV, U8 SlotID){
+        //Printk::Write(Printk::Level::LOG_INFO, " xHCI: Setting Boot Protocol (0) for Slot %u\n", SlotID);
+
+        // bmRequestType = 0x21, bRequest = 0x0B, wValue = 0, wIndex = 0, wLength = 0
+        U32 ProtoParamLow  = 0x00000B21; 
+        U32 ProtoParamHigh = 0x00000000;
+
+        // --- SETUP STAGE ---
+        xHCITRB ProtoSetup;
+        ProtoSetup.parameter = ((U64)ProtoParamHigh << 32) | ProtoParamLow;
+        ProtoSetup.status    = 8; 
+        
+        // [FIX 1] TRT (Bit 16-17) harus 0 (NO DATA STAGE)!
+        // 3u << 16 itu RESERVED.
+        // 2u << 10 itu TYPE SETUP STAGE.
+        // 1u << 6  itu IDT (Immediate Data).
+        ProtoSetup.control   = (2u << 10) | (0u << 16) | (1u << 6) | 
+                            (DRV.Devs[SlotID].EP0CycleState ? 1u : 0u);
+        
+        PushEP0TRB(DRV, SlotID, ProtoSetup);
+
+        // --- STATUS STAGE ---
+        xHCITRB ProtoStatus;
+        ProtoStatus.parameter = 0;
+        ProtoStatus.status    = 0;
+        
+        // [FIX 2] TRB TYPE (Bit 10-15) harus 4 (STATUS STAGE)!
+        // Kemarin lo pake 3 (Data Stage), makanya macet.
+        // DIR (Bit 16) harus 1 (IN) karena status sukses dibaca dari device.
+        // IOC (Bit 5) harus 1 biar dapet Interrupt.
+        ProtoStatus.control   = (4u << 10) | (1u << 16) | (1u << 5) | 
+                                (DRV.Devs[SlotID].EP0CycleState ? 1u : 0u);
+        
+        PushEP0TRB(DRV, SlotID, ProtoStatus);
+        
         DRV.doorbell_regs[SlotID] = 1;
     }
 

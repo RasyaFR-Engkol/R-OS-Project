@@ -10,7 +10,7 @@ namespace xHCI {
     using namespace Printk;
 
     VOID SendNOOPCommand(xHCIDriver &DRV){
-        Write(Level::LOG_DEBUG, " Submitting NOOP Command\n");
+        //Write(Level::LOG_DEBUG, " Submitting NOOP Command\n");
 
         U32 index = DRV.CmdRingEnqueueIndex; 
         volatile xHCITRB *NOOPTRB = &DRV.VCmdRing[index];
@@ -38,7 +38,7 @@ namespace xHCI {
     }
 
     VOID SendEnableSlotCommand(xHCIDriver &DRV){
-        Write(Level::LOG_NOTICE, " Submitting Enable Slot Command\n");
+        //Write(Level::LOG_NOTICE, " Submitting Enable Slot Command\n");
 
         U32 index = DRV.CmdRingEnqueueIndex;
         volatile xHCITRB *TRB = &DRV.VCmdRing[index];
@@ -48,9 +48,9 @@ namespace xHCI {
         // TRB Type 9 = Enable Slot Command. Set IOC and current cycle.
         TRB->control = (9u << 10) | (1u << 5) | (DRV.CmdRingCycleState ? 1u : 0u);
 
-        U64 trb_phys = (U64)DRV.DMA_CmdRing->PhysAddr + ((U64)index * sizeof(xHCITRB));
-        Write(Level::LOG_INFO, " Enable Slot TRB @ phys=0x%016llx idx=%u ctl=0x%08x\n",
-              (unsigned long long)trb_phys, (unsigned)index, (unsigned)TRB->control);
+        __MAYBE_UNUSED U64 trb_phys = (U64)DRV.DMA_CmdRing->PhysAddr + ((U64)index * sizeof(xHCITRB));
+        //Write(Level::LOG_INFO, " Enable Slot TRB @ phys=0x%016llx idx=%u ctl=0x%08x\n",
+        //      (unsigned long long)trb_phys, (unsigned)index, (unsigned)TRB->control);
 
         index++;
         if(index == DRV.CmdRingSize - 1){
@@ -64,6 +64,6 @@ namespace xHCI {
         asm volatile ("mfence" ::: "memory");
         DRV.doorbell_regs[0] = 0;
 
-        Write(Level::LOG_NOTICE, " Enable Slot doorbelled\n");
+        //Write(Level::LOG_NOTICE, " Enable Slot doorbelled\n");
     }
 }

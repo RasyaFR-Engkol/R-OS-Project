@@ -57,7 +57,7 @@ namespace xHCI{
         VOLATILE xHCIPortRegs *PortReg = &DRV.port_regs[PortID - 1];
         U32 PortSC = PortReg->port_sc;
 
-        Write(Level::LOG_INFO, " Port %u Event - PortSC=0x%08x\n", (unsigned)PortID, (unsigned)PortSC);
+        //Write(Level::LOG_INFO, " Port %u Event - PortSC=0x%08x\n", (unsigned)PortID, (unsigned)PortSC);
 
         // ====================================================
         // 1. EVENT: CONNECT STATUS CHANGE (Baru Dicolok)
@@ -136,7 +136,7 @@ namespace xHCI{
             // Clear PRC (Write-1-to-Clear)
             PortReg->port_sc = (PortSC & ~0x00FE0000) | (1 << 21);
             
-            Write(Level::LOG_NOTICE, " xHCI: Port %u Reset Complete (PRC). Sending Enable Slot...\n", (unsigned)PortID);
+            //Write(Level::LOG_NOTICE, " xHCI: Port %u Reset Complete (PRC). Sending Enable Slot...\n", (unsigned)PortID);
 
             // Tandai state port
             DRV.PortStates[PortID - 1].State = xHCIDriver::PORT_STATE_ENABLE_SENT;
@@ -146,7 +146,7 @@ namespace xHCI{
         }
 
         // sampe sini? biasanya kita nggak tau ada apaan
-        Printk::Write(Printk::Level::LOG_DEBUG, " xHCI: Port %u - No recognized status change handled.\n", (unsigned)PortID);
+        //Printk::Write(Printk::Level::LOG_DEBUG, " xHCI: Port %u - No recognized status change handled.\n", (unsigned)PortID);
     }
 
     static VOID ProcessPendingEvents(xHCIDriver &DRV, U32 Controller_ID){
@@ -170,20 +170,22 @@ namespace xHCI{
             didWork = true;
 
             U8 EventType = (U8)((control >> 10) & 0x3Fu);
-            Serial::Printf(" xHCI: Controller %u - Event Type %u detected (param=0x%016llx status=0x%08x ctl=0x%08x)\n",
+            /*Serial::Printf(" xHCI: Controller %u - Event Type %u detected (param=0x%016llx status=0x%08x ctl=0x%08x)\n",
                 (unsigned)Controller_ID, (unsigned)EventType,
                 (unsigned long long)Event->parameter,
                 (unsigned)Event->status,
-                (unsigned)Event->control);
+                (unsigned)Event->control);*/
 
             // 33 = Command Completion Event, 34 = Port Status Change Event
             if(EventType == 33){
                 U8  ccode   = (U8)(Event->status >> 24);
                 U8  slotId  = (U8)(Event->control >> 24);
                 U64 cmdTrbPhys = Event->parameter; // Pointer ke Command TRB asli
+
+                U64 cleanPhys = cmdTrbPhys & ~0xFull; 
                 
                 // Kita harus intip Command TRB aslinya untuk tahu ini command apa
-                volatile xHCITRB *OriginalCmd = (volatile xHCITRB*)HHDM_PhysToVirt((UPTR)cmdTrbPhys);
+                volatile xHCITRB *OriginalCmd = (volatile xHCITRB*)HHDM_PhysToVirt((UPTR)cleanPhys);
                 U32 CmdType = (OriginalCmd->control >> 10) & 0x3F; // Ambil TRB Type dari Command aslinya
 
                 if(ccode == 1){ // Success
@@ -207,7 +209,7 @@ namespace xHCI{
                                 }
                                 
                                 if(targetPort) {
-                                    Write(Level::LOG_INFO, " xHCI: Slot ID %u assigned to Port %u. Sending Address Device...\n", slotId, targetPort);
+                                    //Write(Level::LOG_INFO, " xHCI: Slot ID %u assigned to Port %u. Sending Address Device...\n", slotId, targetPort);
                                     // PENTING: Simpan SlotID ini ke struktur Port atau Device array kamu
                                     DRV.PortStates[targetPort-1].SlotID = slotId; 
                                     
@@ -219,14 +221,14 @@ namespace xHCI{
                             break;
 
                         case 11: // TRB_TYPE_ADDRESS_DEVICE
-                            Write(Level::LOG_INFO, " xHCI: Address Device Command Completed for Slot %u.\n", slotId);
+                            //Write(Level::LOG_INFO, " xHCI: Address Device Command Completed for Slot %u.\n", slotId);
                             // Baru disini aman panggil GetDescriptor
                             GetDeviceDescriptor(DRV, slotId);
                             break;
 
                         case 12: // TRB_TYPE_CONFIGURE_ENDPOINT
                         {
-                            Write(Level::LOG_INFO, " xHCI: Configure Endpoint Completed for Slot %u. Endpoint READY!\n", slotId);
+                            //Write(Level::LOG_INFO, " xHCI: Configure Endpoint Completed for Slot %u. Endpoint READY!\n", slotId);
 
                             DRV.Devs[slotId].Stage = xHCIDriver::XHCIDeviceState::STAGE_RUNNING;
 
@@ -244,7 +246,9 @@ namespace xHCI{
 
                             // 3. Tentukan Transfer Length
                             // === FIX LOGIC TRB ===
-                            U32 transferLen = 8; // Default Keyboard
+                            U32 transferLen = 64;
+                            if(transferLen == 0) transferLen = 8; // Fallback kalau 0
+                            if(transferLen < 64) transferLen = 64; // SAFETY: Minta lebih banyak gak masalah (Short Packet), minta dikit bikin Babble.
                             if(DRV.Devs[slotId].IsMassStorage){
                                 Write(Level::LOG_DEBUG, " xHCI: Mass Storage Device detected, mounting.\n");
                                 
@@ -252,9 +256,9 @@ namespace xHCI{
                             } else if(DRV.Devs[slotId].IsMouse || DRV.Devs[slotId].IsKeyboard){
                                 if (DRV.Devs[slotId].IsMouse) {
                                     transferLen = 8; // Atau lebih besar
-                                    Write(Level::LOG_DEBUG, " xHCI: Queueing first MOUSE Transfer for Slot %u\n", slotId);
+                                    //Write(Level::LOG_DEBUG, " xHCI: Queueing first MOUSE Transfer for Slot %u\n", slotId);
                                 } else {
-                                    Write(Level::LOG_DEBUG, " xHCI: Queueing first KEYBOARD Transfer for Slot %u\n", slotId);
+                                    //Write(Level::LOG_DEBUG, " xHCI: Queueing first KEYBOARD Transfer for Slot %u\n", slotId);
                                 }
 
                                 U8 targetDCI = DRV.Devs[slotId].ActiveIntDCI;
@@ -328,8 +332,8 @@ namespace xHCI{
                 U8 dciSource = CalcDCISource(Event);
                 auto &devState = DRV.Devs[SlotID];
 
-                Serial::Printf( " [DEBUG] ISR Read Stage %d for Slot %u (Addr: 0x%016llx)\n", 
-                    (int)devState.Stage, (unsigned)SlotID, (unsigned long long)&devState.Stage);
+                /*Serial::Printf( " [DEBUG] ISR Read Stage %d for Slot %u (Addr: 0x%016llx)\n", 
+                    (int)devState.Stage, (unsigned)SlotID, (unsigned long long)&devState.Stage);*/
 
                 if(CCode == 1 || CCode == 13){ // Success
                     if(devState.IsMassStorage){
@@ -343,25 +347,38 @@ namespace xHCI{
                     // CEK STAGE SEKARANG APA?
                     switch(devState.Stage) {
                         case xHCIDriver::XHCIDeviceState::STAGE_GET_DESCRIPTOR_SENT:
-                            Write(Level::LOG_INFO, " xHCI: Get Device Descriptor DONE for Slot %u\n", SlotID);
-                            
-                            // Parse Descriptor (ambil VID/PID)
-                            // ... kode parsing descriptor kamu ...
+                            //Write(Level::LOG_INFO, " xHCI: Get Device Descriptor DONE for Slot %u\n", SlotID);
                             
                             // Lanjut ke Next Step
+                            devState.Stage = xHCIDriver::XHCIDeviceState::STAGE_SET_CONFIG_SENT;
+
                             SetDeviceConfiguration(DRV, SlotID, 1);
                             break;
 
-                        case xHCIDriver::XHCIDeviceState::STAGE_SET_CONFIG_SENT:
-                            Write(Level::LOG_INFO, " xHCI: Set Configuration DONE for Slot %u\n", SlotID);
-
+                            case xHCIDriver::XHCIDeviceState::STAGE_SET_CONFIG_SENT:
                             {
-                                // Alokasi buffer uncached buat nampung descriptor
-                                PageAlloc::DMAAlloc::DMABuffer* descBuf = PageAlloc::DMAAlloc::AllocateDMABytes(256);
-                                DRV.Devs[SlotID].LastEP0DestPhys = descBuf->PhysAddr; // Simpan pointer biar bisa dibaca pas interrupt
-                                DRV.Devs[SlotID].Stage = xHCIDriver::XHCIDeviceState::STAGE_GET_CONFIG_DESC_SENT;
+                                //Write(Level::LOG_INFO, " xHCI: Set Configuration DONE for Slot %u\n", SlotID);
                                 
-                                // Request Config Descriptor (Type 2), Index 0, Length 256
+                                // SEKARANG KITA BELOKIN: Jangan langsung GetDescriptor.
+                                // Kita kirim Set Protocol dulu.
+                                
+                                devState.Stage = xHCIDriver::XHCIDeviceState::STAGE_SET_PROTOCOL_SENT; // Pindah Stage
+                                SetBootProtocol(DRV, SlotID); // Kirim Command
+                            }
+                            break;
+
+                        case xHCIDriver::XHCIDeviceState::STAGE_SET_PROTOCOL_SENT:
+                            {
+                                //Write(Level::LOG_INFO, " xHCI: Set Boot Protocol DONE for Slot %u. Now Reading Config...\n", SlotID);
+
+                                // Protocol udah Boot Mode. Sekarang baru aman baca Descriptor.
+                                
+                                // Alokasi buffer uncached
+                                PageAlloc::DMAAlloc::DMABuffer* descBuf = PageAlloc::DMAAlloc::AllocateDMABytes(256);
+                                DRV.Devs[SlotID].LastEP0DestPhys = descBuf->PhysAddr; 
+
+                                devState.Stage = xHCIDriver::XHCIDeviceState::STAGE_GET_CONFIG_DESC_SENT; // Pindah Stage
+                                
                                 GetDescriptor(DRV, SlotID, 2, 0, 256, descBuf->PhysAddr);
                             }
                             break;
@@ -372,7 +389,7 @@ namespace xHCI{
                             // Kita bisa cek apakah kita baru saja memproses ini.
                             // Tapi cara paling gampang: Ubah stage langsung setelah sukses.
                             
-                            Write(Level::LOG_INFO, " xHCI: Config Descriptor Received! Parsing...\n");
+                            //Write(Level::LOG_INFO, " xHCI: Config Descriptor Received! Parsing...\n");
                             
                             U64 bufPhys = DRV.Devs[SlotID].LastEP0DestPhys;
                             U8* buffer = (U8*)HHDM_PhysToVirt(bufPhys); 
@@ -412,10 +429,7 @@ namespace xHCI{
 
                         case xHCIDriver::XHCIDeviceState::STAGE_RUNNING:
                         {
-
-                            Serial::Printf(" [DEBUG] ISR Stage RUNNING for Slot %u DCI Source %u\n", (unsigned)SlotID, (unsigned)dciSource);
-
-
+                            //Serial::Printf(" [DEBUG] ISR Stage RUNNING for Slot %u DCI Source %u\n", (unsigned)SlotID, (unsigned)dciSource);
                             /**
                              * Berarti ini adalah HID Device (Mouse/Keyboard)
                              */
@@ -427,7 +441,10 @@ namespace xHCI{
                             // ===============================================
                             U8 dci = devState.ActiveIntDCI ? devState.ActiveIntDCI : 3;
                             if (dciSource == dci) { 
-                                U32 transferLen = 8;    
+                                // FIX: Gunakan logika size yang sama
+                                U32 transferLen = devState.IntMaxPacketSize;
+                                if(transferLen < 64) transferLen = 64; // Safety padding untuk mencegah Babble
+
                                 QueueInterruptTransfer(DRV, SlotID, dci, devState.IntBufferPhys, transferLen);
                             }
                         }
@@ -438,23 +455,39 @@ namespace xHCI{
                             break;
                     }
                 } 
-                else {
-                    // Nah, kalau ini baru error beneran (selain 1 dan 13)
+                else if (CCode == 3) { // BABBLE ERROR
                     U32 Residual = (Event->status & 0x00FFFFFF);
-                    UNUSED__ U32 TRBLen = (Event->control >> 16) & 0xFFFF; // (Tergantung format TRB event controller, kadang ga valid)
+                    Write(Level::LOG_ERR, " [BABBLE DEBUG] Slot %u. Residual: %u\n", SlotID, Residual);
                     
-                    Printk::Write(Printk::Level::LOG_ERR, " [XFER FAIL] Slot %u Code %d (Babble/Error)\n", SlotID, CCode);
-                    Printk::Write(Printk::Level::LOG_ERR, "     Residual: %u bytes (Sisa space di buffer)\n", Residual);
-                    
-                    if (CCode == 3) {
-                        Printk::Write(Printk::Level::LOG_ERR, "     BABBLE DETECTED! Device ngirim data lebih banyak dari TRB Length!\n");
-                        Printk::Write(Printk::Level::LOG_ERR, "     Solusi: Gedein transfer length di QueueInterruptTransfer (min 64 buat mouse gaming)\n");
+                    // --- TAMBAHAN DEBUGGING: DUMP ISI BUFFER ---
+                    if(devState.IntBufferVirt) {
+                        U8* b = devState.IntBufferVirt;
+                        Write(Level::LOG_ERR, " [BABBLE DUMP] Data yang sempat masuk buffer (Hex):\n");
+                        // Print 16 byte pertama aja buat intip
+                        Serial::Printf("   RAW: %02X %02X %02X %02X %02X %02X %02X %02X | %02X %02X %02X %02X ...\n",
+                            b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
+                            b[8], b[9], b[10], b[11]);
+                            
+                        // Analisis Singkat
+                        if(devState.IsMouse) {
+                            Serial::Printf("   [ANALISIS MOUSE] Buttons: 0x%02X, X: %d, Y: %d, Wheel?: %d\n",
+                                b[0], (I8)b[1], (I8)b[2], (I8)b[3]);
+                        }
                     }
+                    
+                    // --- FORCE RE-QUEUE SUPAYA GAK MATI ---
+                    // Walaupun error, kita coba antrekan lagi dengan buffer LEBIH GEDE (misal 64)
+                    // Supaya mouse tetep jalan dan kita bisa liat log selanjutnya.
+                    U8 dci = devState.ActiveIntDCI ? devState.ActiveIntDCI : 3;
+                    
+                    // HARDCODE 64 byte buat testing!
+                    Write(Level::LOG_WARNING, " [RECOVERY] Force Re-Queueing with 64 bytes...\n");
+                    QueueInterruptTransfer(DRV, SlotID, dci, devState.IntBufferPhys, 64);
                 }
             } else if (EventType == 34) {
                 U8 PortID = (U8)((Event->parameter >> 24) & 0xFF);
 
-                Write(Level::LOG_NOTICE, " xHCI: Port Status Change detected on Port %d\n", PortID);
+                //Write(Level::LOG_NOTICE, " xHCI: Port Status Change detected on Port %d\n", PortID);
 
                 HandlePortStatusChange(DRV, PortID);
             } else {
@@ -503,7 +536,7 @@ namespace xHCI{
     }
 
     static VOID xHCI_HandleInterrupt(VAL32 Controller_ID){
-        Serial::Printf( " Interrupt received from controller %u \n", (unsigned)Controller_ID);
+        //Serial::Printf( " Interrupt received from controller %u \n", (unsigned)Controller_ID);
         xHCIDriver &DRV = g_xhci_controllers[Controller_ID];
 
 

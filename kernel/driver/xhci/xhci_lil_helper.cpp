@@ -6,6 +6,7 @@
 #include <mm.hpp>
 #include "../../dev/devicemanager.hpp"
 #include "../massusb/usbmsc.hpp"
+#include <../kernel/task/reserved/inputdaemon/driver/mouse.hpp>
 
 U8 CalcDCISource(volatile xHCITRB *Event){
     return (Event->control >> 16) & 0x1F; // Ambil Endpoint ID dari TRB event
@@ -33,38 +34,27 @@ STATIC VOID CheckAndHandleIfKeyboardHID(xHCI::xHCIDriver::XHCIDeviceState &devSt
         U8 OldMods = devState.LastKeyboardData[0];
         U8 NewMods = data[0];
         
-        // --- HELPER LAMBDA ---
-        auto PushKeyEvent = [](InputEventType type, U8 scancode) {
-            InputEvent ev;
-            ev.Type = type;
-            ev.Keycode.Scancode = scancode;
-            InputManager::PushEvent(ev);
+        // Helper buat Modifier
+        auto injectMod = [&](U8 Bitmask, U8 Scancode){
+            BOOL OldBit = (OldMods & Bitmask);
+            BOOL NewBit = (NewMods & Bitmask);
+            if(NewBit && !OldBit) PIC::Keyboard::InjectScancode(Scancode);          // Press
+            if(!NewBit && OldBit) PIC::Keyboard::InjectScancode(Scancode | 0x80);   // Release
         };
 
         BOOL IsChanged = FALSE;
         for(int i=0; i<8; i++) {
-            if(devState.LastKeyboardData[i] != data[i]) {
-                IsChanged = TRUE; break;
-            }
+            if(devState.LastKeyboardData[i] != data[i]) { IsChanged = TRUE; break; }
         }
 
         if(IsChanged){
-            // === ADA PERUBAHAN ===
             devState.RepeatCounter = 0;
             devState.RepeatKeyScancode = 0;
 
-            // 1. Handle Modifiers (FIX: Pakai InputManager)
-            auto checkmod = [&](U8 Bitmask, U8 Scancode){
-                BOOL OldBit = (OldMods & Bitmask);
-                BOOL NewBit = (NewMods & Bitmask);
-                // Press
-                if(NewBit && !OldBit) PushKeyEvent(InputEventType::KEYBOARD_PRESS, Scancode);
-                // Release
-                if(!NewBit && OldBit) PushKeyEvent(InputEventType::KEYBOARD_RELEASE, Scancode);
-            };
-            checkmod(1, 0x1D); // Ctrl
-            checkmod(2, 0x2A); // Shift
-            checkmod(4, 0x38); // Alt
+            // 1. Handle Modifiers (Ctrl, Shift, Alt)
+            injectMod(1, 0x1D); // Ctrl
+            injectMod(2, 0x2A); // LShift
+            injectMod(4, 0x38); // LAlt
 
             // 2. Handle Key Press
             for(INTN Key = 2; Key < 8 ; Key++){
@@ -73,55 +63,51 @@ STATIC VOID CheckAndHandleIfKeyboardHID(xHCI::xHCIDriver::XHCIDeviceState &devSt
 
                 BOOL IsNew = TRUE;
                 for (int j = 2; j < 8; j++) {
-                    if (devState.LastKeyboardData[j] == Keycode) {
-                        IsNew = FALSE; break;
-                    }
+                    if (devState.LastKeyboardData[j] == Keycode) { IsNew = FALSE; break; }
                 }
 
                 if(IsNew){
                     U8 PS2 = HID_to_PS2[Keycode];
                     if(PS2 != 0){
-                        // FIX: Konsisten pakai PushKeyEvent
-                        PushKeyEvent(InputEventType::KEYBOARD_PRESS, PS2);
-                        devState.RepeatKeyScancode = PS2;
+                        // kirim prefix 0xE0 jika itu tombol navigasi
+                        if(Keycode >= 0x49 && Keycode <= 0x52) {
+                            PIC::Keyboard::InjectScancode(0xE0); // Kirim Prefix Make
+                        }
+                        PIC::Keyboard::InjectScancode(PS2);
+                        devState.RepeatKeyScancode = PS2; // Buat auto-repeat
                     }
                 }
             }
 
-            // 3. Handle Key Release (FIX: Pakai InputManager)
+            // 3. Handle Key Release
             for (int i = 2; i < 8; i++) {
                 U8 oldKey = devState.LastKeyboardData[i];
                 if (oldKey <= 3) continue;
 
                 bool isReleased = TRUE;
                 for (int j = 2; j < 8; j++) {
-                    if (data[j] == oldKey) {
-                        isReleased = FALSE; break;
-                    }
+                    if (data[j] == oldKey) { isReleased = FALSE; break; }
                 }
 
                 if (isReleased) {
                     U8 ps2 = HID_to_PS2[oldKey];
-                    // Kirim Event RELEASE, bukan inject scancode | 0x80
-                    // Biar layer atas yang mutusin logic-nya.
-                    if (ps2 != 0) PushKeyEvent(InputEventType::KEYBOARD_RELEASE, ps2);
+                    if (ps2 != 0) {
+                        // Jika tombol navigasi (Extended)
+                        if(oldKey >= 0x49 && oldKey <= 0x52) {
+                            PIC::Keyboard::InjectScancode(0xE0); // Kirim Prefix Break
+                        }
+                        PIC::Keyboard::InjectScancode(ps2 | 0x80);
+                    }
                 }
             }
-
             String::Memcpy(devState.LastKeyboardData, data, 8);
-
         } else {
-            // === LOGIC REPEAT (FIX: Pakai InputManager) ===
+            // 4. Logic Auto-Repeat
             if(devState.RepeatKeyScancode != 0){
                 devState.RepeatCounter++;
-                
-                const U32 DELAY_INITIAL = 25; // Delay agak lamaan dikit buat start
-                const U32 DELAY_REPEAT  = 2;  
-
-                if (devState.RepeatCounter > DELAY_INITIAL) {
-                    devState.RepeatCounter = DELAY_INITIAL - DELAY_REPEAT;
-                    // REPEAT ITU SAMA DENGAN PRESS BERULANG
-                    PushKeyEvent(InputEventType::KEYBOARD_PRESS, devState.RepeatKeyScancode);
+                if (devState.RepeatCounter > 25) { // Threshold repeat
+                    devState.RepeatCounter = 23; 
+                    PIC::Keyboard::InjectScancode(devState.RepeatKeyScancode);
                 }
             }
         }
@@ -147,41 +133,39 @@ STATIC VOID CheckAndHandleIfMouseHID(xHCI::xHCIDriver::XHCIDeviceState &devState
         BOOL clicked = (buttons != devState.LastMouseButtons); // Asumsi kamu nambah variable ini di struct devState
 
         if(moved || clicked) {
-            InputEvent ev;
-            ev.Type = InputEventType::MOUSE_MOVE; // Sederhanakan jadi MOVE aja, layer atas yang parse tombol
-            
-            ev.Mouse.dX = x_rel;
-            ev.Mouse.dY = y_rel;
-            ev.Mouse.Button = buttons; // Update status tombol terkini
-
-            // KIRIM KE DAEMON
-            InputManager::PushEvent(ev);
+            MouseDriver::SendPacket(x_rel, y_rel, buttons);
             
             // Simpan state
             devState.LastMouseButtons = buttons;
-            
-            // Debug (Opsional)
-            // Serial::Printf("M: %d %d Btn: %x\n", x_rel, y_rel, buttons);
         }
     }
 }
 
 VOID HandleIfHIDInput(xHCI::xHCIDriver::XHCIDeviceState &DevState, volatile xHCITRB *Event, U8 CCode, U8 dciSource){
     U8 *Data = DevState.IntBufferVirt;
-    U32 Residual = (Event->status & 0x00FFFFFF);
     
     // === FIX MATEMATIKA ===
-    // Jangan hardcode 8. Sesuaikan dengan Request kita.
-    // Kalau Mouse kita minta 64, kalau Keyboard kita minta 8.
-    U32 LengthRequested = 8;
+    // Kita harus tahu berapa yang KITA MINTA di ISR tadi.
+    // Logic ini harus SAMA PERSIS dengan xhci_isr.cpp saat QueueInterruptTransfer
     
-    // Cegah Underflow kalau residual error (lebih gede dari request)
+    U32 LengthRequested = 64; 
+    
+    U32 Residual = (Event->status & 0x00FFFFFF);
+
+    // Kalau residual > request, baru itu error aneh.
     if (Residual > LengthRequested) Residual = LengthRequested;
 
     U32 ActualLength = LengthRequested - Residual;
 
-    // Debugging print kalau mau liat angkanya
-    // if(DevState.IsMouse) Serial::Printf("Mouse Res: %d Actual: %d\n", Residual, ActualLength);
+    // DEBUG JITULAH
+    if(ActualLength > 0 && DevState.IsMouse) {
+        /*Serial::Printf(" [MOUSE] Bytes: %d | Data: %02X %02X %02X ...\n", 
+            ActualLength, DevState.IntBufferVirt[0], DevState.IntBufferVirt[1], DevState.IntBufferVirt[2]);*/
+    }
+
+    // Debugging print
+    //if(DevState.IsMouse) Serial::Printf("Mouse Req: %d Res: %d Actual: %d\n", LengthRequested, Residual, ActualLength);
+    //if(DevState.IsKeyboard) Serial::Printf("Keyboard Req: %d Res: %d Actual: %d\n", LengthRequested, Residual, ActualLength);
 
     if (DevState.IsKeyboard) {
         CheckAndHandleIfKeyboardHID(DevState, Data, ActualLength);
@@ -219,9 +203,14 @@ VOID FindClassAndEndpoint(U32 &offset, U16 &totalLen, U8 *buffer, xHCI::xHCIDriv
                     if (TransferType == 3 && DirIn) {
                         if (pkt < 8) pkt = 8;
 
-                        Write(Printk::Level::LOG_NOTICE, "   >>> FOUND INPUT ENDPOINT! DCI=%u (Addr=0x%x) MPS=%u\n", ((addr & 0xF) * 2) + 1, addr, pkt);
+                        //Write(Printk::Level::LOG_NOTICE, "   >>> FOUND INPUT ENDPOINT! DCI=%u (Addr=0x%x) MPS=%u\n", ((addr & 0xF) * 2) + 1, addr, pkt);
 
                         DRV.Devs[SlotID].ActiveIntDCI = (EpNum * 2) + 1;
+                        
+                        // === TAMBAHAN ===
+                        DRV.Devs[SlotID].IntMaxPacketSize = pkt; // Simpan Packet Size asli dari device!
+                        // ================
+
                         ConfigureEndpoint(DRV, SlotID, addr, 7, pkt, interval);
                         found = TRUE;
                     }
@@ -249,8 +238,8 @@ VOID FindClassAndEndpoint(U32 &offset, U16 &totalLen, U8 *buffer, xHCI::xHCIDriv
                 // --- USB HUB (Status Change) ---
                 case 0x09: {
                     if (TransferType == 3 && DirIn) { // Interrupt IN
-                        Write(Printk::Level::LOG_NOTICE, "   >>> FOUND HUB STATUS ENDPOINT! DCI=%u MPS=%u Interval=%u\n",
-                              ((addr & 0xF) * 2) + 1, pkt, interval);
+                        //Write(Printk::Level::LOG_NOTICE, "   >>> FOUND HUB STATUS ENDPOINT! DCI=%u MPS=%u Interval=%u\n",
+                        //      ((addr & 0xF) * 2) + 1, pkt, interval);
 
                         DRV.Devs[SlotID].ActiveIntDCI = (EpNum * 2) + 1;
                         ConfigureEndpoint(DRV, SlotID, addr, 7, pkt, interval);
@@ -277,17 +266,17 @@ VOID FindClassAndEndpoint(U32 &offset, U16 &totalLen, U8 *buffer, xHCI::xHCIDriv
 
             switch (interfaceClass) {
                 case 0x03: {
-                    Write(Printk::Level::LOG_NOTICE, "   [DETECT] Found HID Device (Mouse/Keyboard)!\n");
+                    //Write(Printk::Level::LOG_NOTICE, "   [DETECT] Found HID Device (Mouse/Keyboard)!\n");
                     if (interfaceProtocol == 1) {
-                        Write(Printk::Level::LOG_NOTICE, "   [DETECT] Found HID Keyboard!\n");
+                       // Write(Printk::Level::LOG_NOTICE, "   [DETECT] Found HID Keyboard!\n");
                         DRV.Devs[SlotID].IsKeyboard = TRUE;
                         DRV.Devs[SlotID].IsMouse = FALSE;
                     } else if (interfaceProtocol == 2) {
-                        Write(Printk::Level::LOG_NOTICE, "   [DETECT] Found HID Mouse!\n");
+                       // Write(Printk::Level::LOG_NOTICE, "   [DETECT] Found HID Mouse!\n");
                         DRV.Devs[SlotID].IsMouse = TRUE;
                         DRV.Devs[SlotID].IsKeyboard = FALSE;
                     } else {
-                        Write(Printk::Level::LOG_NOTICE, "   [DETECT] Found Generic HID (Joystick/Tablet) Protocol: %d\n", interfaceProtocol);
+                       // Write(Printk::Level::LOG_NOTICE, "   [DETECT] Found Generic HID (Joystick/Tablet) Protocol: %d\n", interfaceProtocol);
                     }
                     break;
                 }

@@ -60,12 +60,12 @@ namespace xHCI {
         { 
             U8 msix_offset = PCI::FindCapability(Bus, Device, Function, 0x11); 
             if (msix_offset != 0) {
-                Write(Level::LOG_INFO, " xHCI: MSI-X Capability found at 0x%x. Attempting Enable...\n", msix_offset);
+                //Write(Level::LOG_INFO, " xHCI: MSI-X Capability found at 0x%x. Attempting Enable...\n", msix_offset);
                 U8 vec = MSI::EnableMSIX(Bus, Device, Function, msix_offset, xHCI_InterruptHandler_C0);
                 
                 if (vec != 0) {
                     DRV.IntVector = vec;
-                    Write(Level::LOG_INFO, " xHCI: MSI-X Enabled! Vector 0x%x\n", vec);
+                    //Write(Level::LOG_INFO, " xHCI: MSI-X Enabled! Vector 0x%x\n", vec);
                     goto interrupt_done;
                 } else {
                     Write(Level::LOG_ERR, " xHCI: MSI-X Enable Failed. Trying fallback...\n");
@@ -79,12 +79,12 @@ namespace xHCI {
         {
             U8 msi_offset = PCI::FindCapability(Bus, Device, Function, 0x05); 
             if (msi_offset != 0) {
-                Write(Level::LOG_INFO, " xHCI: MSI Capability found at 0x%x. Attempting Enable...\n", msi_offset);
+                //Write(Level::LOG_INFO, " xHCI: MSI Capability found at 0x%x. Attempting Enable...\n", msi_offset);
                 U8 vec = MSI::EnableMSI(Bus, Device, Function, msi_offset, xHCI_InterruptHandler_C0);
                 
                 if (vec != 0) {
                     DRV.IntVector = vec;
-                    Write(Level::LOG_INFO, " xHCI: MSI Enabled! Vector 0x%x\n", vec);
+                    //Write(Level::LOG_INFO, " xHCI: MSI Enabled! Vector 0x%x\n", vec);
                     goto interrupt_done;
                 }
             }
@@ -130,20 +130,20 @@ namespace xHCI {
         if(!dev) {
             Write(Level::LOG_ERR, " Failed allocating XHCI dev wrapper\n");
         } else {
-            BOOL ok1 = DeviceManager::RegisterBlockDevice(dev);
+            DeviceManager::RegisterBlockDevice(dev);
 
             // Also try to register with DevFS mounted at /dev
             FileSystem* fs = nullptr; char rel[256];
-            BOOL ok2 = FALSE;
+            __MAYBE_UNUSED BOOL ok2 = FALSE;
             if (VFSManager::ResolvePath((const char*)"/dev", &fs, rel) && fs) {
                 DevFS* devfs = (DevFS*)fs;
                 ok2 = devfs->RegisterBlockDevice(dev, dev->GetDeviceName());
             }
 
-            Write(Level::LOG_DEBUG, " XHCI: Registered controller node %s (devmgr=%d, devfs=%d)\n", dev->GetDeviceName(), ok1 ? 1 : 0, ok2 ? 1 : 0);
+            //Write(Level::LOG_DEBUG, " XHCI: Registered controller node %s (devmgr=%d, devfs=%d)\n", dev->GetDeviceName(), ok1 ? 1 : 0, ok2 ? 1 : 0);
         }
-        Write(Level::LOG_DEBUG, " Registered XHCI Controller %02X:%02X:%02X\n",
-            (unsigned)Bus, (unsigned)Device, (unsigned)Function);
+        //Write(Level::LOG_DEBUG, " Registered XHCI Controller %02X:%02X:%02X\n",
+        //    (unsigned)Bus, (unsigned)Device, (unsigned)Function);
 
     }
 }

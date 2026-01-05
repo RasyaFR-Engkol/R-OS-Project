@@ -16,13 +16,13 @@ namespace xHCI{
 
     VOID ConfigureEndpoint(xHCIDriver &DRV, U8 SlotID, U8 EpAddr, U8 EpType, U16 MaxPacketSize, U32 Interval){
         U32 DCI = CalcDCI(EpAddr);
-        Printk::Write(Printk::Level::LOG_INFO, " xHCI: ConfigureEndpoint - Slot %u EpAddr 0x%02x DCI %u Type %u MPS %u Interval %u\n",
-            (unsigned)SlotID, (unsigned)EpAddr, (unsigned)DCI, (unsigned)EpType, (unsigned)MaxPacketSize, (unsigned)Interval);
+        //Printk::Write(Printk::Level::LOG_INFO, " xHCI: ConfigureEndpoint - Slot %u EpAddr 0x%02x DCI %u Type %u MPS %u Interval %u\n",
+        //    (unsigned)SlotID, (unsigned)EpAddr, (unsigned)DCI, (unsigned)EpType, (unsigned)MaxPacketSize, (unsigned)Interval);
 
         PageAlloc::DMAAlloc::DMABuffer *EPRing = PageAlloc::DMAAlloc::AllocateDMABytes(4096);
         if(!EPRing){
-            Printk::Write(Printk::Level::LOG_ERR, " ConfigureEndpoint: Failed to allocate ring for Slot %u EpAddr 0x%02x\n",
-                (unsigned)SlotID, (unsigned)EpAddr);
+          //  Printk::Write(Printk::Level::LOG_ERR, " ConfigureEndpoint: Failed to allocate ring for Slot %u EpAddr 0x%02x\n",
+          //      (unsigned)SlotID, (unsigned)EpAddr);
             return;
         }
 
@@ -111,7 +111,7 @@ namespace xHCI{
         // Dword 4: Average TRB Length
         EP[4] = MaxPacketSize;
 
-        Printk::Write(Printk::Level::LOG_DEBUG, " xHCI: Sending Configure Endpoint for Slot %u DCI %u\n", SlotID, DCI);
+        //Printk::Write(Printk::Level::LOG_DEBUG, " xHCI: Sending Configure Endpoint for Slot %u DCI %u\n", SlotID, DCI);
 
         asm volatile ("mfence" ::: "memory");
 
