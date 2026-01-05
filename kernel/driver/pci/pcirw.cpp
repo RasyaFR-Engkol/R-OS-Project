@@ -5,6 +5,7 @@
 #include "../pic/pic.hpp"
 #include "../../intidt/idt.hpp"
 #include <firmware/acpi.hpp>
+#include <../firmware/chipset/chipset.hpp>
 
 namespace PCI{
     using namespace Printk;
@@ -109,26 +110,40 @@ namespace PCI{
         }
 
         // Read assigned legacy IRQ (Interrupt Line at offset 0x3C)
-        U8 irq = (U8)(ReadDword(Bus, Device, Function, 0x3C) & 0xFF);
-        if (irq == 0xFF || irq == 0x00) {
-            Printk::Write(Printk::Level::LOG_WARNING, " PCI: Invalid IRQ 0x%02x for %02x:%02x.%u\n", (unsigned)irq, (unsigned)Bus, (unsigned)Device, (unsigned)Function);
-            return 0;
+        U8 irq_line = (U8)(ReadDword(Bus, Device, Function, 0x3C) & 0xFF);
+        U8 irq_pin  = (U8)((ReadDword(Bus, Device, Function, 0x3C) >> 8) & 0xFF); // Ambil PIN (1-4)
+        
+        U8 final_gsi = irq_line; 
+
+        using namespace Firmware::Chipset;
+
+        // Cek Chipset Global yang udah dideteksi pas boot
+        if (g_DetectedChipset == CHIPSET_ICH9) {
+            // Logika ICH9: Swizzling
+            // Rumus simple VBox: GSI = 16 + ((Slot + Pin - 1) % 4)
+            // Validasi Pin dulu (harus 1-4, INTA-INTD)
+            if (irq_pin >= 1 && irq_pin <= 4) {
+                final_gsi = 16 + ((Device + (irq_pin - 1)) % 4);
+                
+                // Setup IOAPIC buat GSI baru ini
+                Printk::Write(Printk::Level::LOG_INFO, "[PCI] ICH9 Remap Slot %d Pin %d -> GSI %d\n", Device, irq_pin, final_gsi);
+                
+                // PENTING: Level Triggered + Active Low buat PCI
+                ACPI::IOAPIC::IOApicRedirect(final_gsi, 0x20 + final_gsi, IOAPIC_FLAGS_LEVEL | IOAPIC_FLAGS_LOW);
+                IDT::RegisterInterruptHandler(0x20 + final_gsi, irq_handler);
+                
+                return final_gsi; // Return GSI baru
+            }
         }
 
-        // Unmask IRQ in PIC if legacy IRQ (<16). For IOAPIC/GSI >=16, more setup is required.
-        if (irq < 16) {
-            PIC::EnableIRQ(irq);
-        } 
-
-        // IOAPIC redirection would go here GSI 1:1 mapping assumed for simplicity.
-        Printk::Write(Printk::Level::LOG_INFO, " Remapping IRQ %u for %02x:%02x.%u to GSI %d.\n", (unsigned)irq, (unsigned)Bus, (unsigned)Device, (unsigned)Function, (unsigned)irq);
-        ACPI::IOAPIC::IOApicRedirect((U8)irq, (U8)(0x20 + irq), IOAPIC_FLAGS_DEFAULT);
-
-        // Register handler on vector (PIC offset base is 0x20 -> vector = 0x20 + irq)
-        U8 vector = (U8)(0x20 + irq);
-        IDT::RegisterInterruptHandler(vector, irq_handler);
-        Printk::Write(Printk::Level::LOG_INFO, " PCI: Registered legacy IRQ %u -> vector 0x%02x for %02x:%02x.%u\n", (unsigned)irq, (unsigned)vector, (unsigned)Bus, (unsigned)Device, (unsigned)Function);
-
-        return irq;
-    }
+        // Logika PIIX3 / Fallback (Pake nilai 0x3C mentah-mentah)
+        if (irq_line < 16) {
+            PIC::EnableIRQ(irq_line);
+            // Default flags (Edge/High) biasanya cukup buat legacy mode via IOAPIC override
+            ACPI::IOAPIC::IOApicRedirect(irq_line, 0x20 + irq_line, IOAPIC_FLAGS_DEFAULT);
+            IDT::RegisterInterruptHandler(0x20 + irq_line, irq_handler);
+        }
+        
+        return irq_line;
+        }
 }

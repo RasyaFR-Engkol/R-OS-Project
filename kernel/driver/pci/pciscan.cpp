@@ -7,6 +7,9 @@
 #include "../xhci/xhci.hpp"
 #include "../nvme/nvme.hpp"
 #include "../e1000/e1000.hpp"
+#include "../intel_hda/intel_hda.hpp"
+#include "../qemuvirtiogpu/virtio_gpu.hpp"
+#include "../ac97/ac97.hpp"
 
 /* module name provided via PRINTK_MODULE_NAME */
 
@@ -49,6 +52,7 @@ namespace PCI{
             for(U8 function = 0; function < 8; function++){
                 U32 Reg0 = ReadDword(bus, device, function, 0x00);
                 VendorID = (U16)(Reg0 & 0xFFFF);
+                U16 DeviceID = (U16)((Reg0 >> 16) & 0xFFFF);
 
                 if (VendorID == 0xFFFF) {
                     continue; // Gak ada device di (B:D:F) ini, lanjut
@@ -59,9 +63,9 @@ namespace PCI{
                 U8 SubClass = (U8)((Reg8 >> 16) & 0xFF);
                 U8 ProgIF = (U8)((Reg8 >> 8) & 0xFF);
 
-                Write(Level::LOG_DEBUG, "PCI %d:%d:%d - Class:%x Subclass:%x\n",
-                    (int)bus, (int)device, (int)function,
-                    (int)ClassCode, (int)SubClass);
+                //Write(Level::LOG_DEBUG, "PCI %d:%d:%d - Class:%x Subclass:%x\n",
+                //    (int)bus, (int)device, (int)function,
+                //    (int)ClassCode, (int)SubClass);
 
                 // Mencari AHCI disini
                 if (ClassCode == 0x01 && SubClass == 0x06) {
@@ -91,6 +95,27 @@ namespace PCI{
                     }
                 }
 
+                // Mencari Intel HDA Sound
+                if (ClassCode == 0x04 && SubClass == 0x01) {
+                    Write(Level::LOG_INFO, "AC97 Audio Controller Found at %d:%d:%d\n", 
+                        (int)bus, (int)device, (int)function);
+                    
+                    // Nanti kita panggil fungsi inisialisasi driver di sini
+                    AC97::Initialize(bus, device, function); 
+                    AC97::PlayTestSound(480); // default test tone 480 Hz
+                }
+
+                if (ClassCode == 0x04 && SubClass == 0x03) {
+                    Printk::Write(Printk::Level::LOG_INFO, "Intel HDA Controller Found in %d:%d:%d!\n",
+                        (int)bus, (int)device, (int)function);
+                    IntelHDA::GlobalController.Initialize(bus, device, function);
+                }
+
+                if (VendorID == 0x1AF4 && DeviceID == 0x1050) {
+                    Printk::Write(Printk::Level::LOG_INFO, "Virtio GPU Found!\n");
+                    VirtioGPU::GlobalDriver.Initialize(bus, device, function);
+                }
+
                 if(VendorID == 0x8086){
                     U32 devID = (Reg0 >> 16) & 0xFFFF;
                     if (devID == 0x100E || devID == 0x1000 || devID == 0x153A) {
@@ -118,7 +143,6 @@ namespace PCI{
     }
 
     void ScanAllBuses(){
-        Write(Level::LOG_DEBUG, " start scanning all buses\n");
         for(unsigned bus = 0; bus < 256; ++bus){
             ScanBus((U8)bus);
         }

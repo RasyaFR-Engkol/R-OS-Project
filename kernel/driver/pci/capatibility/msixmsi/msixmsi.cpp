@@ -26,8 +26,6 @@ namespace MSI{
             Printk::Write(Printk::Level::LOG_ERR, " Failed to allocate interrupt vector for MSI\n");
             return 0;
         }
-
-        Printk::Write(Printk::Level::LOG_DEBUG, " Allocated vector 0x%02x for MSI\n", (unsigned)Vector);
         
         // MSI control and layout: first dword at capability offset contains
         // 8-bit CapID, 8-bit NextPtr, 16-bit Message Control (MC)
@@ -90,7 +88,6 @@ namespace MSI{
         }
 
     U8 EnableMSIX(U8 bus, U8 dev, U8 func, U8 msix_cap_offset, void (*handler)(void *context)) {
-        Printk::Write(Printk::Level::LOG_DEBUG, " [MSI-X] Enabling for PCI %02x:%02x:%02x at offset 0x%x\n", bus, dev, func, msix_cap_offset);
 
         // 1. Baca Message Control (Offset + 2)
         // Struktur: [15: Enable] [14: Func Mask] [13:11 Rsvd] [10:0 Table Size N-1]
@@ -148,8 +145,6 @@ namespace MSI{
         
         // 5. Hitung pointer final
         volatile MSIXTableEntry* msix_table_virt = (volatile MSIXTableEntry*)((UPTR)VirtAddr + PageOffset);
-
-        Printk::Write(Printk::Level::LOG_DEBUG, " [MSI-X] Mapped Phys 0x%llx -> Virt 0x%llx (Pages: %d)\n", msix_table_phys_start, (U64)msix_table_virt, pages_needed);
 
         // ===============================================
         // SISANYA SAMA SEPERTI SEBELUMNYA
