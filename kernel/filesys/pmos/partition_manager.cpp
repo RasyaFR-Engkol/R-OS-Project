@@ -24,7 +24,7 @@ namespace PartitionManager{
     }
 
     PARTMANAGER InitializeRegisteredPartitionToFS(){
-        Printk::Write(Printk::Level::LOG_INFO, " Partition Manager: Initializing registered partitions to filesystems...\n");
+        //Printk::Write(Printk::Level::LOG_INFO, " Partition Manager: Initializing registered partitions to filesystems...\n");
 
         U32 Count = GetPartitionCount();
         if(Count == 0){
@@ -62,7 +62,7 @@ namespace PartitionManager{
             }
         }
 
-        Printk::Write(Printk::Level::LOG_INFO, " Partition Manager: Mounted %d out of %d registered partitions.\n", MountedCount, Count);
+        //Printk::Write(Printk::Level::LOG_INFO, " Partition Manager: Mounted %d out of %d registered partitions.\n", MountedCount, Count);
         return PARTITIONS_INITIALIZED;
     }
 

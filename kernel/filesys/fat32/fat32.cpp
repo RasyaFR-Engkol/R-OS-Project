@@ -52,15 +52,12 @@ BOOL FAT32FileSystem::Mount(Partition *Part){
     return TRUE;
 }
 
-File* FAT32FileSystem::Open(const char* path){
+File* FAT32FileSystem::Open(const char* path, U32 Flags){
     if(!m_Partition) return nullptr;
 
-    // Support opening root directory
+    // 1. Handle Root Directory Open ("/")
     if(path && path[0] == '/' && path[1] == '\0'){
         File* froot = new File();
-        // Do not memset the whole object: that would overwrite the vptr and
-        // lead to a null-deref when deleting the object. Initialize fields
-        // explicitly instead.
         froot->FileSize = 0;
         froot->CurrentPosition = 0;
         froot->IsDirectory = TRUE;
@@ -68,117 +65,159 @@ File* FAT32FileSystem::Open(const char* path){
         froot->Internal_CurrentCluster = m_BPB.RootDirCluster;
         froot->FileName[0] = '\0';
         String::Strcpy(froot->FileName, "/");
-        
-        // --- PERUBAHAN ---
-        // Root dir tidak memiliki entri standar, jadi LBA/offset-nya 0
         froot->Internal_DirEntryLBA = 0;
         froot->Internal_DirEntryOffset = 0;
         froot->FSOwner = this;
-        // --- AKHIR PERUBAHAN ---
-
+        froot->type = FT_DIR;
+        froot->InodeID = 1; // 1 itu default ROOT
         return froot;
     }
 
-    // Support path traversal with '/' separators. Start at root cluster.
+    // 2. Path Traversal
     U32 currentCluster = m_BPB.RootDirCluster;
     const char* p = path;
     char comp[260];
     char foundNameLocal[520];
     FAT32_DirectoryEntry entry;
 
-    // --- PERUBAHAN ---
-    // Variabel untuk menyimpan lokasi entri *final*
     U64 finalEntryLBA = 0;
     U32 finalEntryOffset = 0;
-    // --- AKHIR PERUBAHAN ---
 
     const char* segStart = p;
     while(true){
         if(!segStart || *segStart == '\0') break;
-        // find next slash
+        
+        // Parsing path component
         const char* slash = String::Strchr(segStart, '/');
         unsigned long long seglen = slash ? (unsigned long long)(slash - segStart) : String::Strlen(segStart);
-        if(seglen == 0){ // skip empty component (e.g., leading or double slash)
+        
+        if(seglen == 0){ 
             segStart = slash ? slash + 1 : nullptr;
             if(!segStart) break;
             continue;
         }
         if(seglen >= sizeof(comp)) seglen = sizeof(comp)-1;
-        // copy component
+        
         for(unsigned long long i=0;i<seglen;i++) comp[i] = segStart[i];
         comp[seglen] = '\0';
 
-        // ask FindFileInDir to also return the matched filename (LFN if present)
         foundNameLocal[0] = '\0';
-
-        // --- PERUBAHAN ---
-        // Variabel untuk LBA/offset komponen *saat ini*
         U64 currentEntryLBA = 0;
         U32 currentEntryOffset = 0;
         
-        // Panggil FindFileInDir dengan TANDA TANGAN BARU
-        if(!FindFileInDir(comp, currentCluster, &entry, 
+        // Cari entry di direktori saat ini
+        BOOL found = FindFileInDir(comp, currentCluster, &entry, 
                          foundNameLocal, sizeof(foundNameLocal), 
-                         &currentEntryLBA, &currentEntryOffset)) // <-- Argumen baru
-        {
-            Printk::Write(Printk::Level::LOG_WARNING, "FAT32: Path component '%s' not found\n", comp);
-            return nullptr;
-        }
-        // --- AKHIR PERUBAHAN ---
+                         &currentEntryLBA, &currentEntryOffset);
 
-
-        // If there's another segment, the found entry must be a directory
-        if(slash){
-            if(!(entry.Attributes & 0x10)){
-                Printk::Write(Printk::Level::LOG_WARNING, "FAT32: Path component '%s' is not a directory\n", comp);
-                return nullptr;
+        if(!found) {
+            // === LOGIC BARU: O_CREAT HANDLER ===
+            
+            // Cek 1: Apakah ini komponen terakhir? (slash == nullptr)
+            // Kalau slash != nullptr, berarti folder parent-nya yang ilang (misal open /A/B.txt tapi folder A gak ada).
+            // Standar Open() itu error kalau parent gak ada (kecuali kita implement mkdir -p).
+            if(slash != nullptr) {
+                return nullptr; // Parent directory missing
             }
-            // advance into directory
+
+            // Cek 2: Apakah User minta O_CREAT?
+            if(Flags & O_CREAT){
+                // Saatnya memanggil helper sakti lo!
+                
+                U32 newStartCluster = 0; // 0 = File kosong (belum makan space)
+                U32 newFileSize = 0;
+                
+                // Panggil helper untuk bikin entry di disk
+                // currentCluster = cluster direktori tempat file ini akan tinggal
+                if(CreateDirectoryEntry(currentCluster, comp, newStartCluster, newFileSize, 
+                                      &finalEntryLBA, &finalEntryOffset)) 
+                {
+                    // SUKSES CREATE!
+                    // Sekarang bikin object File-nya
+                    File* f = new File();
+                    f->FSOwner = this;
+                    f->FileSize = 0;
+                    f->CurrentPosition = 0;
+                    f->IsDirectory = FALSE; // File baru pasti reguler file (bukan dir)
+                    
+                    // StartCluster 0 artinya file kosong. Nanti pas Write() pertama kali, 
+                    // lo harus allocate cluster baru.
+                    f->Internal_StartCluster = 0; 
+                    f->Internal_CurrentCluster = 0;
+                    
+                    f->Internal_DirEntryLBA = finalEntryLBA;
+                    f->Internal_DirEntryOffset = finalEntryOffset;
+                    f->type = FT_NORMAL;
+                    f->InodeID = (finalEntryLBA << 9) + finalEntryOffset;
+                    
+                    // Copy nama file
+                    String::Strcpy(f->FileName, comp);
+                    
+                    return f;
+                } else {
+                    Printk::Write(Printk::Level::LOG_ERR, "FAT32: Failed to create entry for %s\n", comp);
+                    return nullptr;
+                }
+            }
+            
+            // Gak ketemu dan gak minta create
+            return nullptr; 
+            // === END LOGIC BARU ===
+        }
+
+        // Kalau ketemu...
+        if(slash){
+            // Ini folder (intermediate path), masuk ke dalem
+            if(!(entry.Attributes & 0x10)){
+                // Error: path bilang ini folder (/a/b) tapi 'a' ternyata file biasa
+                return nullptr; 
+            }
             currentCluster = ((U32)entry.ClusterHigh << 16) | (U32)entry.ClusterLow;
             segStart = slash + 1;
             continue;
         } else {
-            // last component, entry contains the target. 
-            // --- PERUBAHAN ---
-            // Simpan LBA/offset dari entri *terakhir* ini
+            // Ini file/folder tujuan akhir
+            
+            // Cek O_EXCL: Kalau file udah ada dan minta O_CREAT | O_EXCL, harus error
+            if((Flags & O_CREAT) && (Flags & O_EXCL)){
+                return nullptr; 
+            }
+
             finalEntryLBA = currentEntryLBA;
             finalEntryOffset = currentEntryOffset;
-            // --- AKHIR PERUBAHAN ---
             break;
         }
     }
 
+    // (Sisa kode lo di bawah buat build File* object dari 'entry' yang ketemu tetep sama)
     // Build File struct from entry
     File* f = new File();
-    // Initialize fields explicitly to avoid wiping the vptr via memset
     f->FileSize = entry.FileSize;
     f->CurrentPosition = 0;
     f->IsDirectory = (entry.Attributes & 0x10) ? TRUE : FALSE;
     U32 startCluster = ((U32)entry.ClusterHigh << 16) | (U32)entry.ClusterLow;
     f->Internal_StartCluster = startCluster;
     f->Internal_CurrentCluster = startCluster;
-
-    // --- PERUBAHAN ---
-    // Simpan lokasi entri di disk ke struct File
     f->Internal_DirEntryLBA = finalEntryLBA;
     f->Internal_DirEntryOffset = finalEntryOffset;
-    // Pastikan FSOwner diisi agar operasi VFS (Read/Write/Close/Seek) berjalan
     f->FSOwner = this;
-    // --- AKHIR PERUBAHAN ---
+    f->type = FT_NORMAL;
+    f->InodeID = (finalEntryLBA << 9) + finalEntryOffset;
 
-    // Build file name: prefer LFN if available (returned in foundNameLocal), otherwise use SFN.
+    // Handle O_TRUNC (Isi file dihapus jadi 0)
+    if((Flags & O_TRUNC) && !f->IsDirectory) {
+        Truncate(f, 0); 
+    }
+
     if(foundNameLocal[0] != '\0'){
-        // copy LFN into FileName (truncate if needed)
         unsigned long long tocpy = String::Strlen(foundNameLocal);
         if(tocpy >= sizeof(f->FileName)) tocpy = sizeof(f->FileName) - 1;
         String::Memcpy(f->FileName, foundNameLocal, tocpy);
         f->FileName[tocpy] = '\0';
     } else {
+        // SFN Fallback logic lo...
         char namebuf[13]; int ni=0;
-        for(int i=0;i<8;i++){
-            char c = entry.Name[i]; if(c == ' ') break; namebuf[ni++] = c;
-        }
-        // extension
+        for(int i=0;i<8;i++){ char c = entry.Name[i]; if(c == ' ') break; namebuf[ni++] = c; }
         int extlen = 0;
         for(int i=8;i<11;i++) if(entry.Name[i] != ' ') extlen++;
         if(extlen > 0){ namebuf[ni++] = '.'; for(int i=8;i<11;i++){ if(entry.Name[i] != ' ') namebuf[ni++] = entry.Name[i]; } }
@@ -383,111 +422,6 @@ U32 FAT32FileSystem::Write(File* file, U8* buffer, U32 size){
     return totalWritten;
 }
 
-File *FAT32FileSystem::Create(const char *path){
-    if(!path || path[0] != '/') return nullptr; // Hanya support full path
-    Printk::Write(Printk::Level::LOG_DEBUG, "FAT32: Create called for '%s'\n", path);
-    
-    // 1. Cek dulu apakah file sudah ada
-    // Open() akan mengembalikan non-null jika ada
-    File* existing = Open(path);
-    if(existing){
-        Close(existing); // Tutup lagi
-        Printk::Write(Printk::Level::LOG_WARNING, "FAT32: Create failed, file '%s' is exist", path);
-        return nullptr; // File sudah ada
-    }
-
-    // 2. Pisahkan path: "/folder/baru/file.txt" -> "/folder/baru" dan "file.txt"
-    char parentPath[256];
-    const char* newName = nullptr;
-    size_t len = String::Strlen(path);
-    int lastSlash = -1;
-
-    /* Scan backwards without signed overflow by using an unsigned
-       size_t loop index and decrementing until zero. */
-    if(len > 0){
-        for(size_t ui = len; ui > 0; ){ 
-            ui--;
-            if(path[ui] == '/'){
-                lastSlash = (int)ui;
-                break;
-            }
-        }
-    }
-
-    if(lastSlash == -1) return nullptr; // Seharusnya tidak terjadi jika path[0] == '/'
-
-    if(lastSlash == 0){ // File di root, e.g. "/file.txt"
-        String::Strcpy(parentPath, "/");
-        newName = path + 1;
-    } else { // File di subfolder, e.g. "/folder/file.txt"
-        String::Memcpy(parentPath, path, (U64)lastSlash);
-        parentPath[lastSlash] = '\0';
-        newName = path + lastSlash + 1;
-    }
-
-    if(String::Strlen(newName) == 0) return nullptr; // Tidak boleh nama kosong
-
-    // 3. Buka direktori induk
-    File* parentDir = Open(parentPath);
-    if(!parentDir){
-        Printk::Write(Printk::Level::LOG_ERR, "FAT32: Create gagal, folder induk '%s' tidak ada", parentPath);
-        return nullptr;
-    }
-    if(!parentDir->IsDirectory){
-        Printk::Write(Printk::Level::LOG_ERR, "FAT32: Create gagal, '%s' bukan direktori", parentPath);
-        Close(parentDir);
-        return nullptr;
-    }
-
-    // 4. Panggil helper untuk membuat entri (LFN + SFN) di disk
-    U32 parentCluster = parentDir->Internal_StartCluster;
-    
-    // File baru punya start cluster 0 dan size 0
-    BOOL created = CreateDirectoryEntry(parentCluster, newName, 0, 0); 
-    
-    Close(parentDir); // Selesai dengan direktori induk
-
-    if(!created){
-        Printk::Write(Printk::Level::LOG_ERR, "FAT32: CreateDirectoryEntry gagal untuk '%s' (parentCluster=%u)\n", newName, parentCluster);
-        return nullptr;
-    }
-
-    Printk::Write(Printk::Level::LOG_INFO, "FAT32: File '%s' created successfully\n", path);
-
-    // 5. Sukses! Entri sudah ada di disk.
-    // Cara termudah dan teraman untuk dapat File* adalah... panggil Open() lagi.
-    // Ini akan membaca entri yang baru saja kita tulis.
-    return Open(path);
-}
-
-// Copy a file within FAT32 filesystem. srcPath and destPath should be absolute within FS (start with '/')
-BOOL FAT32FileSystem::Cp(const char* srcPath, const char* destPath){
-    if(!srcPath || !destPath) return FALSE;
-    File* src = Open(srcPath);
-    if(!src) return FALSE;
-    if(src->IsDirectory){ Close(src); return FALSE; }
-
-    File* dst = Create(destPath);
-    if(!dst){ Close(src); return FALSE; }
-
-    // buffer size: use cluster size if available, else 4096
-    U32 clusterBytes = (U32)m_BPB.BytesPerSector * (U32)m_BPB.SectorsPerCluster;
-    U32 bufSize = (clusterBytes > 0 && clusterBytes <= 65536) ? clusterBytes : 4096;
-    U8* buf = (U8*)Kmalloc::Alloc(bufSize);
-    if(!buf){ Close(src); Close(dst); return FALSE; }
-
-    U32 r;
-    while((r = Read(src, buf, bufSize)) > 0){
-        U32 w = Write(dst, buf, r);
-        if(w != r){ Kmalloc::Free(buf); Close(src); Close(dst); return FALSE; }
-    }
-
-    Kmalloc::Free(buf);
-    Close(src);
-    Close(dst);
-    return TRUE;
-}
-
 // helper functions moved to fat32_helper.cpp
 
 BOOL FAT32FileSystem::Delete(const char* path){
@@ -516,7 +450,7 @@ BOOL FAT32FileSystem::Delete(const char* path){
     if(!name || String::Strlen(name) == 0) return FALSE;
 
     // 2) Open parent directory
-    File* parentDir = Open(parentPath);
+    File* parentDir = Open(parentPath, O_RDWR);
     if(!parentDir || !parentDir->IsDirectory){ if(parentDir) Close(parentDir); return FALSE; }
 
     U32 dirStartCluster = parentDir->Internal_StartCluster;
@@ -663,7 +597,7 @@ BOOL FAT32FileSystem::Rename(const char* oldPath, const char* newPath){
     if(!newName || String::Strlen(newName)==0) return FALSE;
 
     // Open old parent and find entry
-    File* oldDir = Open(oldParent);
+    File* oldDir = Open(oldParent, O_RDWR);
     if(!oldDir || !oldDir->IsDirectory){ if(oldDir) Close(oldDir); return FALSE; }
     U32 oldDirCl = oldDir->Internal_StartCluster;
 
@@ -675,7 +609,7 @@ BOOL FAT32FileSystem::Rename(const char* oldPath, const char* newPath){
     if(oldDe.Attributes & 0x10){ Close(oldDir); return FALSE; }
 
     // If destination exists, fail
-    File* newDir = Open(newParent);
+    File* newDir = Open(newParent, O_RDWR);
     if(!newDir || !newDir->IsDirectory){ if(newDir) Close(newDir); Close(oldDir); return FALSE; }
     U32 newDirCl = newDir->Internal_StartCluster;
 
@@ -743,7 +677,7 @@ BOOL FAT32FileSystem::Rename(const char* oldPath, const char* newPath){
     return TRUE;
 }
 
-BOOL FAT32FileSystem::Seek(File* file, U64 position){
+BOOL FAT32FileSystem::Seek(File* file, U64 position, U32 Origin){
     if(!file) return FALSE;
     // Directories: do not support seeking for now
     if(file->IsDirectory) return FALSE;
@@ -911,7 +845,7 @@ BOOL FAT32FileSystem::MKDir(const char* path){
     if(!path || path[0] != '/') return FALSE;
 
     // Check existence
-    File* existing = Open(path);
+    File* existing = Open(path, O_RDWR);
     if(existing){ Close(existing); return FALSE; }
 
     // split parent and name
@@ -924,7 +858,7 @@ BOOL FAT32FileSystem::MKDir(const char* path){
     else { if((size_t)lastSlash >= sizeof(parentPath)) return FALSE; String::Memcpy(parentPath, path, (U64)lastSlash); parentPath[lastSlash] = '\0'; newName = path + lastSlash + 1; }
     if(!newName || String::Strlen(newName) == 0) return FALSE;
 
-    File* parentDir = Open(parentPath);
+    File* parentDir = Open(parentPath, O_RDWR);
     if(!parentDir){ return FALSE; }
     if(!parentDir->IsDirectory){ Close(parentDir); return FALSE; }
 
@@ -1010,7 +944,7 @@ BOOL FAT32FileSystem::RMDir(const char* path){
     else { if((size_t)lastSlash >= sizeof(parentPath)) return FALSE; String::Memcpy(parentPath, path, (U64)lastSlash); parentPath[lastSlash] = '\0'; name = path + lastSlash + 1; }
     if(!name || String::Strlen(name) == 0) return FALSE;
 
-    File* parentDir = Open(parentPath);
+    File* parentDir = Open(parentPath, O_RDWR);
     if(!parentDir || !parentDir->IsDirectory){ if(parentDir) Close(parentDir); return FALSE; }
 
     U32 dirStartCluster = parentDir->Internal_StartCluster;
@@ -1113,7 +1047,7 @@ BOOL FAT32FileSystem::Append(File* file, U8* buffer, U32 size){
     if(file->IsDirectory) return FALSE;
 
     // seek to end
-    if(!Seek(file, file->FileSize)) return FALSE;
+    if(!Seek(file, file->FileSize, SEEK_CUR)) return FALSE;
 
     U32 written = Write(file, buffer, size);
     return (written == size) ? TRUE : FALSE;
@@ -1161,4 +1095,36 @@ INTN FAT32FileSystem::ReadDir(File* dirFile, void* buffer, U32 bufferSize){
     if(!ok && !overflow) return -1;
     U32 used = bufferSize - remain;
     return (INTN)used;
+}
+
+BOOL FAT32FileSystem::Unmount(){
+    m_Partition = nullptr;
+
+    Printk::Write(Printk::Level::LOG_INFO, "FAT32: Unmounted successfully.\n");
+    return TRUE;
+}
+
+BOOL FAT32FileSystem::Stat(const char *path, FileInfo *bufferout){
+    if(!path || !bufferout) return FALSE;
+    if(!m_Partition) return FALSE;
+
+    // Use Open() to locate the node and gather basic info
+    File* f = Open(path, O_RDONLY);
+    if(!f) return FALSE;
+
+    bufferout->Size = f->FileSize;
+    bufferout->InodeID = f->InodeID;
+    bufferout->IsDirectory = f->IsDirectory;
+    bufferout->Type = f->IsDirectory ? FT_DIR : FT_NORMAL;
+    // FAT32 doesn't store UNIX mode; provide sensible defaults
+    bufferout->Mode = f->IsDirectory ? 0755 : 0644;
+    bufferout->CreationTime = 0;
+
+    Close(f);
+    return TRUE;
+}
+I64 FAT32FileSystem::ReadLink(const char* path, char* outLink, U64 outLinkSize)
+{
+    // FAT32 doesn't support symlinks
+    return -1;
 }

@@ -498,7 +498,7 @@ BOOL EXT2FileSystem::Append(File* file, U8* buffer, U32 size){
     if(file->IsDirectory) return FALSE;
 
     // Seek to EOF
-    if(!Seek(file, file->FileSize)) return FALSE;
+    if(!Seek(file, file->FileSize, SEEK_CUR)) return FALSE;
 
     U32 written = Write(file, buffer, size);
     return (written == size) ? TRUE : FALSE;
@@ -634,182 +634,98 @@ INTN EXT2FileSystem::ReadDir(File* dirFile, void* buffer, U32 bufferSize){
     return (INTN)used;
 }
 
-File* EXT2FileSystem::Open(const char* path) {
+File* EXT2FileSystem::Open(const char* path, U32 Flags) {
     EXT2::Inode inode;
     U32 InodeNum = FindInodeForPath(path, &inode);
 
-    if(InodeNum == 0){
-        Printk::Write(Printk::Level::LOG_WARNING, "EXT2: Open - File not found: %s\n", path);
-        return nullptr;
+    if(InodeNum > 0){
+        if ((Flags & O_CREAT) && (Flags & O_EXCL)) return nullptr;
+
+        File *file = new File();
+        if(!file){
+            Printk::Write(Printk::Level::LOG_ERR, "EXT2: Open - Failed to allocate File object for %s\n", path);
+            return nullptr;
+        }
+
+        String::Strcpy(file->FileName, path); // TODO: Seharusnya nama file, bukan nama path lengkap
+        file->FileSize = inode.i_size;
+        file->IsDirectory = (inode.i_mode & EXT2_S_IFDIR) ? TRUE : FALSE;
+        file->CurrentPosition = 0;
+        file->FSOwner = this;
+        file->InodeID = InodeNum;
+
+        file->Internal_StartCluster = InodeNum;
+        file->RefCount = 1; // Init RefCount
+        file->type = FileType::FT_NORMAL;
+
+        if(Flags & O_TRUNC){
+            Truncate(file, 0);
+        }
+
+        return file;
     }
 
-    File *file = new File();
-    if(!file){
-        Printk::Write(Printk::Level::LOG_ERR, "EXT2: Open - Failed to allocate File object for %s\n", path);
-        return nullptr;
+    if(Flags & O_CREAT){
+        char parentPath[256];
+        char fileName[256];
+        String::SplitPath(path, parentPath, fileName);
+
+        EXT2::Inode ParentInode;
+        U32 ParentInodeNum;
+
+        if (String::Strlen(parentPath) == 0 || String::Strcmp(parentPath, "/") == 0) {
+            ParentInodeNum = 2; // Root Inode EXT2
+            ReadInode(2, &ParentInode);
+        } else {
+            ParentInodeNum = FindInodeForPath(parentPath, &ParentInode);
+            if (ParentInodeNum == 0) return nullptr; // Parent gak ada
+        }
+
+        U32 newInodeNum = AllocateInode(); 
+        if (newInodeNum == 0) return nullptr;
+
+        EXT2::Inode NewInode;
+        String::Memset(&NewInode, 0, sizeof(EXT2::Inode));
+        NewInode.i_mode = EXT2_S_IFREG | 0x1FF; // Regular file, rwxrwxrwx
+        NewInode.i_links_count = 1;
+        NewInode.i_ctime = 0;
+        NewInode.i_atime = 0;
+        NewInode.i_mtime = 0;
+        NewInode.i_dtime = 0;
+        NewInode.i_gid = 1000;
+        NewInode.i_uid = 1000;
+
+        WriteInode(newInodeNum, &NewInode);
+        
+        if (!AddEntryToDirectory(&ParentInode, newInodeNum, fileName, EXT2_FT_REG_FILE, ParentInodeNum)) {
+            Printk::Write(Printk::Level::LOG_ERR, "EXT2: Open - Failed to add entry to directory. Rolling back inode %u\n", newInodeNum);
+            FreeInode(newInodeNum); // Hapus inode yang telanjur dibuat
+            return nullptr;
+        }
+
+        return Open(path, Flags & ~O_CREAT);
+
     }
 
-    String::Strcpy(file->FileName, path); // TODO: Seharusnya nama file, bukan nama path lengkap
-    file->FileSize = inode.i_size;
-    file->IsDirectory = (inode.i_mode & EXT2_S_IFDIR) ? TRUE : FALSE;
-    file->CurrentPosition = 0;
-    file->FSOwner = this;
-
-    file->Internal_StartCluster = InodeNum;
-    file->RefCount = 1; // Init RefCount
-
-    Printk::Write(Printk::Level::LOG_DEBUG, "EXT2: Opened file %s (Inode %u, Size %u bytes)\n",
-        path, InodeNum, inode.i_size);
-
-    return file;
+    return nullptr;
 }
 
-File* EXT2FileSystem::Create(const char *Path) {
-    Printk::Write(Printk::Level::LOG_NOTICE, "EXT2: Create %s \n", Path);
+BOOL EXT2FileSystem::Stat(const char *path, FileInfo *info){
+    EXT2::Inode inode;
+    U32 inodeNum = FindInodeForPath(path, &inode);
 
-    if(!Path || String::Strlen(Path) == 0) return nullptr;
+    if (inodeNum == 0) return FALSE;
 
-    // Parse path into parent path and filename
-    CHAR8 ParentPath[256];
-    CHAR8 FileName[256];
-    ParsePath((const CHAR8*)Path, ParentPath, FileName);
-
-    // Find parent inode
-    EXT2::Inode parentInode;
-    U32 parentInodeNum = FindInodeForPath((const char*)ParentPath, &parentInode);
-    if(parentInodeNum == 0){
-        Printk::Write(Printk::Level::LOG_ERR, "EXT2: Create - parent path not found: %s\n", ParentPath);
-        return nullptr;
-    }
-
-    if(!(parentInode.i_mode & EXT2_S_IFDIR)){
-        Printk::Write(Printk::Level::LOG_ERR, "EXT2: Create - parent is not a directory: %s\n", ParentPath);
-        return nullptr;
-    }
-
-    // Check if entry already exists
-    EXT2::DirectoryEntry existing;
-    if(FindEntryInDirectory(&parentInode, (const CHAR8*)FileName, &existing)){
-        Printk::Write(Printk::Level::LOG_WARNING, "EXT2: Create - file already exists: %s/%s\n", ParentPath, FileName);
-        // Open existing file and return handle
-        char full[512];
-        String::Strcpy(full, ParentPath);
-        if(full[String::Strlen(full)-1] != '/') String::Strcat(full, "/");
-        String::Strcat(full, FileName);
-        return Open(full);
-    }
-
-    // Allocate inode
-    U32 newInodeNum = AllocateInode();
-    if(newInodeNum == 0){
-        Printk::Write(Printk::Level::LOG_ERR, "EXT2: Create - failed to allocate inode for %s\n", Path);
-        return nullptr;
-    }
-
-    // Prepare new inode structure
-
-    auto RTCTime = Arch::CMOS::ReadRTC();
-    U32 CurrentTimestamp = Arch::Time::RTCToEpoch(RTCTime);
-
-    EXT2::Inode newInode;
-    String::Memset(&newInode, 0, sizeof(EXT2::Inode));
-    newInode.i_mode = EXT2_S_IFREG | 0644; // regular file + permissions
-    // Use debug-configured default owner if present, otherwise keep root (0)
-    newInode.i_uid = (m_DebugDefaultUid != 0xFFFFFFFF) ? m_DebugDefaultUid : 0;
-    newInode.i_gid = (m_DebugDefaultGid != 0xFFFFFFFF) ? m_DebugDefaultGid : 0;
-    newInode.i_size = 0;
-    newInode.i_links_count = 1;
-    newInode.i_blocks = 0;
-    newInode.i_generation = 0;
-    newInode.i_flags = 0;
-    newInode.i_atime = CurrentTimestamp;
-    newInode.i_ctime = CurrentTimestamp;
-    newInode.i_mtime = CurrentTimestamp;
-    newInode.i_dtime = 0;
-
-    // write inode to disk
-    if(!WriteInode(newInodeNum, &newInode)){
-        Printk::Write(Printk::Level::LOG_ERR, "EXT2: Create - failed to write inode %u for %s\n", newInodeNum, Path);
-        return nullptr;
-    }
-
-    // Add directory entry to parent directory
-    if(!AddEntryToDirectory(&parentInode, newInodeNum, (const CHAR8*)FileName, EXT2_S_IFREG, parentInodeNum)){
-        Printk::Write(Printk::Level::LOG_ERR, "EXT2: Create - failed to add dir entry %s to %s\n", FileName, ParentPath);
-        return nullptr;
-    }
-
-    // Persist parent inode changes
-    if(!WriteInode(parentInodeNum, &parentInode)){
-        Printk::Write(Printk::Level::LOG_ERR, "EXT2: Create - failed to write parent inode %u for %s\n", parentInodeNum, ParentPath);
-        // Not fatal for now, but warn
-    }
-
-    // Persist BGDT to disk (BGDT location depends on block size)
-    U32 BGDTStartBlocks = (m_BlockSize == 1024) ? 2 : 1;
-    for(U32 i = 0; i < m_BGDT_SizeInBlocks; i++){
-        PageAlloc::DMAAlloc::DMABuffer *tmp = PageAlloc::DMAAlloc::AllocateDMABytes(m_BlockSize);
-        if(!tmp){
-            Printk::Write(Printk::Level::LOG_WARNING, "EXT2: Create - failed allocate DMABuffer to write BGDT block %u\n", i);
-            break;
-        }
-        U8 *src = ((U8*)m_BGDT) + (i * m_BlockSize);
-        String::Memcpy((U8*)tmp->VirtAddr, src, m_BlockSize);
-        if(!WriteBlock(BGDTStartBlocks + i, tmp)){
-            Printk::Write(Printk::Level::LOG_WARNING, "EXT2: Create - failed write BGDT block %u\n", BGDTStartBlocks + i);
-        }
-        PageAlloc::DMAAlloc::FreeDMABuffer(tmp);
-    }
-
-    // Return File* handle for the new file
-    File *file = new File();
-    if(!file){
-        Printk::Write(Printk::Level::LOG_ERR, "EXT2: Create - failed to allocate File object for %s\n", Path);
-        return nullptr;
-    }
-
-    // Fill minimal file info
-    String::Strcpy(file->FileName, Path);
-    file->FileSize = 0;
-    file->IsDirectory = FALSE;
-    file->CurrentPosition = 0;
-    file->FSOwner = this;
-    file->Internal_StartCluster = newInodeNum;
-    file->RefCount = 1; // Init RefCount
-
-    Printk::Write(Printk::Level::LOG_DEBUG, "EXT2: Created file %s (Inode %u)\n", Path, newInodeNum);
-
-    return file;
+    info->Size = inode.i_size;
+    info->IsDirectory = (inode.i_mode & EXT2_S_IFDIR) ? TRUE : FALSE;
+    info->InodeID = inodeNum;
+    info->Mode = inode.i_mode;
+    info->Type = (info->IsDirectory) ? FT_DIR : FT_NORMAL;
+    info->CreationTime = inode.i_ctime;
+    return TRUE;
 }
 
 // Copy a file within the filesystem: srcPath and destPath are relative paths starting with '/'
-BOOL EXT2FileSystem::Cp(const char* srcPath, const char* destPath){
-    if(!srcPath || !destPath) return FALSE;
-    // Open source
-    File* src = Open(srcPath);
-    if(!src) return FALSE;
-    if(src->IsDirectory){ Close(src); return FALSE; }
-
-    // Create destination (will fail if parent missing or entry exists)
-    File* dst = Create(destPath);
-    if(!dst){ Close(src); return FALSE; }
-
-    // Buffer size: use block size or 4096
-    U32 bufSize = (m_BlockSize && m_BlockSize <= 65536) ? m_BlockSize : 4096;
-    U8* buf = (U8*)Kmalloc::Alloc(bufSize);
-    if(!buf){ Close(src); Close(dst); return FALSE; }
-
-    U32 r;
-    while((r = Read(src, buf, bufSize)) > 0){
-        U32 w = Write(dst, buf, r);
-        if(w != r){ Kmalloc::Free(buf); Close(src); Close(dst); return FALSE; }
-    }
-
-    Kmalloc::Free(buf);
-    Close(src);
-    Close(dst);
-    return TRUE;
-}
 
 void EXT2FileSystem::Close(File* file) {
     if(!file) return;
@@ -1275,20 +1191,37 @@ BOOL EXT2FileSystem::Rename(const char* oldPath, const char* newPath) {
     return TRUE;
 }
 
-BOOL EXT2FileSystem::Seek(File* file, U64 position) {
+BOOL EXT2FileSystem::Seek(File* file, U64 position, U32 Origin) {
     if(!file) return FALSE; 
     if(file->IsDirectory){
         Printk::Write(Printk::Level::LOG_WARNING, "EXT2: Seek() called on a directory.\n");
         return FALSE;
     }
-    if(position > file->FileSize) return FALSE;
-
-    if(position > 0xFFFFFFFF){
-        Printk::Write(Printk::Level::LOG_WARNING, "EXT2: Seek() position out of range (>4GB).\n");
-        return FALSE;
-    } else {
-        file->CurrentPosition = (U32)position;
+    
+    I64 NewPos = 0;
+    switch(Origin){
+        case SEEK_SET:{
+            NewPos = position;
+            break;
+        }
+        case SEEK_CUR:{
+            NewPos = file->CurrentPosition + position;
+            break;
+        }
+        case SEEK_END:{
+            NewPos = file->FileSize + position;
+            break;
+        }
+        default:{
+            break;
+        }
     }
+
+    if(NewPos < 0){
+        return FALSE;
+    }
+    
+    file->CurrentPosition = NewPos;
 
     return TRUE;
 }
@@ -2532,6 +2465,8 @@ U32 EXT2FileSystem::AllocateInode(){
             m_Superblock.s_free_inodes_count--;
             // TODO: Seharusnya update BGDT sama Superblock juga
 
+            PersistSuperblockAndBGDT();
+
             U32 InodeNum = (Group * m_Superblock.s_inodes_per_group) + (FreeBitIndex + 1);
             Printk::Write(Printk::Level::LOG_DEBUG, "EXT2: Allocated inode %u from group %u\n", InodeNum, Group);
             return InodeNum;
@@ -2605,6 +2540,8 @@ U32 EXT2FileSystem::AllocateBlock(){
 
             m_BGDT[Group].bg_free_blocks_count--;
             m_Superblock.s_free_blocks_count--;
+
+            PersistSuperblockAndBGDT();
 
             U32 BlockNum = (Group * m_Superblock.s_blocks_per_group) + (FreeBitIndex + 1);
 
@@ -3120,3 +3057,63 @@ U32 EXT2FileSystem::GetOrAllocateBlockForFileOffset(EXT2::Inode* inode, U32 file
         Kmalloc::Free(path_copy);
         return current_inode_num;
     }
+
+BOOL EXT2FileSystem::Unmount() {
+    // 1. Flush Superblock & Block Group Descriptors kalo ada perubahan
+    PersistSuperblockAndBGDT();
+    
+    m_Partition = nullptr;
+    Printk::Write(Printk::Level::LOG_INFO, "EXT2: Unmounted.\n");
+    return TRUE;
+}
+
+I64 EXT2FileSystem::ReadLink(const char* path, char* outBuf, U64 maxLen) {
+    EXT2::Inode inode;
+    
+    U32 inodeNum = FindInodeForPath(path, &inode);
+    if (inodeNum == 0) return -ROS_ERROR_NO_ENTRY;
+
+    if ((inode.i_mode & 0xF000) != EXT2_S_IFLNK) return -ROS_ERROR_INVAL;
+
+    U64 dataSize = inode.i_size;
+    if (dataSize == 0) return 0; 
+    if (dataSize > maxLen) dataSize = maxLen;
+
+    // --- FAST SYMLINK (Sama Aja) ---
+    if (inode.i_blocks == 0) {
+        char* fastData = (char*)inode.i_block;
+        String::Memcpy(outBuf, fastData, dataSize);
+    } 
+    // --- SLOW SYMLINK (REVISI DISINI) ---
+    else {
+        U32 blockID = inode.i_block[0];
+        if (blockID == 0) return -ROS_ERROR_INPUT_OUTPUT;
+
+        // 1. Siapkan Pointer buat nampung hasil alokasi dari Driver
+        PageAlloc::DMAAlloc::DMABuffer* dmaBuf = nullptr;
+
+        // 2. Panggil ReadBlock (Passing alamat dari pointer dmaBuf)
+        // Driver lo bakal alokasi memori, dan dmaBuf bakal nunjuk ke situ.
+        if (!ReadBlock(blockID, &dmaBuf)) {
+            return -ROS_ERROR_INPUT_OUTPUT;
+        }
+
+        // 3. Validasi dmaBuf (Jaga-jaga driver return TRUE tapi pointernya null)
+        if (!dmaBuf) return -ROS_ERROR_INPUT_OUTPUT;
+
+        // 4. Copy data dari DMA Buffer ke User Buffer
+        // NOTE: Lo harus cek struct DMABuffer lo, datanya di field mana?
+        // Biasanya: dmaBuf->VirtualAddress atau dmaBuf->Buffer
+        // Gw asumsi dmaBuf->VirtualAddress (alamat virtual kernel).
+        
+        char* srcPtr = (char*)dmaBuf->VirtAddr; 
+        String::Memcpy(outBuf, srcPtr, dataSize);
+
+        // 5. PENTING: Bebaskan DMA Buffer!
+        // Karena driver yang alokasi (ReadSectors), lo wajib free disini biar gak memory leak.
+        // Sesuaikan nama fungsi free lo, misal:
+        PageAlloc::DMAAlloc::FreeDMABuffer(dmaBuf); 
+    }
+
+    return (I64)dataSize;
+}

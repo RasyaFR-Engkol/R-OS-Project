@@ -67,22 +67,23 @@ class FAT32FileSystem : public FileSystem{
         virtual ~FAT32FileSystem();
 
         virtual BOOL Mount(Partition *Part) override;
-        virtual File *Open(const char* path) override;
-        virtual File *Create(const char *path) override;
+        virtual File *Open(const char* path, U32 Flags) override;
         virtual void Close(File* file) override;
         virtual U32 Read(File* file, U8* buffer, U32 size) override;
         virtual U32 Write(File *File, U8 *Buffer, U32 Size) override;
         virtual BOOL UpdateDirectoryEntry(File* file) override; // <-- TAMBAHKAN INI
         virtual BOOL Delete(const char* path) override; // Hapus file (non-direktori)
         virtual BOOL Rename(const char* oldPath, const char* newPath) override; // Rename/move file within FAT32
-        virtual BOOL Seek(File* file, U64 position) override; // Adjust file position for subsequent Read/Write
+        virtual BOOL Seek(File* file, U64 position, U32 Origin) override; // Adjust file position for subsequent Read/Write
         virtual BOOL Truncate(File* file, U64 size) override;
         virtual BOOL MKDir(const char* path) override;
         virtual BOOL RMDir(const char* path) override;
         virtual BOOL Flush(File* file) override;
-    virtual BOOL Append(File* file, U8* buffer, U32 size) override;
-    virtual BOOL Cp(const char* srcPath, const char* destPath) override;
-    virtual INTN ReadDir(File* dirFile, void* buffer, U32 bufferSize) override;
+        virtual BOOL Append(File* file, U8* buffer, U32 size) override;
+        virtual INTN ReadDir(File* dirFile, void* buffer, U32 bufferSize) override;
+        virtual BOOL Unmount() override;
+        virtual BOOL Stat(const char* path, FileInfo* info) override;
+        virtual I64 ReadLink(const char* path, char* outLink, U64 outLinkSize) override;
 
         Partition* GetPartition() { return m_Partition; }
         U32 GetSectorsPerCluster() { return m_BPB.SectorsPerCluster; }

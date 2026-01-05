@@ -56,33 +56,34 @@ class EXT2FileSystem : public FileSystem{
         virtual ~EXT2FileSystem();
 
         virtual BOOL Mount(Partition *Part) override;
-        virtual File* Open(const char* path) override;
-        virtual File* Create(const char *Path) override;
+        virtual File* Open(const char* path, U32 Flags) override;
         virtual void Close(File* file) override;
         virtual U32 Read(File* file, U8* buffer, U32 size) override; 
         virtual U32 Write(File *File, U8 *Buffer, U32 Size) override;
         virtual BOOL Delete(const char* path) override;
         virtual BOOL Rename(const char* oldPath, const char* newPath) override;
-    virtual BOOL Seek(File* file, U64 position) override;
-    virtual BOOL Truncate(File* file, U64 size) override;
-    virtual BOOL MKDir(const char* path) override;
-    virtual BOOL RMDir(const char* path) override;
-    virtual BOOL Flush(File* file) override;
-    virtual BOOL Append(File* file, U8* buffer, U32 size) override;
-        virtual BOOL Cp(const char* srcPath, const char* destPath) override;
+        virtual BOOL Seek(File* file, U64 position, U32 Origin) override;
+        virtual BOOL Truncate(File* file, U64 size) override;
+        virtual BOOL MKDir(const char* path) override;
+        virtual BOOL RMDir(const char* path) override;
+        virtual BOOL Flush(File* file) override;
+        virtual BOOL Append(File* file, U8* buffer, U32 size) override;
         virtual INTN ReadDir(File* dirFile, void* buffer, U32 bufferSize) override;
+        virtual BOOL Unmount() override;
+        virtual BOOL Stat(const char* path, FileInfo* info) override;
+        virtual I64 ReadLink(const char* path, char* outBuf, U64 maxLen) override;
         // Debug / testing helpers (not used in normal runtime)
         // Set fail-after N writes for WriteBlock() (0 = disabled)
         void DebugSetFailAfter(U32 writes);
         void DebugResetFail();
         // Run an on-demand consistency scan: check block/inode bitmaps vs actual inode references
         BOOL DebugConsistencyCheck();
-    // Attempt a conservative repair of bitmap/inode inconsistencies found by DebugConsistencyCheck
-    // Returns number of fixes applied (0 = no fixes)
-    U32 DebugRepairConsistency();
-    // Forcefully remove a path (debug only). Recursively removes directory contents
-    // and frees inodes/blocks regardless of permissions. Use only for recovery/testing.
-    BOOL DebugForceRemove(const char* path);
-    // Set default owner for newly created inodes (debug helper). Use 0xFFFFFFFF to keep default (root)
-    void DebugSetDefaultOwner(U32 uid, U32 gid);
+        // Attempt a conservative repair of bitmap/inode inconsistencies found by DebugConsistencyCheck
+        // Returns number of fixes applied (0 = no fixes)
+        U32 DebugRepairConsistency();
+        // Forcefully remove a path (debug only). Recursively removes directory contents
+        // and frees inodes/blocks regardless of permissions. Use only for recovery/testing.
+        BOOL DebugForceRemove(const char* path);
+        // Set default owner for newly created inodes (debug helper). Use 0xFFFFFFFF to keep default (root)
+        void DebugSetDefaultOwner(U32 uid, U32 gid);
 };

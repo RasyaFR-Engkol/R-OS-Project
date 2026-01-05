@@ -45,22 +45,22 @@ namespace GPTFS{
             // Kita bisa free DMA Buffer karena udah disalin
             PageAlloc::DMAAlloc::FreeDMABuffer(buf);
             // Dump GPT:
-            Printk::Write(Printk::Level::LOG_INFO, "GPT OK\n");
+            //Printk::Write(Printk::Level::LOG_INFO, "GPT OK\n");
             // Signature is stored as a U64 ("EFI PART" in little-endian).
             // Don't pass the U64 value as a char* to printf — that causes a crash.
             char SigBuf[9];
             // Copy the 8 signature bytes and NUL-terminate for safe printing
             String::Memcpy(SigBuf, (const void*)&((*OutHeader)->Signature), 8);
             SigBuf[8] = '\0';
-            Printk::Write(Printk::Level::LOG_DEBUG, " Signature: %.8s\n", SigBuf);
-            Printk::Write(Printk::Level::LOG_DEBUG, " Revision: %08X\n", (*OutHeader)->Revision);
-            Printk::Write(Printk::Level::LOG_DEBUG, " Header Size: %u bytes\n", (*OutHeader)->HeaderSize);
-            Printk::Write(Printk::Level::LOG_DEBUG, " Backup LBA: %llu\n", (*OutHeader)->BackupLBA);
-            Printk::Write(Printk::Level::LOG_DEBUG, " First Us   able LBA: %llu\n", (*OutHeader)->FirstUsableLBA);
-            Printk::Write(Printk::Level::LOG_DEBUG, " Last Usable LBA: %llu\n", (*OutHeader)->LastUsableLBA);
-            Printk::Write(Printk::Level::LOG_DEBUG, " Partition Entry LBA: %llu\n", (*OutHeader)->PartitionEntryLBA);
-            Printk::Write(Printk::Level::LOG_DEBUG, " Number of Partition Entries: %u\n", (*OutHeader)->NumberOfPartitionEntries);
-            Printk::Write(Printk::Level::LOG_DEBUG, " Size of Partition Entry: %u bytes\n", (*OutHeader)->SizeOfPartitionEntry);
+            //Printk::Write(Printk::Level::LOG_DEBUG, " Signature: %.8s\n", SigBuf);
+            //Printk::Write(Printk::Level::LOG_DEBUG, " Revision: %08X\n", (*OutHeader)->Revision);
+            //Printk::Write(Printk::Level::LOG_DEBUG, " Header Size: %u bytes\n", (*OutHeader)->HeaderSize);
+            //Printk::Write(Printk::Level::LOG_DEBUG, " Backup LBA: %llu\n", (*OutHeader)->BackupLBA);
+            //Printk::Write(Printk::Level::LOG_DEBUG, " First Us   able LBA: %llu\n", (*OutHeader)->FirstUsableLBA);
+            //Printk::Write(Printk::Level::LOG_DEBUG, " Last Usable LBA: %llu\n", (*OutHeader)->LastUsableLBA);
+            //Printk::Write(Printk::Level::LOG_DEBUG, " Partition Entry LBA: %llu\n", (*OutHeader)->PartitionEntryLBA);
+            //Printk::Write(Printk::Level::LOG_DEBUG, " Number of Partition Entries: %u\n", (*OutHeader)->NumberOfPartitionEntries);
+            //Printk::Write(Printk::Level::LOG_DEBUG, " Size of Partition Entry: %u bytes\n", (*OutHeader)->SizeOfPartitionEntry);
             return TRUE;
     }
     
@@ -70,7 +70,7 @@ namespace GPTFS{
             return FALSE;
         }
 
-        Printk::Write(Printk::Level::LOG_DEBUG, "GPT: Parsing Partition Entries in LBA %llu\n", GPTHeader0->PartitionEntryLBA);
+        //Printk::Write(Printk::Level::LOG_DEBUG, "GPT: Parsing Partition Entries in LBA %llu\n", GPTHeader0->PartitionEntryLBA);
 
         // PERBAIKAN:
         U32 TableSizeBytes = GPTHeader0->NumberOfPartitionEntries * GPTHeader0->SizeOfPartitionEntry;
@@ -109,15 +109,15 @@ namespace GPTFS{
 
             PartitionCount++;
 
-            Printk::Write(Printk::Level::LOG_DEBUG, "  Partition No.%d:\n", PartitionCount);
-            Printk::Write(Printk::Level::LOG_DEBUG, "    GUID Type: %08X-%04X-%04X-...\n", 
-                entry->PartitionTypeGUID.data1, 
-                entry->PartitionTypeGUID.data2, 
-                entry->PartitionTypeGUID.data3);
+            //Printk::Write(Printk::Level::LOG_DEBUG, "  Partition No.%d:\n", PartitionCount);
+            //Printk::Write(Printk::Level::LOG_DEBUG, "    GUID Type: %08X-%04X-%04X-...\n", 
+              //  entry->PartitionTypeGUID.data1, 
+              //  entry->PartitionTypeGUID.data2, 
+              //  entry->PartitionTypeGUID.data3);
             
-            Printk::Write(Printk::Level::LOG_DEBUG, "    First LBA: %llu, Last LBA: %llu\n",
-                entry->StartingLBA,
-                entry->EndingLBA);
+            //Printk::Write(Printk::Level::LOG_DEBUG, "    First LBA: %llu, Last LBA: %llu\n",
+            //    entry->StartingLBA,
+            //    entry->EndingLBA);
 
             Partition *newPartition = new Partition(entry, Device);
             if(newPartition){
@@ -178,7 +178,7 @@ namespace GPTFS{
             }
         }
 
-        Printk::Write(Printk::Level::LOG_NOTICE, " GPT: Total %d partitions found.\n", PartitionCount);
+        //Printk::Write(Printk::Level::LOG_NOTICE, " GPT: Total %d partitions found.\n", PartitionCount);
 
         PageAlloc::DMAAlloc::FreeDMABuffer(buf);
         return TRUE;
@@ -193,7 +193,7 @@ namespace GPTFS{
             // Register filesystem drivers BEFORE initializing GPT/partitions
         VFSManager::RegisterFileSystem("FAT32", []()->FileSystem* { return new FAT32FileSystem(); });
 
-        Printk::Write(Printk::Level::LOG_NOTICE, " GPT: Starting initialization...\n");
+        //Printk::Write(Printk::Level::LOG_NOTICE, " GPT: Starting initialization...\n");
 
         U32 DeviceCount = DeviceManager::GetBlockDeviceCount();
         if(DeviceCount == 0){
@@ -201,8 +201,8 @@ namespace GPTFS{
             return FALSE;
         }
 
-        Printk::Write(Printk::Level::LOG_INFO, " GPT: Found %u block devices to scan.\n", DeviceCount);
-        U8 AttemptGPTCall = 0;
+        //Printk::Write(Printk::Level::LOG_INFO, " GPT: Found %u block devices to scan.\n", DeviceCount);
+        __MAYBE_UNUSED U8 AttemptGPTCall = 0;
 
         for(U32 i = 0 ; i < DeviceCount; i++){
             IBlockDevice *Device = DeviceManager::GetBlockDevice(i);
@@ -211,12 +211,12 @@ namespace GPTFS{
                 continue;
             }
 
-            Printk::Write(Printk::Level::LOG_DEBUG, " GPT: Initializing device %u...\n", i);
+            //Printk::Write(Printk::Level::LOG_DEBUG, " GPT: Initializing device %u...\n", i);
 
             GPTFS::GPTHeader *GPTHeader0 = nullptr;
             if(!InitializeGPT(Device, &GPTHeader0)){
                 Printk::Write(Printk::Level::LOG_WARNING, " GPT: Device %u is not GPT formatted or failed to read GPT header.\n", i);
-                Printk::Write(Printk::Level::LOG_DEBUG, " GPT: Device name skipped is %s.\n", Device->GetDeviceName());
+                //Printk::Write(Printk::Level::LOG_DEBUG, " GPT: Device name skipped is %s.\n", Device->GetDeviceName());
                 continue;
             }
 
@@ -228,7 +228,7 @@ namespace GPTFS{
             AttemptGPTCall++;
         }
 
-        Printk::Write(Printk::Level::LOG_DEBUG, " GPT: Initialization complete (%llu attempt)\n", AttemptGPTCall);
+        //Printk::Write(Printk::Level::LOG_DEBUG, " GPT: Initialization complete (%llu attempt)\n", AttemptGPTCall);
 
         PartitionManager::InitializeRegisteredPartitionToFS();
 
