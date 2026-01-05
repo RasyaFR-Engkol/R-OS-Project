@@ -9,6 +9,7 @@
 #include "../../x86_64/tss.hpp"
 #include <bootinfo.h>
 #include <string.hpp>
+#include <../kernel/mm/shm/shm.hpp>
 
 // BUAT SEBUAH GLOBAL PML4 DISINI. Kita masih pake PML4 dari Boot.asm
 // jadi sudah saatnya beralih ke sini dan beralih ke HHDM juga
@@ -148,24 +149,24 @@ namespace Paging{
         Serial::Printf("[ROS] CR3 phys: %p hhdm_virt: %p identity_virt: %p mapped=%u GiB\n",
             (void*)KernelPML4Phys, hhdm_virt, (void*)KernelPML4, (unsigned)mapped_pdpt);
 
-        Kmalloc::Init(100);
+        Kmalloc::Init(10000);
 
-    // Initialize DMA pool now that physical/virtual allocators and kmalloc
-    // are available and HHDM mapping is active. This prepares the dedicated
-    // DMA pool so callers don't need to initialize it lazily.
-    Serial::Write("[DMA] InitializeDMA from setuppage\n");
-    PageAlloc::DMAAlloc::InitializeDMA();
+        // Initialize DMA pool now that physical/virtual allocators and kmalloc
+        // are available and HHDM mapping is active. This prepares the dedicated
+        // DMA pool so callers don't need to initialize it lazily.
+        Serial::Write("[DMA] InitializeDMA from setuppage\n");
+        PageAlloc::DMAAlloc::InitializeDMA();
 
         // Relocate GDT into high memory before disabling the low-half
         RelocateGDTToHigh();
-    // Install user-space (ring3) code/data selectors into the GDT so
-    // processes can use user-mode selectors when we start creating
-    // user contexts.
-    AddUserGDTEntries();
+        // Install user-space (ring3) code/data selectors into the GDT so
+        // processes can use user-mode selectors when we start creating
+        // user contexts.
+        AddUserGDTEntries();
 
         // Switch to a fresh kernel stack in HHDM (8 pages = 32 KiB) and then
         // continue initialization on the new stack in AfterStackSwitch().
-        SwitchToKernelStack(8);
+        SwitchToKernelStack(16);
     }
 
     void RelocateToHigherHalf() {
