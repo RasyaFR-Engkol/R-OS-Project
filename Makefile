@@ -48,7 +48,7 @@ ASFLAGS := -f elf64
 
 BUILD_DIR := build
 TARGET := $(BUILD_DIR)/kernel.elf
-CXX = /home/rasya/cross/bin/x86_64-elf-g++
+CXX = ~/opt/cross/bin/x86_64-elf-g++
 
 # Temukan semua file sumber (exclude build directory to avoid generated files)
 C_SRCS := $(shell find . -path ./$(BUILD_DIR) -prune -o -type f -name "*.c" -print | \
