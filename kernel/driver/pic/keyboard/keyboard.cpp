@@ -36,10 +36,21 @@ namespace PIC{
     static bool ctrl_down = false;
 
         // Translate a PS/2 Set 1 scancode (make code) to ASCII; returns 0 if not printable
-        static char TranslateScancode(U8 code, bool shift) {
+        static char TranslateScancode(U8 code, bool shift, BOOL extended) {
             // Unshifted map (Set 1 common)
             [[maybe_unused]] static const char unshift[256] = {0};
             [[maybe_unused]] static const char shiftmap[256] = {0};
+            if (extended) {
+                // Mapping Tombol Spesial (0xE0 + Code)
+                switch (code) {
+                    case 0x48: return (char)0x80; // UP
+                    case 0x50: return (char)0x81; // DOWN
+                    case 0x4B: return (char)0x82; // LEFT
+                    case 0x4D: return (char)0x83; // RIGHT
+                    case 0x53: return (char)0x7F; // DELETE (Map ke ASCII DEL)
+                    default: return 0;
+                }
+            }
             
             // We'll build minimal mapping inline for frequently used keys
             switch (code) {
@@ -158,6 +169,7 @@ namespace PIC{
             Poll();
         }
 
+        STATIC BOOL IsExtended = FALSE;
         void Poll() {
             while (sc_tail != sc_head) {
                 // Pop
@@ -169,8 +181,14 @@ namespace PIC{
                 bool is_make = !(sc & 0x80);
                 U8 code = sc & 0x7F;
 
+                if(sc == 0xE0){
+                    IsExtended = TRUE;
+                    continue;
+                }
+
                 if (code == 0x1D){
                     ctrl_down = is_make;
+                    IsExtended = FALSE;
                     continue;
                 }
 
@@ -178,13 +196,22 @@ namespace PIC{
                 // Update Shift state
                 if (code == 0x2A || code == 0x36) {
                     shift_down = is_make;
+                    IsExtended = FALSE;
                     continue;
                 }
 
-                if (!is_make) continue; // ignore releases for printable handling
+                char ch = TranslateScancode(code, shift_down, IsExtended);
 
-                char ch = TranslateScancode(code, shift_down);
+                if (!is_make) {
+                    // Break code: reset extended flag and skip further processing
+                    IsExtended = FALSE;
+                    continue;
+                }
+
+                IsExtended = FALSE;
+
                 if (ch) {
+                    // Regular printable character handling
                     // If Ctrl is held, map printable ASCII to control codes.
                     // e.g. Ctrl+A -> 0x01, Ctrl+C -> 0x03 (SIGINT is handled
                     // earlier as a special case and will not reach here).
@@ -197,16 +224,6 @@ namespace PIC{
                     }
                     // 1. Echo to Kernel Console (FB & Serial)
                     UNUSED__ CHAR8 buf[2] = { (CHAR8)ch, 0 };
-                    // ini matiin aja dah
-                    //FBConsole::WriteString(buf);
-                    if (ch == '\b') {
-                        //Printk::Write(Printk::Level::LOG_INFO, "Keyboard PIC: Echoing Backspace character in output\n");
-                        Serial::SerialPutC('\b');
-                        Serial::SerialPutC(' ');
-                        Serial::SerialPutC('\b');
-                    } else {
-                        Serial::SerialPutC(ch);
-                    }
 
                     // 2. Store in ASCII Buffer for Stdin
                     unsigned next_ascii = (ascii_head + 1) % ASCII_BUF_SIZE;
@@ -257,6 +274,7 @@ namespace PIC{
                 Arch::RestoreInterrupts(irq);
                 
                 // Yield CPU if we blocked
+                Printk::Write(Printk::Level::LOG_INFO, "Keyboard PIC: No input available, blocking task PID %llu\n", current ? current->pid : 0);
                 if (current) Tasking::SchedulerYield();
             }
         }
