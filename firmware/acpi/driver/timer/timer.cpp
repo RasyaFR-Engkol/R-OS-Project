@@ -9,16 +9,21 @@
 #include "../kernel/driver/pic/pic.hpp"
 
 // Export lapic tick counter/frequency so Sleep can use LAPIC as time source
-volatile U64 ACPI::Timer::LapicTicks = 0;
+VOLATILE U64 ACPI::Timer::LapicTicks = 0;
 U32 ACPI::Timer::LapicHz = 0;
 U64 ACPI::Timer::RawApicHz = 0;
 bool ACPI::Timer::UsingTscDeadline = false;
 U64 ACPI::Timer::TscTicksPerSystemTick = 0; 
-static U32 ApicTicksPerSystemTick = 0;
-static U64 LastTscTimestamp = 0;
-static U64 SavedTimerVector = 0;
+static VOLATILE U32 ApicTicksPerSystemTick = 0;
+static VOLATILE U64 LastTscTimestamp = 0;
+static VOLATILE U64 SavedTimerVector = 0;
+U64 ACPI::Timer::TSCFrequencyHz = 0;
+U64 ACPI::Timer::BootTSC = 0;
 
 // Simple LAPIC timer IRQ handler (file-scope). Increment lapic tick counter.
+// Tambah variable static buat nyimpen sisa recehan tick
+static U64 TscAccumulator = 0; 
+
 static void LapicOnIrqHandler(void *context) {
     U64 CurrentTsc = Arch::ASM::RdTSC();
 
@@ -27,33 +32,38 @@ static void LapicOnIrqHandler(void *context) {
         LastTscTimestamp = CurrentTsc - ACPI::Timer::TscTicksPerSystemTick;
     }
 
+    // Hitung delta raw TSC
     U64 delta = CurrentTsc - LastTscTimestamp;
+    
+    // Update timestamp SEKARANG (sebelum delta diapa-apain)
+    LastTscTimestamp = CurrentTsc; 
 
-    // --- Wall Clock Calculation (Pakai TSC biar akurat) ---
     if (ACPI::Timer::TscTicksPerSystemTick > 0) {
-        U64 passedTicks = delta / ACPI::Timer::TscTicksPerSystemTick;
+        // Masukkan delta ke celengan (Accumulator)
+        TscAccumulator += delta;
+
+        // Cek celengan: Udah cukup buat beli 1 Tick belum?
+        U64 passedTicks = TscAccumulator / ACPI::Timer::TscTicksPerSystemTick;
         
-        // Jitter compensation
-        if (passedTicks == 0 && delta > (ACPI::Timer::TscTicksPerSystemTick / 2)) {
-             passedTicks = 1; 
+        if (passedTicks > 0) {
+            PIT::ticks += passedTicks;
+            ACPI::Timer::LapicTicks += passedTicks;
+            
+            // Kurangi celengan dengan jumlah yang sudah dicairkan jadi Tick
+            // Sisa baginya (remainder) tetep disimpen buat next interrupt!
+            TscAccumulator -= (passedTicks * ACPI::Timer::TscTicksPerSystemTick);
         }
-        
-        PIT::ticks += passedTicks;
-        ACPI::Timer::LapicTicks += passedTicks;
-        LastTscTimestamp = CurrentTsc; 
+        // Note: Hapus logic 'if(passedTicks < 1) passedTicks = 1' yang lama.
+        // Biarkan 0 kalau emang belum sampe 1 tick, nanti diakumulasi di next interrupt.
     } else {
         PIT::ticks += 1;
-        LastTscTimestamp = CurrentTsc;
+        // Fallback kalau kalibrasi gagal
     }
-
-    // --- Hybrid Re-Arming ---
     if(!Tasking::SchedulerActive){
         if(ACPI::Timer::UsingTscDeadline){
-            // TSC Mode: Pakai satuan TSC
             U64 NextTarget = Arch::ASM::RdTSC() + ACPI::Timer::TscTicksPerSystemTick;
             ACPI::Timer::SetTSCDeadline(NextTarget);
         } else {
-            // [FIX] Legacy Mode: Pakai satuan APIC, JANGAN TSC!
             ACPI::Timer::SetOneShotMode(ApicTicksPerSystemTick);
         }
     }
@@ -64,25 +74,36 @@ static void LapicOnIrqHandler(void *context) {
 namespace ACPI {
     namespace Timer {
 
+        static inline U64 ScaleUint64(U64 Value, U64 Mul, U64 Div) {
+            U64 Result;
+            U64 Remainder; // Dummy buat nampung sisa bagi
+            
+            asm volatile (
+                "mul %3;"      // Instruksi MUL: RAX * Mul -> Disimpan di RDX:RAX (128-bit)
+                "div %4;"      // Instruksi DIV: RDX:RAX / Div -> Hasil di RAX, Sisa di RDX
+                : "=a"(Result), "=d"(Remainder) 
+                : "a"(Value), "r"(Mul), "r"(Div)
+                : "cc" // Kasih tau compiler kalau flag register berubah
+            );
+            return Result;
+        }
+
         VOID Arm(U64 ticksFromNow) {
-            // Parameter ticksFromNow ini dikirim Scheduler dalam satuan "TSC Delta".
-            // Karena Scheduler ngitungnya: TimeSlice * TscTicksPerSystemTick.
+            // Safety delta buat KVM/QEMU biar timer ga kelewat
+            if (ticksFromNow < 2000) ticksFromNow = 2000;
 
              if (UsingTscDeadline) {
-                if (ticksFromNow < 1000) ticksFromNow = 1000; 
                 U64 now = Arch::ASM::RdTSC();
                 SetTSCDeadline(now + ticksFromNow);
             } else {
-                // [FIX] Convert TSC Delta -> APIC Delta
-                // Rumus: (TSC_Delta * APIC_Freq) / TSC_Freq
-                // Atau lebih simpel pake ratio yang udah kita hitung
+                // [FIXED] Ganti __int128 pake Assembly Helper
+                // Rumus: (ticksFromNow * ApicTicksPerSystemTick) / TscTicksPerSystemTick
                 
-                U64 apicVal = 1000; // Safe default
-                
-                if (TscTicksPerSystemTick > 0 && ApicTicksPerSystemTick > 0) {
-                     // Gunakan math 64-bit untuk presisi
-                     // (TargetTSC * ApicPerTick) / TscPerTick
-                     apicVal = (ticksFromNow * ApicTicksPerSystemTick) / TscTicksPerSystemTick;
+                U64 apicVal = 1000;
+
+                // Pastikan pembagi tidak nol (anti crash)
+                if (TscTicksPerSystemTick > 0) {
+                     apicVal = ScaleUint64(ticksFromNow, ApicTicksPerSystemTick, TscTicksPerSystemTick);
                 }
                 
                 // Safety clamp buat legacy timer (max 32-bit)
@@ -118,7 +139,7 @@ namespace ACPI {
         VOID InitializeLapicTimer(U8 Vector, U32 desiredHz, BOOL periodic) {
             if (desiredHz == 0) desiredHz = 100;
             
-            SavedTimerVector = CONFIG_TIMER_HEXA_GLOBAL; 
+            SavedTimerVector = Vector;
 
             ACPI::Timer::LapicTicks = 0;
             ACPI::Timer::LapicHz = 0;
@@ -127,6 +148,9 @@ namespace ACPI {
             ACPI::Timer::TscTicksPerSystemTick = 0;
             ApicTicksPerSystemTick = 0; // Reset
             LastTscTimestamp = 0;
+            TscAccumulator = 0;
+
+            ACPI::Timer::BootTSC = Arch::ASM::RdTSC();
 
             IDT::RegisterInterruptHandler(Vector, LapicOnIrqHandler);
 
@@ -172,14 +196,13 @@ namespace ACPI {
             // Freq setelah Divider
             ACPI::Timer::RawApicHz = (U64)deltaApic * pitBase / PIT_TICKS_TO_WAIT;
             U64 measuredTscHz = deltaTsc * pitBase / PIT_TICKS_TO_WAIT;
-            
+            ACPI::Timer::TSCFrequencyHz = measuredTscHz;
             ACPI::Timer::LapicHz = desiredHz;
 
             if (desiredHz > 0) {
-                // 1. Hitung tick untuk TSC (Angkanya Gede, ~20 Juta)
                 ACPI::Timer::TscTicksPerSystemTick = measuredTscHz / desiredHz;
                 
-                // 2. [FIX] Hitung tick untuk APIC Legacy (Angkanya Kecil, ~625 Ribu)
+                if (ACPI::Timer::RawApicHz < desiredHz) ACPI::Timer::RawApicHz = desiredHz * 1000; 
                 ApicTicksPerSystemTick = ACPI::Timer::RawApicHz / desiredHz;
             }
 
@@ -194,24 +217,26 @@ namespace ACPI {
             BOOL TSCSupport = Arch::ASM::HasTSCDeadline();
 
             if(TSCSupport) {
-                Printk::Write(Printk::Level::LOG_INFO, " LAPIC: TSC mode active!\n");
+                Printk::Write(Printk::Level::LOG_INFO, " LAPIC: TSC Deadline Mode Enabled! (Tickless Ready)\n");
                 ACPI::Timer::UsingTscDeadline = true;
-                ACPI::LAPIC::LapicWrite(LAPIC_REG_TIMER_INIT, 0);
+                
+                // Pastikan INIT 0 di mode TSC Deadline
+                ACPI::LAPIC::LapicWrite(LAPIC_REG_TIMER_INIT, 0); 
+                Arch::ASM::Mfence();
 
                 U32 lvt = (Vector & 0xFF);
                 lvt |= APIC_LVT_TIMER_TSC_DEADLINE;
-                lvt &= ~APIC_LVT_TIMER_MASK; 
+                lvt &= ~APIC_LVT_TIMER_MASK; // Unmask
 
                 ACPI::LAPIC::LapicWrite(LAPIC_REG_TIMER_LVT, lvt);
                 Arch::ASM::Mfence();
 
+                // Kickstart timer pertama kali!
                 SetTSCDeadline(Arch::ASM::RdTSC() + ACPI::Timer::TscTicksPerSystemTick);
             } else {
                 ACPI::Timer::UsingTscDeadline = false;
-                
-                // [FIX] Gunakan ApicTicksPerSystemTick!
+                Printk::Write(Printk::Level::LOG_INFO, " LAPIC: Legacy One-Shot Mode (Fallback)\n");
                 SetOneShotMode(ApicTicksPerSystemTick);
-                Printk::Write(Printk::Level::LOG_INFO, " LAPIC: Legacy Mode Active!\n");
             }
         }
 
@@ -235,20 +260,39 @@ namespace ACPI {
         }
 
         VOID SetOneShotMode(U64 tick) {
-            StopTimer(); // Safety first
-
-            // Set LVT ke One-Shot (Hapus bit Periodic, Hapus Mask)
-            // Asumsi Vector sudah diketahui/disimpan, atau pass sebagai argumen.
-            // Biasanya vector timer itu fix (misal 0x20 atau 0xFE).
-            U32 vector = CONFIG_TIMER_HEXA_GLOBAL; // Sesuaikan dengan vector kamu
-            U32 lvt = vector; // Periodic bit (bit 17) 0 = One-Shot
+            StopTimer();
+            // [FIX] Gunakan SavedTimerVector yang kita dapet dari Initialize
+            U32 vector = SavedTimerVector & 0xFF; 
             
-            ACPI::LAPIC::LapicWrite(LAPIC_REG_TIMER_LVT, lvt);
-            ACPI::LAPIC::LapicWrite(LAPIC_REG_TIMER_DIV, LAPIC_DIVIDE_BY_16); // Pastikan divider sama
-            
-            // Tulis nilai hitungan mundur
-            // LAPIC akan decrement ini sampai 0, lalu fire IRQ sekali.
+            ACPI::LAPIC::LapicWrite(LAPIC_REG_TIMER_LVT, vector); // One Shot (Bit 17=0)
+            ACPI::LAPIC::LapicWrite(LAPIC_REG_TIMER_DIV, LAPIC_DIVIDE_BY_16);
             ACPI::LAPIC::LapicWrite(LAPIC_REG_TIMER_INIT, (U32)tick);
+        }
+
+        VOID GetTimeSinceBoot(U64 *RetSeconds, U64 *SubRetSeconds){
+            if(TSCFrequencyHz == 0){
+                *RetSeconds = 0;
+                *SubRetSeconds = 0;
+                return;
+            }
+
+            U64 Current = Arch::ASM::RdTSC();
+            U64 diff = 0;
+
+            if(Current >= BootTSC){
+                diff = Current - BootTSC;
+            } 
+
+            *RetSeconds = diff / TSCFrequencyHz;
+
+            U64 Remainder = diff % TSCFrequencyHz;
+            *SubRetSeconds = (Remainder * 1000000ULL) / TSCFrequencyHz;
+        }
+
+        U64 MillisecondsToTicks(U64 ms) {
+            // Rumus: (ms * Freq) / 1000
+            // Menggunakan RawApicHz (Frequency Timer)
+            return (ms * RawApicHz) / 1000ULL;
         }
     }
 }
