@@ -38,7 +38,7 @@ namespace AHCI {
         }
 
         //Printk::Write(Printk::Level::LOG_INFO, " Controller %u - Ports with IRQ: 0x%08x\n",
-            //(unsigned)Controller_ID, (unsigned)PortsWithIRQ);
+        //    (unsigned)Controller_ID, (unsigned)PortsWithIRQ);
 
         U32 handled_ports_mask = 0;
         for(U32 PortNum = 0; PortNum < 32; PortNum++){
@@ -62,14 +62,26 @@ namespace AHCI {
 
             port->is = interesting;
 
+            //Printk::Write(Printk::Level::LOG_DEBUG, "IRQ CTX: WaitingTask Addr: 0x%p\n", (void*)&Driver.WaitingTask[PortNum]);
             Tasking::Task *waiting_task = Driver.WaitingTask[PortNum];
-            if (waiting_task) {
+
+            //Printk::Write(Printk::Level::LOG_INFO, " AHCI IRQ: Controller %u Port %u - Interesting IS=0x%08x\n",
+            //    (unsigned)Controller_ID, (unsigned)PortNum, (unsigned)interesting);
+
+            if (waiting_task != nullptr) {
+                //Serial::Printf("AHCI IRQ: waking task PID %llu for controller %u port %u\n",
+                //    waiting_task->pid, (unsigned)Controller_ID, (unsigned)PortNum);
                 Tasking::UnblockTaskWithIOBoost(waiting_task);
                 Driver.WaitingTask[PortNum] = nullptr;
+
+                Tasking::ForceReschedule = TRUE;
+            } else {
+                //Printk::Write(Printk::Level::LOG_INFO, " AHCI IRQ: No waiting task for controller %u port %u\n",
+                //    (unsigned)Controller_ID, (unsigned)PortNum);
             }
 
             //Printk::Write(Printk::Level::LOG_INFO, " Controller %u Port %u - Port Status: 0x%08x\n",
-              //  (unsigned)Controller_ID, (unsigned)PortNum, (unsigned)interesting);
+            //    (unsigned)Controller_ID, (unsigned)PortNum, (unsigned)interesting);
         }
 
         if (handled_ports_mask) regs->is = handled_ports_mask;

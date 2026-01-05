@@ -62,94 +62,80 @@ namespace AHCI {
         return (rflags & (1UL << 9)) != 0; // IF bit
     }
 
-    static BOOL IssueAndWait(volatile HBA_PORT* Port, VAL32 Slot) {
-        LOCKRFLAGS issue_flags = Arch::SaveAndDisableInterrupts();
-        Port->is = 0xFFFFFFFF;
-        Port->ci = (1u << Slot);
-        Arch::RestoreInterrupts(issue_flags);
-        const U64 start = PIT::ticks;
-        const U64 TIMEOUT_TICKS = 200; // ~2s at 100Hz
-        if (InterruptsEnabled()) {
-            while (Port->ci & (1u << Slot)) {
-                asm volatile ("hlt");
-            }
-        } else {
-            while (Port->ci & (1u << Slot)) {
-                if ((PIT::ticks - start) > TIMEOUT_TICKS) {
-                    Printk::Write(Printk::Level::LOG_ERR, " IssueAndWait timeout (IF=0)\n");
-                    break;
-                }
-            }
-        }
-
-        
-        if (Port->ci & (1u << Slot)) {
-            Printk::Write(Printk::Level::LOG_ERR, " Timeout waiting slot %u to complete (CI=0x%08X)\n",
-                          (unsigned)Slot, (unsigned)Port->ci);
-            Port->ci &= ~(1u << Slot);
-            return FALSE;
-        }
-        if (Port->is & (1u << 30)) {
-            Printk::Write(Printk::Level::LOG_ERR, " TFES set after command (IS=0x%08X)\n", (unsigned)Port->is);
-            Port->is = 0xFFFFFFFF;
-            return FALSE;
-        }
-        if (Port->tfd & 0x01) {
-            Printk::Write(Printk::Level::LOG_ERR, " TaskFile ERR after command (TFD=0x%02X)\n", (unsigned)Port->tfd);
-            Port->is = 0xFFFFFFFF;
-            return FALSE;
-        }
-        if (Port->is) Port->is = 0xFFFFFFFF;
-
-        return TRUE;
-    }
-
-    static BOOL IssueCommand(U32 ControllerID, U32 PortNum, VAL32 Slot){
-        AHCIDriver &Drv = g_ahci_controllers[ControllerID];
+    static BOOL IssueCommand(AHCIDriver &Drv, U32 PortNum, VAL32 Slot){
         volatile HBA_PORT *Port = &Drv.regs->ports[PortNum];
-
+        /** 
         Tasking::Task *CurrentTask = Tasking::GetCurrentTaskPtr();
-        Drv.WaitingTask[PortNum] = CurrentTask;
-        CurrentTask->State = Tasking::TaskState::BLOCKED;
+
+        // 1. Setup Data untuk ISR
+        // Kita set ini SEBELUM start command untuk menghindari Race Condition
+        // dimana interrupt muncul sebelum kita sempat set WaitingTask.
+        if(CurrentTask != nullptr){
+            Drv.WaitingTask[PortNum] = CurrentTask;
+            // Jangan set BLOCKED disini dulu, karena kita belum mau yield
+        }
 
         LOCKRFLAGS issue_flags = Arch::SaveAndDisableInterrupts();
     
-        // Bersihkan status interrupt lama (biar fresh)
-        Port->is = 0xFFFFFFFF; 
-        
-        // "Pencet Tombol Start" di Hardware
-        Port->ci = (1u << Slot);
+        Port->is = 0xFFFFFFFF;    // Clear status lama
+
+        // simpen task saat ini
+        Tasking::Task *CurTask = Tasking::GetCurrentTaskPtr();
+        if(CurTask){
+            Drv.WaitingTask[PortNum] = CurTask;
+            //Printk::Write(Printk::Level::LOG_DEBUG, "CMD CTX: WaitingTask Addr: 0x%p\n", (void*)&Drv.WaitingTask[PortNum]);
+            CurTask->State = Tasking::TaskState::BLOCKED; 
+            //Printk::Write(Printk::Level::LOG_DEBUG, " AHCI Port %u: Blocking task PID %llu for command slot %u\n",
+              //  (unsigned)PortNum, CurTask->pid, (unsigned)Slot);
+        } */
+
+        Port->ci = (1u << Slot);  // START COMMAND
+        /** 
+        if(CurTask)
+            Tasking::SchedulerYield(); // Yield ke task lain
         
         Arch::RestoreInterrupts(issue_flags);
+        */
+        // habis ini disini bakal ada interrupt masuk dari MSI
 
-        Tasking::SchedulerYield();
+        // 2. Loop Waiting (Sleep Loop Pattern)
+        // Kita loop sampai CI clear ATAU Timeout.
+        // Ini menangani spurious wakeup dan delay hardware.
+        
+        const U64 start = PIT::ticks;
+        const U64 TIMEOUT_TICKS = 500; // 5 detik
 
+        while(Port->ci & (1u << Slot)) {
+            // Cek Timeout
+            if ((PIT::ticks - start) > TIMEOUT_TICKS) {
+                break;
+            }
+        }
+
+        // 3. Bersihkan Pointer (Housekeeping)
+        // Penting! Biar ISR berikutnya gak coba bangunin task yang udah jalan/mati
         Drv.WaitingTask[PortNum] = nullptr;
 
+        // 4. Validasi Hasil (Sama seperti kodemu)
         if (Port->ci & (1u << Slot)) {
-            Printk::Write(Printk::Level::LOG_ERR, " AHCI: Command timed out / Stuck (CI=0x%08X)\n", (unsigned)Port->ci);
+            Printk::Write(Printk::Level::LOG_ERR, " AHCI Port %u: Command timed out / Stuck (CI=0x%08X)\n", (unsigned)PortNum, (unsigned)Port->ci);
             Port->ci &= ~(1u << Slot); // Stop paksa
             return FALSE;
         }
 
-        // Cek Fatal Error
-        if (Port->is & (1u << 30)) { // TFES (Task File Error Status)
-            Printk::Write(Printk::Level::LOG_ERR, " AHCI: TFES Error (IS=0x%08X)\n", (unsigned)Port->is);
+        if (Port->is & (1u << 30)) {
+            Printk::Write(Printk::Level::LOG_ERR, " AHCI Port %u: TFES Error (IS=0x%08X)\n", (unsigned)PortNum, (unsigned)Port->is);
             Port->is = 0xFFFFFFFF;
             return FALSE;
         }
 
-        // Cek Error Bit di TFD
-        if (Port->tfd & 0x01) { // ERR bit
-            Printk::Write(Printk::Level::LOG_ERR, " AHCI: TaskFile Error (TFD=0x%02X)\n", (unsigned)Port->tfd);
+        if (Port->tfd & 0x01) {
+            Printk::Write(Printk::Level::LOG_ERR, " AHCI Port %u: TaskFile Error (TFD=0x%02X)\n", (unsigned)PortNum, (unsigned)Port->tfd);
             Port->is = 0xFFFFFFFF;
             return FALSE;
         }
 
-        // Bersihkan sisa status interrupt (Housekeeping)
-        if (Port->is) Port->is = 0xFFFFFFFF;
-
-        return TRUE; // Sukses!
+        return TRUE;
     }
 
     BOOL SendIdentify(AHCIDriver &Driver, VAL32 PortNum){
@@ -167,9 +153,8 @@ namespace AHCI {
         }
 
         volatile HBA_PORT *Port = &Driver.regs->ports[PortNum];
-        volatile HBA_CMD_HEADER *CmdHeader = &Driver.v_cmd_lists[PortNum][Slot];
-        volatile HBA_CMD_TBL* CmdTable = (volatile HBA_CMD_TBL*)
-            (Driver.v_cmd_tables[PortNum] + (Slot * 256)); // (256B per table)
+        HBA_CMD_HEADER *CmdHeader = (HBA_CMD_HEADER*)&Driver.v_cmd_lists[PortNum][Slot];
+        HBA_CMD_TBL* CmdTable = (HBA_CMD_TBL*)(Driver.v_cmd_tables[PortNum] + (Slot * 256));
 
         CmdHeader->cfl = 5;
         CmdHeader->prdtl = 1;
@@ -192,7 +177,7 @@ namespace AHCI {
         Arch::RestoreInterrupts(_rf);
 
         const U64 startTicks = PIT::ticks;
-        const U64 TIMEOUT_TICKS = 200; // ~2s at 100Hz
+        const U64 TIMEOUT_TICKS = 500; // ~5s at 100Hz
         while ((Port->ci & (1u << Slot)) != 0) {
             U64 elapsed = PIT::ticks - startTicks;
             if (elapsed >= TIMEOUT_TICKS) break;
@@ -222,14 +207,14 @@ namespace AHCI {
 
         if (Port->is) Port->is = 0xFFFFFFFF;
 
-        U16* IdentifyData = (U16*)IDBuf->VirtAddr;
-        U64 TotalSectors = ((U64)IdentifyData[100] | ((U64)IdentifyData[101] << 16) |
-                            ((U64)IdentifyData[102] << 32) | ((U64)IdentifyData[103] << 48));
+        //U16* IdentifyData = (U16*)IDBuf->VirtAddr;
+        //U64 TotalSectors = ((U64)IdentifyData[100] | ((U64)IdentifyData[101] << 16) |
+        //                    ((U64)IdentifyData[102] << 32) | ((U64)IdentifyData[103] << 48));
         
-        U64 TotalBytes = TotalSectors * 512;
+        //U64 TotalBytes = TotalSectors * 512;
 
-        Printk::Write(Printk::Level::LOG_DEBUG, " Port %d: IDENTIFY successful - Total Size: %llu bytes (%llu sectors)\n",
-            PortNum, TotalBytes, TotalSectors);
+        //Printk::Write(Printk::Level::LOG_DEBUG, " Port %d: IDENTIFY successful - Total Size: %llu bytes (%llu sectors)\n",
+        //    PortNum, TotalBytes, TotalSectors);
 
         PageAlloc::DMAAlloc::FreeDMABuffer(IDBuf);
         return TRUE;
@@ -238,18 +223,17 @@ namespace AHCI {
     BOOL ReadSectors(AHCIDriver &Driver, VAL32 PortNum, U64 lba, U32 count,
                      PageAlloc::DMAAlloc::DMABuffer **outBuf) {
         if (!outBuf || count == 0) return FALSE;
-        volatile HBA_PORT *Port = &Driver.regs->ports[PortNum];
 
         U32 bytes = count * 512u;
         SIZE_T pages = (bytes + PAGE_SIZE - 1) / PAGE_SIZE;
         PageAlloc::DMAAlloc::DMABuffer *buf = PageAlloc::DMAAlloc::AllocateDMAPages(pages);
         if (!buf) return FALSE;
 
-        VAL32 Slot = FindFreeCommandSlot(Driver, PortNum);
+        I32 Slot = FindFreeCommandSlot(Driver, PortNum);
         if (Slot == (VAL32)-1) { PageAlloc::DMAAlloc::FreeDMABuffer(buf); return FALSE; }
 
-        volatile HBA_CMD_HEADER *hdr = &Driver.v_cmd_lists[PortNum][Slot];
-        volatile HBA_CMD_TBL *tbl = (volatile HBA_CMD_TBL*)(Driver.v_cmd_tables[PortNum] + (Slot * 256));
+        HBA_CMD_HEADER *hdr = (HBA_CMD_HEADER*)&Driver.v_cmd_lists[PortNum][Slot];
+        HBA_CMD_TBL *tbl = (HBA_CMD_TBL*)(Driver.v_cmd_tables[PortNum] + (Slot * 256));
 
         hdr->cfl = 5;           // 20 bytes CFIS
         hdr->w = 0;             // read
@@ -263,7 +247,7 @@ namespace AHCI {
 
         BuildRWCFIS((FIS_REG_H2D*)&tbl->cfis[0], 0x25, lba, (U16)count);
 
-        BOOL ok = IssueAndWait(Port, Slot);
+        BOOL ok = IssueCommand(Driver, PortNum, Slot);
         if (!ok) { PageAlloc::DMAAlloc::FreeDMABuffer(buf); return FALSE; }
         InvalidateCacheLines((const void*)(uintptr_t)buf->VirtAddr, bytes);
 
@@ -271,10 +255,41 @@ namespace AHCI {
         return TRUE;
     }
 
+    BOOL FlushCache(AHCIDriver &Driver, VAL32 PortNum) {
+        I32 Slot = FindFreeCommandSlot(Driver, PortNum);
+        if (Slot == (VAL32)-1) {return FALSE; }
+
+        HBA_CMD_HEADER *hdr = (HBA_CMD_HEADER*)&Driver.v_cmd_lists[PortNum][Slot];
+        HBA_CMD_TBL *tbl = (HBA_CMD_TBL*)(Driver.v_cmd_tables[PortNum] + (Slot * 256));
+
+        hdr->cfl = 5;           // 20 bytes CFIS
+        hdr->w = 0;             // read
+        hdr->prdtl = 0;
+        hdr->prdbc = 0;
+        hdr->ctba = Driver.dma_cmd_tables[PortNum]->PhysAddr + (Slot * 256);
+
+        String::Memset(tbl, 0, sizeof(HBA_CMD_TBL));
+
+        FIS_REG_H2D *CMDFis = (FIS_REG_H2D*)&tbl->cfis[0];
+        String::Memset(CMDFis, 0, sizeof(FIS_REG_H2D));
+
+        CMDFis->fis_type = 0x27; // H2D Register FIS
+        CMDFis->pmport_c = 0x80; // C bit = command
+        CMDFis->command = ATA_CMD_FLUSH_CACHE_EXT; // Flush Cache Extended
+        CMDFis->device = 0x00;
+
+        BOOL ok = IssueCommand(Driver, PortNum, Slot);
+        if (!ok) {
+            Printk::Write(Printk::Level::LOG_ERR, " AHCI Port %u: Flush Cache command failed\n", (unsigned)PortNum);
+            return FALSE;
+        }
+
+        return TRUE;
+    }
+
     BOOL WriteSectors(AHCIDriver &Driver, VAL32 PortNum, U64 lba, U32 count,
                       PageAlloc::DMAAlloc::DMABuffer *buf) {
         if (!buf || count == 0) return FALSE;
-        volatile HBA_PORT *Port = &Driver.regs->ports[PortNum];
 
         U32 bytes = count * 512u;
         if (bytes > buf->Size) {
@@ -283,11 +298,11 @@ namespace AHCI {
             return FALSE;
         }
 
-        VAL32 Slot = FindFreeCommandSlot(Driver, PortNum);
+        I32 Slot = FindFreeCommandSlot(Driver, PortNum);
         if (Slot == (VAL32)-1) return FALSE;
 
-        volatile HBA_CMD_HEADER *hdr = &Driver.v_cmd_lists[PortNum][Slot];
-        volatile HBA_CMD_TBL *tbl = (volatile HBA_CMD_TBL*)(Driver.v_cmd_tables[PortNum] + (Slot * 256));
+        HBA_CMD_HEADER *hdr = (HBA_CMD_HEADER*)&Driver.v_cmd_lists[PortNum][Slot];
+        HBA_CMD_TBL *tbl = (HBA_CMD_TBL*)(Driver.v_cmd_tables[PortNum] + (Slot * 256));
 
         hdr->cfl = 5;           // 20 bytes CFIS
         hdr->w = 1;             // write
@@ -301,7 +316,7 @@ namespace AHCI {
 
         BuildRWCFIS((FIS_REG_H2D*)&tbl->cfis[0], 0x35, lba, (U16)count);
 
-        BOOL ok = IssueAndWait(Port, Slot);
+        BOOL ok = IssueCommand(Driver, PortNum, Slot);
         return ok;
     }
 
