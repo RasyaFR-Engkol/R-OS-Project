@@ -7,19 +7,92 @@
 #include <logging.hpp>
 #include "../../dev/devicemanager.hpp"
 #include "../../driver/fb/fbcon_driver.hpp"
+#include "../../task/reserved/inputdaemon/driver/mouse.hpp"
 
 // Forward declaration for serial devfs registration helper implemented in
 // kernel/driver/serial/serial_devfs_register.cpp
 namespace SerialDriver { BOOL RegisterSerialToDevFS(class DevFS* devfs); }
 namespace StdDvc { VOID RegisterSTD(class DevFS* devfs); }
 
-File* DevFS::Open(const char* path) {
+struct NamedPipeEntry{
+    CHAR8 Name[64];
+    PipeBuffer *Buffer;
+};
+NamedPipeEntry NamedPipe[10]; // limit 10 aja dulu
+
+void RemoveNamedPipeEntry(PipeBuffer* targetBuf) {
+    for(INTN i = 0; i < 10; i++){
+        if(NamedPipe[i].Buffer == targetBuf){
+            // Reset entry biar bisa dipake lagi & ga dangling pointer
+            NamedPipe[i].Buffer = nullptr;
+            NamedPipe[i].Name[0] = '\0';
+            return;
+        }
+    }
+}
+
+PipeBuffer *GetNamedPipeBuffer(const CHAR8* name){
+    for(INTN i = 0; i < 10;i++){
+        if(String::Strcmp(NamedPipe[i].Name, name) == 0){
+            return NamedPipe[i].Buffer;
+        }
+    }
+    return nullptr;
+}
+
+PipeBuffer *CreateNamedPipe(const CHAR8* Name){
+    PipeBuffer *buf = new PipeBuffer();
+    buf->RefCount = 0;
+
+    for(INTN i = 0; i < 10; i++){
+        if(!NamedPipe[i].Buffer){
+            String::Strcpy(NamedPipe[i].Name, Name);
+            buf->BytesAvailable = 0;
+            buf->IsWriteClosed = FALSE;
+            buf->WritePos = 0;
+            buf->ReadPos = 0;
+            buf->RefCount = 0;
+            buf->Lock.Init();
+            NamedPipe[i].Buffer = buf;
+            return buf;
+        }
+    }
+    return nullptr; 
+}
+
+File* DevFS::Open(const char* path, U32 Flags) {
     // Path dari VFS akan relatif, e.g. "/hda"
     // Kita asumsikan VFSManager::ResolvePath memberi kita path seperti "/hda"
     // (Seperti di vfs.cpp Anda, path rel akan diawali '/')
 
     if (!path || path[0] != '/') return nullptr;
     const char* devName = path + 1; // Lewati '/'
+
+    PipeBuffer *TargetBuf = GetNamedPipeBuffer(devName);
+
+    if(!TargetBuf && (Flags & O_CREAT)){
+        TargetBuf = CreateNamedPipe(devName);
+        if(!TargetBuf) return nullptr;
+    }
+
+    else if(TargetBuf && (Flags & O_CREAT) && (Flags & O_EXCL)){
+        return nullptr;;
+    }
+
+    if(TargetBuf){
+        BOOL IsWriteMode = (Flags & O_WRONLY) || (Flags & O_RDWR);
+
+        PipeFile *PF = new PipeFile(TargetBuf, IsWriteMode);
+        PF->FSOwner = PipeFileSystem::GetInstance();
+        PF->RefCount = 1;
+        PF->type = FileType::FT_PIPE;
+        PF->Flags = Flags;
+        String::Strcpy(PF->FileName, devName);
+
+        TargetBuf->RefCount++;
+
+        return PF;
+    }
 
     if (devName[0] == '\0') {
         DevFile* f = new DevFile();
@@ -49,6 +122,7 @@ File* DevFS::Open(const char* path) {
                 f->dev.CharDev = m_Entries[i].Ptr.Char;
                 f->FileSize = 0;
                 f->RefCount = 1; // Init RefCount
+                f->type = FileType::FT_DEVCHAR;
                 return f;
             } else if (m_Entries[i].Type == DevFile::DeviceType::BLOCK) {
                 DevFile* f = new DevFile();
@@ -60,6 +134,7 @@ File* DevFS::Open(const char* path) {
                 f->dev.BlockDev = m_Entries[i].Ptr.Block;
                 f->FileSize = 0;
                 f->RefCount = 1; // Init RefCount
+                f->type = FileType::FT_DEVBLOK;
                 return f;
             }
         }
@@ -78,6 +153,8 @@ File* DevFS::Open(const char* path) {
         // f->FileSize = bdev->GetSectorCount() * 512; // (Jika Anda menambahkan GetSectorCount ke IBlockDevice)
         f->FileSize = 0;
         f->RefCount = 1; // Init RefCount
+        f->type = FileType::FT_DEVBLOK;
+        f->Flags = Flags;
         return f;
     }
 
@@ -93,6 +170,8 @@ File* DevFS::Open(const char* path) {
         f->dev.CharDev = cdev;
         f->FileSize = 0; // Char device tidak punya ukuran
         f->RefCount = 1; // Init RefCount
+        f->type = FileType::FT_DEVCHAR;
+        f->Flags = Flags;
         return f;
     }
     
@@ -103,6 +182,10 @@ File* DevFS::Open(const char* path) {
 BOOL DevFS::Mount(Partition *Part){
     (void)Part; // DevFS is pseudo-filesystem not backed by a partition
     return TRUE;
+}
+
+BOOL DevFS::Unmount(){
+    return FALSE;
 }
 
 DevFS::DevFS(){
@@ -175,13 +258,6 @@ BOOL DevFS::UnregisterDevice(const CHAR8* name){
     return FALSE;
 }
 
-File* DevFS::Create(const char *Path){
-    (void)Path;
-    // Creating device nodes isn't supported here; device nodes are provided
-    // by DeviceManager / drivers. Return nullptr to indicate not supported.
-    return nullptr;
-}
-
 void DevFS::Close(File* file){
     if(!file) return;
     // Files returned by DevFS are allocated with new DevFile()
@@ -193,7 +269,7 @@ U32 DevFS::Read(File* file, U8* buffer, U32 size){
     DevFile* df = static_cast<DevFile*>(file);
 
     if(df->Type == DevFile::DeviceType::CHAR){
-        if(df->dev.CharDev) return df->dev.CharDev->Read(buffer, size);
+        if(df->dev.CharDev) return df->dev.CharDev->Read(file, buffer, size);
         return 0;
     } else if(df->Type == DevFile::DeviceType::BLOCK){
         if(!df->dev.BlockDev) return 0;
@@ -234,7 +310,7 @@ U32 DevFS::Write(File *File, U8 *Buffer, U32 Size){
     DevFile* df = static_cast<DevFile*>(File);
 
     if(df->Type == DevFile::DeviceType::CHAR){
-        if(df->dev.CharDev) return df->dev.CharDev->Write(Buffer, Size);
+        if(df->dev.CharDev) return df->dev.CharDev->Write(File, Buffer, Size);
         return 0;
     } else if(df->Type == DevFile::DeviceType::BLOCK){
         if(!df->dev.BlockDev) return 0;
@@ -306,7 +382,9 @@ BOOL DevFS::Rename(const char* oldPath, const char* newPath){
     (void)oldPath; (void)newPath; return FALSE; // Not supported
 }
 
-BOOL DevFS::Seek(File* file, U64 position){
+BOOL DevFS::Seek(File* file, U64 position, U32 Origin){
+    // NANTI HITUNG ORIGINNYA. KALO DARI TENGAH YA TENGAH, AKHIR YA
+    // AKHIR, AWAL YA AWAL
     if(!file) return FALSE;
     file->CurrentPosition = (U64)position;
     return TRUE;
@@ -335,10 +413,6 @@ BOOL DevFS::Append(File* file, U8* buffer, U32 size){
     U32 written = Read(file, buffer, size); // Use Write semantics
     (void)written;
     return TRUE;
-}
-
-BOOL DevFS::Cp(const char* srcPath, const char* destPath){
-    (void)srcPath; (void)destPath; return FALSE; // Not supported
 }
 
 INTN DevFS::ReadDir(File* dirFile, void* buffer, U32 bufferSize){
@@ -376,17 +450,108 @@ INTN DevFS::ReadDir(File* dirFile, void* buffer, U32 bufferSize){
     return (INTN)used;
 }
 
+BOOL DevFS::Stat(const char *path, FileInfo *Info){
+    if(!path || !Info) return FALSE;
+
+    // 1. Handle Root Directory
+    // Path dari VFS biasanya absolut relatif terhadap mount point.
+    // Bisa "/" atau "" tergantung implementasi VFS lo.
+    if (path[0] == '\0' || (path[0] == '/' && path[1] == '\0')) {
+        String::Memset(Info, 0, sizeof(FileInfo));
+        Info->Type = FileType::FT_DIR;
+        Info->IsDirectory = TRUE;
+        Info->Size = 0;
+        Info->InodeID = 1; // Arbitrary ID untuk root devfs
+        return TRUE;
+    }
+
+    // Skip leading slash (misal "/tty" jadi "tty")
+    const char* devName = path;
+    if (devName[0] == '/') devName++;
+
+    // 2. Cek Named Pipes
+    // (Ini penting biar nggak dianggap file biasa)
+    PipeBuffer* pipe = GetNamedPipeBuffer(devName);
+    if (pipe) {
+        String::Memset(Info, 0, sizeof(FileInfo));
+        Info->Type = FileType::FT_PIPE;
+        Info->IsDirectory = FALSE;
+        Info->Size = pipe->BytesAvailable; // Opsional: kasih tau ada berapa byte
+        Info->InodeID = (U64)pipe; // Gunakan alamat memori sbg InodeID (biar unik)
+        return TRUE;
+    }
+
+    // 3. Cek Internal Registry (m_Entries)
+    // Ini buat device yang diregister manual kayak FB, Serial, Mouse
+    for (int i = 0; i < MAX_ENTRIES; ++i) {
+        if (!m_Entries[i].Used) continue;
+        
+        if (String::Strcmp((const CHAR8*)m_Entries[i].Name, (const CHAR8*)devName) == 0) {
+            String::Memset(Info, 0, sizeof(FileInfo));
+            Info->IsDirectory = FALSE;
+            
+            if (m_Entries[i].Type == DevFile::DeviceType::CHAR) {
+                Info->Type = FileType::FT_DEVCHAR;
+                Info->InodeID = (U64)m_Entries[i].Ptr.Char;
+            } else if (m_Entries[i].Type == DevFile::DeviceType::BLOCK) {
+                Info->Type = FileType::FT_DEVBLOK;
+                Info->InodeID = (U64)m_Entries[i].Ptr.Block;
+            } else {
+                Info->Type = FileType::FT_NORMAL; // Fallback
+            }
+            
+            Info->Size = 0; 
+            return TRUE;
+        }
+    }
+
+    // 4. Cek Device Manager (Block Device)
+    // Misal: hda, sda
+    IBlockDevice* bdev = DeviceManager::FindBlockDevice(devName);
+    if (bdev) {
+         String::Memset(Info, 0, sizeof(FileInfo));
+         Info->Type = FileType::FT_DEVBLOK;
+         Info->IsDirectory = FALSE;
+         Info->InodeID = (U64)bdev;
+         // Kalau lo punya fungsi GetTotalSectors(), bisa dikali 512 buat dapet Size
+         Info->Size = 0; 
+         return TRUE;
+    }
+
+    // 5. Cek Device Manager (Char Device)
+    ICharDevice* cdev = DeviceManager::FindCharDevice(devName);
+    if (cdev) {
+         String::Memset(Info, 0, sizeof(FileInfo));
+         Info->Type = FileType::FT_DEVCHAR;
+         Info->IsDirectory = FALSE;
+         Info->InodeID = (U64)cdev;
+         Info->Size = 0;
+         return TRUE;
+    }
+
+    // 6. Gak ketemu
+    return FALSE;
+}
+
 namespace DEVFS{
+    DevFS *g_DevFS = nullptr;
     BOOL Init(){
         DevFS *devfs = new DevFS();
+        g_DevFS = devfs;
         if (VFSManager::MountFS("/dev", devfs)) {
             // Beberapa yang harus di register ke devfs
             FBDriver::RegisterFBToDevFS(devfs);
             SerialDriver::RegisterSerialToDevFS(devfs);
             StdDvc::RegisterSTD(devfs);
+            MouseDriver::Init(devfs);
             return TRUE;
         }
 
         return FALSE;
+    }
+
+    DevFS *GetInstanceToDevFS(){
+        if(g_DevFS) return g_DevFS;
+        return nullptr;
     }
 }
