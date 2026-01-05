@@ -5,6 +5,7 @@
 namespace FBConsole {
     // Minimal API used by Printk to mirror output to framebuffer console.
     // fbcon.cpp provides implementations for these functions.
+
     BOOL IsReady();
     VOID WriteString(const CHAR8 *s);
     VOID UpdateCursor();
@@ -13,5 +14,9 @@ namespace FBConsole {
     // Compatibility helpers used by TTY ioctl
     U64 GetCols();
     U64 GetWidthPixels();
+    BOOL IsConsoleEnable();
+    VOID UpdateConsoleStatus(BOOL Status);
     U64 GetHeightPixels();
+    VOID FBConChangeBG(U32 COLOR);
+    VOID ResetStateAndClearByColorParam(U32 Color);
 }

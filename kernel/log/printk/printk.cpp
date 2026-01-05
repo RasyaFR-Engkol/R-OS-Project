@@ -9,6 +9,8 @@
 #include "framebuffer.hpp"
 #include <filesystem/filesystem.hpp>
 #include "../../filesys/vfs/vfs.hpp"
+#include "rosval.h"
+#include <../firmware/acpi/driver/timer/timer.hpp>
 
 // Module-name is provided per-translation-unit via `ExportSymbol()` macro in
 // the header (static inline helper). No global weak symbol is needed.
@@ -20,9 +22,9 @@ namespace Printk {
     // Compile-time log level threshold. If PRINTK_CONFIG is defined by the
     // build/system headers it will be used; otherwise default to LOG_INFO
     // so that debug messages are hidden by default.
-#ifndef PRINTK_CONFIG
-#define PRINTK_CONFIG LOG_DEBUG
-#endif
+    #ifndef PRINTK_CONFIG
+        #define PRINTK_CONFIG LOG_DOK
+    #endif
 
     static char LogBuffer[4096];
     static size_t LogBufferIndex = 0;
@@ -42,8 +44,8 @@ namespace Printk {
         FBConsole::Init();
         // Try to open VFS console device nodes. If present, store handles
         // so we can write via VFS instead of direct console APIs.
-        s_FrameConsoleFile = VFSManager::Open("/dev/ttyfb0");
-        s_SerialConsoleFile = VFSManager::Open("/dev/ttyS0");
+        s_FrameConsoleFile = VFSManager::Open("/dev/ttyfb0", O_RDWR);
+        s_SerialConsoleFile = VFSManager::Open("/dev/ttyS0", O_RDWR);
     }
 
     // Helper: write the given NUL-terminated string to both serial and
@@ -51,15 +53,23 @@ namespace Printk {
     // are available; otherwise fall back to direct Serial/FBConsole APIs.
     static void WriteToConsolesViaVFSorFallback(const CHAR8* tmp) {
         if (!tmp) return;
-        U32 len = (U32)Strlen(tmp);
+        __MAYBE_UNUSED U32 len = (U32)Strlen(tmp);
+        
+        // Fallback to direct serial write if VFS handle is not available OR if VFS write fails
         if (s_SerialConsoleFile) {
-            VFSManager::Write(s_SerialConsoleFile, (U8*)tmp, len);
+            // Use direct write for now to debug VFS recursion/deadlock issues
+            // VFSManager::Write(s_SerialConsoleFile, (U8*)tmp, len);
+            Serial::Write(tmp);
         } else {
             Serial::Write(tmp);
         }
 
         if (s_FrameConsoleFile) {
-            VFSManager::Write(s_FrameConsoleFile, (U8*)tmp, len);
+            // Use direct write for now to debug VFS recursion/deadlock issues
+            // VFSManager::Write(s_FrameConsoleFile, (U8*)tmp, len);
+            if (FBConsole::IsReady()) {
+                FBConsole::WriteString(tmp);
+            }
         } else if (FBConsole::IsReady()) {
             FBConsole::WriteString(tmp);
         }
@@ -194,7 +204,7 @@ namespace Printk {
     // addresses and, when available, the symbol + offset using
     // LookupKernelSymbol(). The walker is defensive: it checks for NULL/low
     // pointers and limits depth to avoid runaway loops.
-    static VOID DumpStackTrace() {
+    VOID DumpStackTrace() {
         Serial::Write("[PANIC] Stack trace:\n");
         UPTR *rbp = nullptr;
         asm volatile ("mov %%rbp, %0" : "=r"(rbp));
@@ -223,12 +233,17 @@ namespace Printk {
             const CHAR8* name = nullptr;
             if (LookupKernelSymbol) name = LookupKernelSymbol(ret, &sym_addr);
 
+            CHAR8 Buffer[256];
+
             if (name && sym_addr != 0 && ret >= sym_addr) {
                 UPTR offset = ret - sym_addr;
-                Serial::Printf("  #%02d: %s+0x%llx (%p)\n", i, name, (unsigned long long)offset, (void*)ret);
+                String::SPrint(Buffer, sizeof(Buffer), "  #%02d: %s+0x%llx (%p)\n", i, name, (unsigned long long)offset, (void*)ret);
+                VFSManager::Write(s_SerialConsoleFile, (U8*)Buffer, Strlen(Buffer));
+                VFSManager::Write(s_FrameConsoleFile, (U8*)Buffer, Strlen(Buffer));
             } else {
-                // Symbol not found: print address and an explicit <unknown> marker
-                Serial::Printf("  #%02d: %p <unknown>\n", i, (void*)ret);
+                String::SPrint(Buffer, sizeof(Buffer), "  #%02d: %p <unknown>\n", i, (void*)ret);
+                VFSManager::Write(s_SerialConsoleFile, (U8*)Buffer, Strlen(Buffer));
+                VFSManager::Write(s_FrameConsoleFile, (U8*)Buffer, Strlen(Buffer));
             }
 
             // Stop if saved_rbp is null or doesn't move forward in the stack
@@ -263,17 +278,30 @@ namespace Printk {
 
         LOCKRFLAGS prev = Arch::SaveAndDisableInterrupts();
         Arch::Spinlock::SpinLockAcquire(&PrintkLock);
+
+        U64 sec = 0, usec = 0;
+
+        ACPI::Timer::GetTimeSinceBoot(&sec, &usec);
+
+        CHAR8 tsBuffer[64];
+        String::SPrint(tsBuffer, sizeof(tsBuffer), "[%5d.%06d] ", sec, usec);
+        Printk::WriteToLogBuffer(tsBuffer);
+
         // Emit level prefix (restore levelling)
         const CHAR8* levelPrefix = "";
         switch (level) {
-            case LOG_EMERG: levelPrefix = "(start) [kernel-emergency-mode]_[system_fully_stopped] "; break;
-            case LOG_ALERT: levelPrefix = "[ALERT] "; break;
-            case LOG_CRIT:  levelPrefix = "[CRIT] "; break;
-            case LOG_ERR:   levelPrefix = "[ERR] "; break;
-            case LOG_WARNING: levelPrefix = "[WARN] "; break;
-            case LOG_NOTICE:  levelPrefix = "[NOTICE] "; break;
-            case LOG_INFO:    levelPrefix = "[INFO] "; break;
-            case LOG_DEBUG:   levelPrefix = "[DEBUG] "; break;
+            case LOG_EMERG: levelPrefix = ANSI_RESET "(start) [kernel-emergency-mode]_[system_fully_stopped] "; break;
+            case LOG_ALERT: levelPrefix = ANSI_FG_RED "[ALERT] " ANSI_RESET; break;
+            case LOG_CRIT:  levelPrefix = ANSI_FG_RED "[CRIT] " ANSI_RESET; break;
+            case LOG_ERR:   levelPrefix = ANSI_FG_RED "[ERR] " ANSI_RESET; break;
+            case LOG_WARNING: levelPrefix = ANSI_FG_YELLOW "[WARN] " ANSI_RESET; break;
+            case LOG_NOTICE:  levelPrefix = ANSI_FG_GREEN "[NOTICE] " ANSI_RESET; break;
+            case LOG_INFO:    levelPrefix = ANSI_FG_GREEN "[INFO] " ANSI_RESET; break;
+            case LOG_DEBUG:   levelPrefix = ANSI_FG_BRIGHT_CYAN "[DEBUG] " ANSI_RESET; break;
+            case LOG_DINFO:  levelPrefix = ANSI_FG_CYAN "[DINFO] " ANSI_RESET; break;
+            case LOG_DOK:    levelPrefix = ANSI_FG_CYAN "[DOK] " ANSI_RESET; break;
+            case LOG_DERR:   levelPrefix = ANSI_FG_RED "[DERR] " ANSI_RESET; break;
+            case LOG_DWARNING: levelPrefix = ANSI_FG_YELLOW "[DWARN] " ANSI_RESET; break;
             default: levelPrefix = "[LOG] "; break;
         }
         // write prefix to buffer (and it will flush to serial on '\n' if present)
@@ -295,15 +323,29 @@ namespace Printk {
         }
         // After formatting finished, flush remaining content to serial
         FlushLogBufferToSerial(TRUE);
-        BOOL isEmerg = (level == LOG_EMERG);
 
         Arch::Spinlock::SpinLockRelease(&PrintkLock);
         Arch::RestoreInterrupts(prev);
 
-        if (isEmerg) {
-            // This function will not return (halts)
-            HandleEmergAndHalt(LastFlushedMessage);
-        }
+        /* 
+         * UPDATE: 5 Desember 2025:
+         * 
+         * PANIC:
+         * Pemindahan log PANIC ke fungsi tersendiri. Tujuannya biar
+         * lebih terstruktur dan jelas. Juga menghindari potensi deadlock
+         * atau isu lain yang mungkin muncul jika PANIC dipanggil dari dalam
+         * Printk::Write() itu sendiri.
+         * 
+         * panggil handler Panic() nanti.
+         * 
+         * expectd log:
+         * [Kernel Panic: System Fully Stopped] = "msg format disini"
+         * .. DUMP CPU ..
+         * .. DUMP STACK TRACE ..
+         * .. DUMP LAST LOG MESSAGES ..
+         * [end of Kernel Panic: System Fully Stopped] = "msg format disini"
+         * 
+         */
 
         return TRUE;
     }

@@ -20,6 +20,7 @@ namespace Serial {
     static volatile unsigned int s_rx_head = 0; // next write index
     static volatile unsigned int s_rx_tail = 0; // next read index
     static char s_rx_buf[RX_BUF_SIZE];
+    BOOL BLOCK = FALSE;
 
     void SerialPutC(char c) {
         const U16 port = 0x3F8;
@@ -58,6 +59,9 @@ namespace Serial {
     }
     
     void Write(const char* s) {
+        if(Serial::BLOCK){
+            return;
+        }
         for (const char* p = s; *p; ++p) SerialPutC(*p);
     }
 
@@ -184,6 +188,9 @@ namespace Serial {
     }
 
     void Printf(const char *fmt, ...) {
+        if(Serial::BLOCK){
+            return;
+        }
         VA_LIST Args;
         VA_STRT(Args, fmt);
         VPrintf(fmt, Args);

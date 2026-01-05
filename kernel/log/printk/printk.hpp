@@ -34,6 +34,8 @@ static inline const char* __printk_module_name_impl(void) { return "Module"; }
 #define ExportSymbol(name) \
      static inline const char* __printk_module_name_impl(void) { return name; }
 
+
+
 namespace Printk {
 
     extern File* s_SerialConsoleFile;
@@ -47,7 +49,11 @@ namespace Printk {
         LOG_WARNING = 5,
         LOG_NOTICE  = 6,
         LOG_INFO    = 7,
-        LOG_DEBUG   = 8
+        LOG_DEBUG   = 8,
+        LOG_DWARNING = 9,
+        LOG_DERR = 10,
+        LOG_DINFO = 11,
+        LOG_DOK = 12
     }Level;
 
     VOID RateLimitCheck();
@@ -66,4 +72,7 @@ namespace Printk {
     }
 
     VOID Init();
+    VOID Panic(const char *msg, ...);
+
+    VOID DumpStackTrace();
 }

@@ -12,6 +12,8 @@
 
 /* module name provided via PRINTK_MODULE_NAME */
 
+BOOL FB::s_EnableCon = TRUE;
+
 namespace FBConsole {
     // Untuk sementara taro PSF1 Header disini aja
     #define PSF1_MAGIC0 0x36
@@ -47,6 +49,10 @@ namespace FBConsole {
     static U64 g_last_blink_time = 0;
     static U64 g_blink_interval_tick = 0;
 
+    VOID FBConChangeBG(U32 COLOR){
+        g_bg = COLOR;
+    }
+
     // Forward declarations
     static inline void RenderCell(U32 col, U32 row);
     static inline void RenderAll();
@@ -67,6 +73,21 @@ namespace FBConsole {
         g_ansi_params[0] = 0;
     }
 
+    FBConCursorPosition GetCursorPosition(){
+        FBConCursorPosition TempCursor;
+        TempCursor.CursorCol = g_cur_col;
+        TempCursor.CursorRow = g_cur_row;
+        return TempCursor;
+    }
+
+    VOID SetCursorPosition(FBConCursorPosition CursorPosition){
+        if(CursorPosition.CursorCol > g_cols || CursorPosition.CursorRow > g_rows){
+            return;
+        }
+        g_cur_col = CursorPosition.CursorCol;
+        g_cur_row = CursorPosition.CursorRow;
+    }
+
     VOID Init(){
         SIZE_T fontlen =Lat15_VGA16_psf_len;
         U8 *fontdata = (U8*)Kmalloc::Alloc(fontlen);
@@ -76,8 +97,6 @@ namespace FBConsole {
             return;
         }
         String::Memcpy(fontdata, Lat15_VGA16_psf, fontlen);
-
-        Printk::Write(Printk::Level::LOG_INFO, "Font loaded, size %u bytes\n", (unsigned)fontlen);
 
         // Validasi font
         /* Basic validation: ensure we at least have a PSF1 header */
@@ -145,10 +164,6 @@ namespace FBConsole {
         }
         g_last_blink_time = Arch::Time::NowTicks();
         ShowCursor();
-
-        // Optionally print a small test string both to serial (Printk) and screen
-        Printk::Write(Printk::Level::LOG_INFO, " PSF font ready (%u glyphs, %u rows)\n",
-            (unsigned)g_psf_glyphs, (unsigned)g_psf_charsize);
 
         // We no longer draw a manual " Ready" string here. Instead
         // rely on Printk::Write (called above) which will mirror the same
@@ -282,19 +297,54 @@ namespace FBConsole {
 
         switch (cmd) {
             case 'm': // Ganti Warna
-                if (g_ansi_count == 0) g_fg = 0x00FFFFFF; // Reset putih
-                else {
-                    for(int i=0; i<g_ansi_count; i++) {
-                        int c = g_ansi_params[i];
-                        if (c == 0) g_fg = 0x00FFFFFF;
-                        else if (c == 31) g_fg = 0x00FF0000; // Merah
-                        else if (c == 32) g_fg = 0x0000FF00; // Hijau
-                        else if (c == 34) g_fg = 0x000000FF; // Biru
-                        else if (c == 36) g_fg = 0x0000FFFF; // Cyan
-                        // Tambahin warna lain sesuka hati
-                    }
+        if (g_ansi_count == 0) {
+            // Default: Reset ke Putih Terang, Background Hitam (kalau ada)
+            g_fg = 0x00FFFFFF; 
+            // g_bg = 0x00000000; // Uncomment jika punya variabel background
+        } else {
+            for (int i = 0; i < g_ansi_count; i++) {
+                int c = g_ansi_params[i];
+
+                switch (c) {
+                    case 0: // Reset
+                        g_fg = 0x00FFFFFF;
+                        // g_bg = 0x00000000; 
+                        break;
+
+                    // --- STANDARD COLORS (30-37) ---
+                    // Biasanya agak gelap (0xAA) supaya kontras dengan versi Bright
+                    case 30: g_fg = 0x00000000; break; // Hitam
+                    case 31: g_fg = 0x00AA0000; break; // Merah
+                    case 32: g_fg = 0x0000AA00; break; // Hijau
+                    case 33: g_fg = 0x00AA5500; break; // Kuning (Kecoklatan/Orange di terminal standar)
+                    case 34: g_fg = 0x000000AA; break; // Biru
+                    case 35: g_fg = 0x00AA00AA; break; // Magenta
+                    case 36: g_fg = 0x0000AAAA; break; // Cyan
+                    case 37: g_fg = 0x00AAAAAA; break; // Putih (Abu-abu terang)
+
+                    // --- BRIGHT / BOLD COLORS (90-97) ---
+                    // Full saturation (0xFF)
+                    case 90: g_fg = 0x00555555; break; // Abu-abu gelap (Bright Black)
+                    case 91: g_fg = 0x00FF5555; break; // Merah Terang
+                    case 92: g_fg = 0x0055FF55; break; // Hijau Terang
+                    case 93: g_fg = 0x00FFFF55; break; // Kuning Terang
+                    case 94: g_fg = 0x005555FF; break; // Biru Terang
+                    case 95: g_fg = 0x00FF55FF; break; // Magenta Terang
+                    case 96: g_fg = 0x0055FFFF; break; // Cyan Terang
+                    case 97: g_fg = 0x00FFFFFF; break; // Putih Bersih
+
+                    // --- BACKGROUND COLORS (40-47) ---
+                    // (Opsional: Tambahkan logika ini jika kernelmu support g_bg)
+                    /*
+                    case 40: g_bg = 0x00000000; break;
+                    case 41: g_bg = 0x00AA0000; break;
+                    case 42: g_bg = 0x0000AA00; break;
+                    // ... dst ...
+                    */
                 }
-                break;
+            }
+        }
+        break;
 
             case 'J': // Clear Screen
                 if (p1 == 2) {
@@ -314,9 +364,19 @@ namespace FBConsole {
         }
     }
 
+    VOID UpdateConsoleStatus(BOOL Status){
+        FB::s_EnableCon = Status;
+    }
+
+    BOOL IsConsoleEnable(){
+        return FB::s_EnableCon;
+    }
+
     // Write a zero-terminated string with newline, wrap and scrolling
     VOID WriteString(const CHAR8 *s) {
         if (!g_ready || !s || !g_grid) return;
+
+        if (!FB::s_EnableCon) return;
 
         HideCursor();
 
@@ -410,8 +470,6 @@ namespace FBConsole {
             // store char and render cell
             g_grid[g_cur_row * g_cols + g_cur_col] = ch;
             
-            // RenderCell ini (yang ada di fbcon.cpp lo) pasti baca variabel global g_fg kan?
-            // Jadi karena ANSI helper di atas udah ubah g_fg, otomatis disini warnanya berubah.
             RenderCell(g_cur_col, g_cur_row); 
             
             note_row_change(g_cur_row);
@@ -426,6 +484,14 @@ namespace FBConsole {
         }
 
         ShowCursor();
+    }
+
+    VOID ResetStateAndClearByColorParam(U32 Color){
+        g_bg = Color;
+        g_cur_col = 0;
+        g_cur_row = 0;
+
+        FB::Clear(Color);
     }
 
     VOID UpdateCursor(){
