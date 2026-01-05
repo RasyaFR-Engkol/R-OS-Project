@@ -145,46 +145,71 @@ namespace Tasking{
             NewTask->FDTable[i] = nullptr;
         }
         NewTask->MMapNextAddr = 0;
+        UPTR Address = (UPTR)NewTask->FPU_Storage;
+        
+        // Geser ke alamat kelipatan 16 terdekat (Rounding Up)
+        // Rumus: (Addr + 15) & ~15
+        NewTask->FPU_Region = (U8*)((Address + 15) & ~0xF);
 
+        // Debug: Pastikan alignment benar
+        // Printk::Write(Printk::Level::LOG_DEBUG, "Task FPU Aligned at: %llx\n", (U64)NewTask->FPU_Region);
+
+        // Init State FPU
+        // Pastikan SSE sudah enable di CPU sebelum ini dipanggil!
+        Arch::ASM::FPU_Init(); 
+        
+        // Sekarang aman, karena FPU_Region pasti aligned 16-byte
+        Arch::ASM::FPU_Save(NewTask->FPU_Region);
         return NewTask;
     }
 
     VOID SchedulerAddTask(Task *NewTask){
-        // KASUS 1: PID sudah di-request secara spesifik (Reserved)
-        // Contoh: Idle Task (0), Input Daemon (1)
+        // AMANKAN DARI INTERRUPT SEKARANG JUGA
+        LOCKRFLAGS rflags = Arch::SaveAndDisableInterrupts(); 
+
+        // KASUS 1: Reserved PID
         if(NewTask->pid != (U64)-1) {
             if(NewTask->pid < MAX_TASK && TaskArray[NewTask->pid] == nullptr) {
                 TaskArray[NewTask->pid] = NewTask;
-                // Jangan increment ActiveTask kalau Idle (opsional, tergantung logic load balancer)
+                
                 if(NewTask->pid != Tasking::PID_IDLE) Tasking::ActiveTask++;
-                Printk::Write(Printk::Level::LOG_INFO, "Scheduler: Reserved Process Spawned PID %d\n", NewTask->pid);
-            } else {
-                Printk::Write(Printk::Level::LOG_ERR, "SchedulerAddTask: Slot %d busy/invalid for reserved task!\n", NewTask->pid);
+                
+                if (NewTask->State == TaskState::READY) {
+                    Printk::Write(Printk::Level::LOG_DEBUG, "Enqueueing PID %u.\n", NewTask->pid);
+                    
+                    // Enqueue biasanya aman dipanggil saat int disabled (karena dia handle lock sendiri/nested)
+                    // Tapi lebih baik cek implementasi Enqueue lu. 
+                    // Kalau Enqueue melakukan locking lagi, pastikan SaveAndDisableInterrupts support nesting.
+                    Enqueue(NewTask); 
+                }
             }
+            Arch::RestoreInterrupts(rflags); // RESTORE
             return;
         }
 
-        // KASUS 2: PID Auto-Assign (User Tasks & Generic KThreads)
-        // Kita cari slot kosong mulai dari PID_USER_START (100)
-        // Biar slot 0-99 aman bersih buat Kernel Services.
-        for(U64 i = Tasking::PID_USER_START; i < MAX_TASK; i++){
+        // KASUS 2: Auto-Assign
+        for(U64 i = Tasking::PID_INIT; i < MAX_TASK; i++){
             if(TaskArray[i] == nullptr){
                 NewTask->pid = i;
                 
-                // Kalau PGID belum di-set, jadikan dia leader grup diri sendiri
                 if (NewTask->PGID == 0) NewTask->PGID = i; 
 
-                TaskArray[i] = NewTask;
+                // DISINI TITIK KRISISMU SEBELUMNYA
+                TaskArray[i] = NewTask; 
                 Tasking::ActiveTask++;
+
+                if (NewTask->State == TaskState::READY) {
+                    Printk::Write(Printk::Level::LOG_CRIT, "TaskConstructor: Enqueueing task PID %d.\n", NewTask->pid);
+                    Enqueue(NewTask);
+                }
                 
-                // Debug log
-                Printk::Write(Printk::Level::LOG_DEBUG, "Scheduler: New Process Spawned PID %d\n", i);
+                Arch::RestoreInterrupts(rflags); // RESTORE & SELESAI
                 return;
             }
         }
         
+        Arch::RestoreInterrupts(rflags); // RESTORE KALAU GAGAL
         Printk::Write(Printk::Level::LOG_ERR, "Scheduler: Process Table Full! Cannot spawn PID >= 100\n");
-        // TODO: Handle failure (delete NewTask & free memory)
     }
 
     VOID CreateKThread(VOID (*Entry)(VOID)){

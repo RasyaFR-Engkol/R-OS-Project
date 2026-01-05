@@ -168,12 +168,55 @@ Task* TaskUserConstructor(const CHAR8 *Name, VOID *ELFImage) {
     }
 
     // setup file descriptor table ke stdin, stdout, stderr
-    newTask->FDTable[0] = VFSManager::Open("/dev/tty"); // stdin
-    newTask->FDTable[1] = VFSManager::Open("/dev/tty"); // stdout
-    newTask->FDTable[2] = VFSManager::Open("/dev/tty"); // stderr
+    newTask->FDTable[0] = VFSManager::Open("/dev/tty", O_RDONLY); // stdin
+    newTask->FDTable[1] = VFSManager::Open("/dev/tty", O_RDWR); // stdout
+    newTask->FDTable[2] = VFSManager::Open("/dev/tty", O_RDWR); // stderr
     newTask->CWD[0] = '/'; newTask->CWD[1] = '\0';
-
     newTask->PGIDTaskPtr = nullptr;
+
+    VMArea *CodeVMA = new VMArea();
+    if(!CodeVMA) return nullptr;
+
+    CodeVMA->Start = imageBase;
+    CodeVMA->End = imageEnd;
+    CodeVMA->Prot = VMA_READ | VMA_EXEC | VMA_WRITE;
+    CodeVMA->Flags = MAP_PRIVATE | MAP_FIXED;
+    CodeVMA->Next = nullptr;
+
+    if(!newTask->VMHead){
+        newTask->VMHead = CodeVMA;
+    } else {
+        VMArea* temp = newTask->VMHead;
+        while(temp->Next) temp = temp->Next;
+        temp->Next = CodeVMA;
+    }
+
+    VMArea* stackVma = new VMArea();
+    stackVma->Start = stackState.bottom; // Alamat bawah stack
+    stackVma->End = stackState.bottom + (USER_STACK_PAGES * PAGE_SIZE);
+    stackVma->Prot = VMA_READ | VMA_WRITE;
+    stackVma->Flags = MAP_PRIVATE | MAP_ANONYMOUS | MAP_STACK;
+    stackVma->Next = nullptr;
+
+    VMArea* temp = newTask->VMHead;
+    while(temp->Next) temp = temp->Next;
+    temp->Next = stackVma;
+
+    UPTR Address = (UPTR)newTask->FPU_Storage;
+        
+        // Geser ke alamat kelipatan 16 terdekat (Rounding Up)
+        // Rumus: (Addr + 15) & ~15
+        newTask->FPU_Region = (U8*)((Address + 15) & ~0xF);
+
+        // Debug: Pastikan alignment benar
+        // Printk::Write(Printk::Level::LOG_DEBUG, "Task FPU Aligned at: %llx\n", (U64)NewTask->FPU_Region);
+
+        // Init State FPU
+        // Pastikan SSE sudah enable di CPU sebelum ini dipanggil!
+        Arch::ASM::FPU_Init(); 
+        
+        // Sekarang aman, karena FPU_Region pasti aligned 16-byte
+        Arch::ASM::FPU_Save(newTask->FPU_Region);
 
     return newTask;
 }

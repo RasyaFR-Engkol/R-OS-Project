@@ -16,9 +16,24 @@
 // Forward-declare File to avoid heavy include and circular dependencies
 class File;
 
-#define MAX_FILE_IN_PROCESS 16
+// VMA protection flags (used in `VMArea::Prot`)
+#define VMA_READ   (1ULL << 0)
+#define VMA_WRITE  (1ULL << 1)
+#define VMA_EXEC   (1ULL << 2)
+#define VMA_SHARED (1ULL << 3)
+
+// Mapping flags (used in `VMArea::Flags` / mmap-like interfaces)
+#define MAP_SHARED    (1ULL << 0)
+#define MAP_PRIVATE   (1ULL << 1)
+#define MAP_FIXED     (1ULL << 2)
+#define MAP_ANONYMOUS (1ULL << 3)
+#define MAP_STACK     (1ULL << 4) // Hint: mapping is intended for thread/user stack
+
+#define MAX_FILE_IN_PROCESS 64
 #define MLFQ_LEVELS 4
-#define PRIORITY_BOOST_INTERVAL 2000
+#define PRIORITY_BOOST_INTERVAL 1000
+
+#define TIMER_WHEEL_SIZE 512 // Harus power of 2
 
 // Ini harusnya adjustable terhadap kebutuhan sistem operasi kita
 // tapi untuk sekarang kita tetapkan 256 Task saja.
@@ -27,14 +42,29 @@ class File;
 // FLAGS MLFQ
 #define TASK_SLEEPING (1 << 0)
 
+// flags POLLIN
+// Konstanta bitmask poll (Standar)
+#define POLLIN      0x0001
+#define POLLPRI     0x0002
+#define POLLOUT     0x0004
+#define POLLERR     0x0008
+#define POLLHUP     0x0010
+#define POLLNVAL    0x0020
+
+extern VOLATILE U32 PriorityBitmap;
+
 namespace Tasking {
     constexpr U64 PID_IDLE = 0;
-    constexpr U64 PID_INPUT = 1;
-    constexpr U64 PID_DISK = 2; // Reserved masa depan
-    constexpr U64 PID_REAPD = 3; // Reserved masa depan
-    constexpr U64 DEFAULT_CONFIG_PID_START = 100; // Default user process start PID
-    constexpr U64 PID_USER_START = 100; // User process mulai dari sini
+    constexpr U64 PID_INIT = 1;
+    constexpr U64 PID_USER_START = 10; // User process mulai dari sini
 }
+
+extern VOLATILE U64 GlobalBoostEpoch;
+
+// tasking FLAGS
+#define PERM_ESSENTIAL_SYSTEM   (1 << 1) // Gak bisa di-kill sembarangan
+#define PERM_ADMIN_SUDO         (1 << 2) // Punya akses root/kernel space helper
+#define PERM_SYS_CRITICAL       (1 << 3) // SCHEDULER: Selalu Priority 0, Anti-Turun Kasta
 
 namespace Tasking{
     struct TaskState{
@@ -45,6 +75,16 @@ namespace Tasking{
             TERMINATED,
             ZOMBIE
         };
+    };
+
+    struct VMArea{
+        U64 Start;
+        U64 End;
+        U64 Prot;
+        U64 Flags;
+        File *BackingFile;
+        U64 FileOffset;
+        VMArea *Next;
     };
 
     struct Task{
@@ -61,15 +101,19 @@ namespace Tasking{
 
         VOID* StackBase; // Pointer ke base stack (HHDM virtual)
         U64 StackSize;
+        U8 FPU_Storage[512 + 16]; 
+        
+        // Pointer inilah yang akan kita pass ke fxsave/fxrstor
+        U8* FPU_Region;
 
         U8 Priority; // Prioritas task (0 = tertinggi)
         U64 TimeUsedInPriority;
 
-        Tasking::TaskState::State State; // Current State of the Task
+        VOLATILE Tasking::TaskState::State State; // Current State of the Task
         UFLAGS BlockReason; 
 
         // untuk tidur berapa ya tick nya?
-        U64 SleepTick;
+        VOLATILE U64 SleepTick;
         
         Tasking::Task *NextWaitTask;
 
@@ -80,11 +124,35 @@ namespace Tasking{
 
         File *FDTable[MAX_FILE_IN_PROCESS]; // File Descriptor Table
 
+        VMArea *VMHead;
         U64 MMapNextAddr; // Untuk syscall mmap, nyimpen alamat mmap berikutnya
 
-        BOOL YieldRequested; // Tambah ini
+        VOLATILE BOOL YieldRequested; // Tambah ini
 
         CHAR8 CWD[256];
+        BOOL IsSudoOrAdmin = FALSE;
+        BOOL IsCriticalProc = FALSE;
+        BOOL IsEssentialSystem = FALSE;
+
+        Task *NextRunQueue = nullptr;
+        Task *PrevRunQueue = nullptr;
+        Task *NextSleepQueue = nullptr;
+        Task* NextReady = nullptr;
+        U64 LastBoostEpoch = 0;
+
+        U64 CountMinorFault = 0;
+        U64 CountMajorFault = 0;
+    };
+
+    struct RunQueue{
+        Task *Head = nullptr;
+        Task *Tail = nullptr;
+        U64 Count = 0;
+    };
+
+    struct WaitQueue {
+        Task *Head = nullptr;
+        Task *Tail = nullptr;
     };
 
     // Variabl global untuk task management
@@ -92,9 +160,9 @@ namespace Tasking{
     extern Task *GraveyardArray[MAX_TASK];
     extern U64 ActiveTask;
     extern U64 CurrentTaskIndex;
-    extern BOOL SchedulerActive;
+    extern VOLATILE BOOL SchedulerActive;
     extern U64 g_ForegroundPID;
-    extern BOOL ForceReschedule;
+    extern VOLATILE BOOL ForceReschedule;
 
     VOID SchedulerStart();
     VOID CreateKThread(VOID (*Entry)(VOID));
@@ -125,9 +193,19 @@ namespace Tasking{
     VOID UnlinkFromProcGrp(Task *T);
     VOID UnblockTaskWithIOBoost(Task *T);
     VOID CreateIdleTask(VOID (*Entry)(VOID));
+    VOID SleepOn(WaitQueue &queue);
+    VOID WakeUp(WaitQueue &queue);
+    VOID WakeUpAll(WaitQueue &queue);
+    short CheckFileDesc(int fd, short events);
+    VOID Enqueue(Task *t);
+    VOID AddToSleepList(Task *t);
+    VOID SettingAppPerm(Task *t, U32 Perm);
 
-    // RESERVED TASK
-    VOID InputDaemonTask();
+
     Task *ConstructTask(VOID (*Entry)(VOID));
     VOID ReapDTask();
+    VOID Sleep(U64 ms);
+    VOID Debug_DumpProcessState();
+    VOID Debug_DumpFDProccessBelowPID10();
+    VOID Debug_MinorAndMajorFaultsBelowPID10();
 }

@@ -2,28 +2,26 @@
 #include <rosval.h>
 #include <userland/syscall.hpp>
 #include "task.hpp"
+#include <../firmware/acpi/driver/timer/timer.hpp>
+#include <filesystem/filesystem.hpp>
 
 namespace Tasking {
 	Task *TaskArray[MAX_TASK];
 	Task *GraveyardArray[MAX_TASK];
 	U64 ActiveTask = 0;
 	U64 CurrentTaskIndex = MAX_TASK;
-	BOOL SchedulerActive = FALSE;
+	VOLATILE BOOL SchedulerActive = FALSE;
 	U64 g_ForegroundPID = -1;
-	BOOL ForceReschedule = FALSE;
+	VOLATILE BOOL ForceReschedule = FALSE;
 
 	Task *GetTaskPID(U64 pid){
-		Task *Foundtask = nullptr;
-
-		for(INTN i = 0; i < MAX_TASK; i++){
-			Task *T = TaskArray[i];
-			if(!T) continue;
-			if(T->pid == pid){
-				Foundtask = T;
-				break;
-			}
-		}
-		return Foundtask;
+		if (pid >= MAX_TASK) return nullptr;
+		// O(1) array access
+		Task *t = TaskArray[pid]; 
+		
+		// Validasi double check (opsional, tapi bagus untuk safety)
+		if (t && t->pid == pid) return t;
+		return nullptr;
 	}
 
 	Task *GetTaskPGID(U64 pgid){
@@ -58,8 +56,15 @@ namespace Tasking {
 			while(t != nullptr){
 				if(t->State != TaskState::ZOMBIE && t->pid > 1){
 					t->Signals |= (1 << signal);
+					// kalo SIGINT, langsung bangunin kalo lagi BLOCKED. Priority 0
+					if(t->Signals & (1 << 2)){
+						t->Priority = 0;
+						t->TimeSlice = GetTimeSliceForPriority(0);
+					}
+
 					if(t->State == TaskState::BLOCKED){
 						t->State = TaskState::READY;
+						Enqueue(t);
 					}
 				}
 				t = t->PGIDTaskPtr;
@@ -68,11 +73,21 @@ namespace Tasking {
 			Task *t = GetTaskPID(id);
 			if(t && t->State != TaskState::ZOMBIE && t->pid > 1){
 				t->Signals |= (1 << signal);
+
+				// kalo SIGINT, langsung bangunin kalo lagi BLOCKED. Priority 0
+				if(t->Signals & (1 << 2)){
+					t->Priority = 0; 
+					t->TimeSlice = GetTimeSliceForPriority(0);
+				}
+
 				if(t->State == TaskState::BLOCKED){
 					t->State = TaskState::READY;
+					Enqueue(t); 
 				}
 			}
 		}
+
+		ForceReschedule = TRUE;
 		Arch::RestoreInterrupts(irq);
 	}
 
@@ -81,40 +96,80 @@ namespace Tasking {
 	VOID UnlinkFromProcGrp(Task *T){
 		if(!T || T->PGID == 0) return;
 
-		Tasking::Task *Head = GetTaskPGID(T->PGID);
+		Task *Head = GetTaskPGID(T->PGID); // Asumsi ini balikin Head grup
+		if(!Head) return;
 
-		if(!Head) {
-			T->PGIDTaskPtr = nullptr;
-			return;
-		}
-
+		// Kasus 1: Yang mau dihapus adalah Head
 		if(Head == T){
+			// Lu harus update global/array mapping bahwa Head grup PGID ini 
+			// sekarang adalah T->PGIDTaskPtr (node selanjutnya)
+			// SetTaskPGIDHead(T->PGID, T->PGIDTaskPtr); <--- Lu butuh fungsi ginian
+			
+			// Untuk sekarang, minimal jangan bikin loop:
 			T->PGIDTaskPtr = nullptr;
 			return;
 		}
 
-		Tasking::Task *Prev = Head;
+		// Kasus 2: Ada di tengah/akhir
+		Task *Prev = Head;
 		while(Prev && Prev->PGIDTaskPtr != T){
 			Prev = Prev->PGIDTaskPtr;
+			// Safety break
+			if (Prev == Head) break; // Circular detect
 		}
 
-		if(Prev){
-			Prev->PGIDTaskPtr = T->PGIDTaskPtr;
+		if(Prev && Prev->PGIDTaskPtr == T){
+			Prev->PGIDTaskPtr = T->PGIDTaskPtr; // Bypass T
 		}
 
-		T->PGIDTaskPtr = nullptr;
+		T->PGIDTaskPtr = nullptr; // Putus total
 	}
 
-	VOID UnblockTaskWithIOBoost(Task *T){
-		if(!T) return;
+	VOID UnblockTaskWithIOBoost(Task *t){
+        if(!t) return;
+        
+        // IO BOOST: Reset priority ke paling tinggi (0)
+        // Karena task ini interaktif (nunggu input user/disk), kasih hadiah.
+        t->Priority = 0;
+        
+        // Reset jatah waktu biar dia bisa kerja full power
+        t->TimeSlice = GetTimeSliceForPriority(0); 
+        
+        // Reset history penggunaan di priority ini
+        t->TimeUsedInPriority = 0;
+		t->LastBoostEpoch = GlobalBoostEpoch;
 
-		T->State = TaskState::READY;
+		Enqueue(t);
+    }
 
-		T->Priority = 0;
+	short CheckFileDesc(int fd, short events){
+		Tasking::Task *Current = Tasking::GetCurrentTaskPtr();
+		if(!Current) return POLLNVAL;
 
-		T->TimeSlice = Tasking::GetTimeSliceForPriority(0); // Reset timeslice
-		T->TimeUsedInPriority = 0;
+		if(fd < 0 || fd >= MAX_FILE_IN_PROCESS){
+			return POLLNVAL;
+		}
 
-		ForceReschedule = TRUE;
+		File *files = Current->FDTable[fd];
+
+		if(!files){
+			return POLLNVAL;
+		}
+
+		return files->Poll(events);
+	}
+
+	VOID SettingAppPerm(Task *t, U32 Perm){
+		if(!t || !Perm) return;
+
+		if(Perm & PERM_ADMIN_SUDO){
+			t->IsSudoOrAdmin = TRUE;
+		}
+		if(Perm & PERM_ESSENTIAL_SYSTEM){
+			t->IsEssentialSystem = TRUE;
+		}
+		if(Perm & PERM_SYS_CRITICAL){
+			t->IsCriticalProc = TRUE;
+		}
 	}
 }
