@@ -286,11 +286,11 @@ namespace ELF{
             U64 SizePage = ((RelocatedVaddr + SegmentSize + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1)) - VaddrPage;
             if (!SizePage) continue;
 
-            Printk::Write(Printk::Level::LOG_DEBUG,
-                          "ELF: Segment %u flags=0x%X vaddr=0x%016llx memsz=0x%llx\n",
-                          i, PHDR[i].P_Flags,
-                          (unsigned long long)RelocatedVaddr,
-                          (unsigned long long)SegmentSize);
+            //Printk::Write(Printk::Level::LOG_DEBUG,
+            //              "ELF: Segment %u flags=0x%X vaddr=0x%016llx memsz=0x%llx\n",
+            //              i, PHDR[i].P_Flags,
+            //              (unsigned long long)RelocatedVaddr,
+            //              (unsigned long long)SegmentSize);
 
             for(U64 Off = 0; Off < SizePage; Off += PAGE_SIZE){
                 U64 CurrentVaddrUser = VaddrPage + Off;
@@ -357,11 +357,11 @@ namespace ELF{
 
         if (ImageBaseOut) *ImageBaseOut = TargetBaseAddrMode;
         if (ImageEndOut) *ImageEndOut = ImageRangeEnd;
-        Printk::Write(Printk::Level::LOG_DEBUG,
-                      "ELF: Loaded image base=0x%016llx end=0x%016llx entry=0x%016llx\n",
-                      (unsigned long long)TargetBaseAddrMode,
-                      (unsigned long long)ImageRangeEnd,
-                      (unsigned long long)relocatedEntry);
+        //Printk::Write(Printk::Level::LOG_DEBUG,
+        //              "ELF: Loaded image base=0x%016llx end=0x%016llx entry=0x%016llx\n",
+        //              (unsigned long long)TargetBaseAddrMode,
+        //              (unsigned long long)ImageRangeEnd,
+        //              (unsigned long long)relocatedEntry);
         return relocatedEntry;
     }
 }

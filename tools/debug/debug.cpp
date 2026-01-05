@@ -190,7 +190,7 @@ namespace Debug {
             FileSystem* fs = part->GetFilesystem();
             if(!fs) continue;
             Printk::Write(Printk::Level::LOG_INFO, "FAT32 Demo: trying to open /EFI/BOOT/grub.cfg on partition %u\n", pi);
-            File* f = fs->Open(path);
+            File* f = fs->Open(path, O_RDWR);
             if(!f){
                 Printk::Write(Printk::Level::LOG_INFO, "FAT32 Demo: grub.cfg not found on partition %u\n", pi);
                 continue;

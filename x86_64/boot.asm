@@ -32,9 +32,9 @@ header_tag_framebuffer:
 	dw 5                        ; framebuffer request
 	dw 0                        ; flags
 	dd header_tag_framebuffer_end - header_tag_framebuffer
-	dd 1024                     ; width
-	dd 768                      ; height
-	dd 0                        ; depth (bpp) 0 = no preference
+	dd 0                     ; width
+	dd 0                      ; height
+	dd 32                        ; depth (bpp) 32 = 32-bit
 header_tag_framebuffer_end:
 
 ALIGN 8
