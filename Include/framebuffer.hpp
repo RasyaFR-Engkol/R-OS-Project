@@ -4,6 +4,37 @@
 #include <bootinfo.h>
 
 namespace FB {
+
+    typedef void (*FlushCallback)(U32 x, U32 y, U32 w, U32 h);
+
+    struct ConsoleConfig {
+        U64 FrameBufferAddr; // Alamat VRAM dari GPU Driver
+        U32 Width;
+        U32 Height;
+        U32 Pitch;
+        U32 Bpp;
+        FlushCallback OnFlush; // <--- INI TAMBAHANNYA
+    };
+
+    VOID Reconfigure(ConsoleConfig *Config);
+
+    extern BOOL s_EnableCon;
+    #define FB_CMD_GET_INFO  0xFB01
+    #define FB_CMD_MAP_VRAM  0xFB02
+    #define FB_CMD_UPDATE 0xFB03
+    #define FB_CMD_SWAP_BUFFERS 0xFB3 
+    #define FB_CMD_DISABLE_CONSOLE 0xFB99 
+
+    void FlushHW(U32 x, U32 y, U32 w, U32 h);
+
+    typedef struct {
+        U32 Width;
+        U32 Height;
+        U32 Pitch;
+        U32 Bpp;
+        U64 Size;     // Total bytes
+    } UserFBInfo_T;
+
     struct Info {
         volatile U8* base;   // HHDM-mapped base
         U32 pitch;
@@ -44,9 +75,19 @@ namespace FB {
 
     // Query current mode; returns nullptr if not initialized.
     const Info* Get();
+    FB::Info *FBGetState();
+    U64 GetPhysAddr();
 }
 
 namespace FBConsole {
     VOID Init();
     VOID WriteString(const CHAR8 *s);
+
+    struct FBConCursorPosition{
+        U32 CursorCol;
+        U32 CursorRow;
+    };
+
+    FBConCursorPosition GetCursorPosition();
+    VOID SetCursorPosition(FBConCursorPosition CursorPosition);
 }
