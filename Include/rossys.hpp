@@ -113,6 +113,47 @@ namespace Arch {
             __cpuid(1, eax, ebx, ecx, edx); 
             return (ecx & (1 << 24));
         }
+
+        static inline void FlushCacheRange(void* addr, SIZE_T size) {
+            U8* p = (U8*)addr;
+            for (SIZE_T i = 0; i < size; i += 64) { // 64 = rata-rata cache line size
+                Arch::ASM::Clflush(p + i);
+            }
+        }
+
+        STATIC INLINE VOID EnableSSE(){
+            U64 CR0;
+            U64 CR4;
+
+            asm volatile("mov %%cr0, %0" : "=r"(CR0));
+
+            // bersihkan EM Emulation
+            CR0 &= ~(1 << 2);
+            // Set Monitor Coprosesor
+            CR0 |= (1 << 1);
+            
+            asm volatile("mov %0, %%cr0" :: "r"(CR0));
+            asm volatile("mov %%cr4, %0" : "=r"(CR4));
+            // Set OSFXSR (bit 9) -> OS support FXSAVE/FXRSTOR
+            CR4 |= (1 << 9);
+            // Set OSXMMEXCPT (bit 10) -> OS handle unmasked SIMD exception
+            CR4 |= (1 << 10);
+            asm volatile ("mov %0, %%cr4" :: "r"(CR4));
+
+        }
+
+        STATIC INLINE VOID FPU_Init(){
+            asm volatile("fninit");
+        }
+
+        static inline void FPU_Save(void* buffer) {
+            asm volatile("fxsave (%0)" :: "r"(buffer) : "memory");
+        }
+
+        // Restore state FPU/SSE dari buffer
+        static inline void FPU_Restore(void* buffer) {
+            asm volatile("fxrstor (%0)" :: "r"(buffer) : "memory");
+        }
     }
 
         // Model-specific register helpers (RDMSR/WRMSR) and convenient EFER/STAR accessors.
