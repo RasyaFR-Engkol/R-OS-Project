@@ -26,3 +26,21 @@ struct PACKSTRUCT USBDeviceDescriptor {
     U8  iSerialNumber;
     U8  bNumConfigurations;
 };
+
+struct PACKSTRUCT CommandBlockWrapper {
+    U32 dCBWSignature;          // Magic: 0x43425355 (Little Endian "USBC")
+    U32 dCBWTag;                // ID Unik per command (bebas, asal nanti pas CSW sama)
+    U32 dCBWDataTransferLength; // Berapa byte data yang mau dibaca/tulis
+    U8  bmCBWFlags;             // 0x80 = Data In (Device to Host), 0x00 = Data Out
+    U8  bCBWLUN;                // Logical Unit Number (Biasanya 0)
+    U8  bCBWCBLength;           // Panjang perintah SCSI (biasanya 6, 10, 12, atau 16)
+    U8  CBWCB[16];              // Command Block (SCSI Command ditaruh disini)
+};
+
+// Command Status Wrapper (13 Bytes) - Dikirim Device -> Host (Bulk IN)
+struct PACKSTRUCT CommandStatusWrapper {
+    U32 dCSWSignature;          // Magic: 0x53425355 (Little Endian "USBS")
+    U32 dCSWTag;                // Harus sama dengan dCBWTag yang dikirim
+    U32 dCSWDataResidue;        // Data yang GAGAL dikirim/terima
+    U8  bCSWStatus;             // 0x00 = Success, 0x01 = Failed, 0x02 = Phase Error
+};
