@@ -563,5 +563,40 @@ int SPrint(char* buffer, unsigned long long bufsize, const char* fmt, ...)
     return ret;
 }
 
+void SplitPath(const char* fullPath, char* outParent, char* outName) {
+    int len = String::Strlen(fullPath);
+    int splitIdx = -1;
+
+    int i = len;
+    while(i > 0) {
+        i--; // Geser ke kiri dulu (jadi len-1, len-2, ... 0)
+        if(fullPath[i] == '/') {
+            splitIdx = i;
+            break;
+        }
+    }
+    // -------------------------
+
+    if(splitIdx == -1) { 
+        // Gak ada slash, berarti file di root relative
+        outParent[0] = '\0';
+        String::Strcpy(outName, fullPath);
+    } else {
+        // Copy parent path
+        // Note: Memcpy biasanya parameternya (dest, src, count)
+        String::Memcpy((U8*)outParent, (const U8*)fullPath, splitIdx);
+        outParent[splitIdx] = '\0';
+        
+        // Handle root case "/" (misal path: "/etc")
+        // Kalau splitIdx 0, berarti parent-nya kosong string, tapi harusnya "/"
+        if (splitIdx == 0) { 
+            outParent[0] = '/'; 
+            outParent[1] = '\0'; 
+        }
+        
+        String::Strcpy(outName, fullPath + splitIdx + 1);
+    }
+}
+
 } // namespace String
 
