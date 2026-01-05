@@ -1,4 +1,5 @@
 #pragma once
+#include "rosval.h"
 #include <stdarg.h>
 
 namespace String{
@@ -47,4 +48,6 @@ namespace String{
 
 	// Convenience variadic wrapper around VSPrint (like sprintf but bounded).
 	int SPrint(char* buffer, unsigned long long bufsize, const char* fmt, ...);
+	void SplitPath(const char* fullPath, char* outParent, char* outName);
+	inline U32 Min(U32 a, U32 b) { return (a < b) ? a : b; }
 }
