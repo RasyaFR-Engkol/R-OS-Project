@@ -2,14 +2,14 @@
 
 #include "gpt/gpt.hpp"
 #include "string.hpp"
-#include <filesystem/filesystem.hpp>
 #include <logging.hpp>
+#include "../log/printk/printk.hpp"
 #include "iblockdevice.hpp"
-#include "../dev/devicemanager.hpp"
 #include "devfs/devfs.hpp"
 // Avoid including vfs.hpp here to prevent circular include (vfs.hpp includes partition.hpp).
 // Forward-declare the ResolvePath helper we use in the destructor.
-namespace VFSManager { BOOL ResolvePath(const char *path, FileSystem** outFS, char *OutRelativePath); }
+namespace VFSManager { BOOL FindMountPoint(const char *path, FileSystem** outFS, char *OutRelativePath); }
+namespace DeviceManager{ BOOL UnregisterBlockDevice(IBlockDevice *Device); }
 
 class FileSystem;
 class IBlockDevice;
@@ -52,7 +52,7 @@ class Partition{
         if(m_DeviceWrapper){
             // Try remove from DevFS first
             FileSystem* fs = nullptr; char rel[256];
-            if (VFSManager::ResolvePath((const char*)"/dev", &fs, rel) && fs) {
+            if (VFSManager::FindMountPoint((const char*)"/dev", &fs, rel) && fs) {
                 DevFS* devfs = (DevFS*)fs;
                 devfs->UnregisterDevice(m_DeviceWrapper->GetDeviceName());
             }
@@ -86,7 +86,8 @@ class Partition{
     // --- PERUBAHAN DI SINI ---
     BOOL WriteSectors(U64 LBA, U32 Count, PageAlloc::DMAAlloc::DMABuffer *Buffer) {
         if(m_ReadOnly){
-            Printk::Write(Printk::Level::LOG_ERR, "Partition: WriteSectors failed - partition is read-only\n");
+            // Partition is read-only; avoid calling Printk from a header-level
+            // inline method to prevent circular include issues during build.
             return FALSE;
         }
 

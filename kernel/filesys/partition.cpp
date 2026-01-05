@@ -1,9 +1,11 @@
 #include "partition.hpp"
+#include "filesystem.hpp"
 #include <mm.hpp>
 #define PRINTK_MODULE_NAME "Partition"
 #include <logging.hpp>
 #include "vfs/vfs.hpp"
 #include "ext2/ext2.hpp"
+#include "rootfs/rootfs.hpp"
 
 
 BOOL Partition::Mount(){
@@ -65,7 +67,16 @@ BOOL Partition::Mount(){
 
     if(m_Filesystem->Mount(this)){
         m_isMounted = TRUE;
-        Printk::Write(Printk::Level::LOG_INFO, " Partition: Mounted successfully with %s filesystem.\n", DetectedFSType);
+        static BOOL RootAssigned = FALSE;
+        if((String::Strcmp(DetectedFSType, "EXT2") == 0) && !RootAssigned){
+            FileSystem *Root = ROOTFS::GetRootFS();
+            if(Root){
+                ((RootFS*)Root)->SetBackingFileSystem(m_Filesystem);
+                Printk::Write(Printk::Level::LOG_NOTICE, " Partition: Set as RootFS backing store!\n");
+                RootAssigned = TRUE;
+            }
+        }
+        
         return TRUE;
     } else {
         Printk::Write(Printk::Level::LOG_ERR, " Partition: Filesystem driver failed to mount partition.\n");
