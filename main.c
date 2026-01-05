@@ -2,6 +2,8 @@
 #include <stddef.h>
 #include <stdint.h> // Untuk 'uint64_t'
 #include <bootinfo.h>
+#include <../firmware/chipset/chipset.hpp>
+#include <../kernel/dev/devicemanager.hpp>
 
 #define MB_TAG_TYPE_END 0U
 #define MB_TAG_TYPE_FRAMEBUFFER 8U
@@ -180,6 +182,27 @@ ABI_C const BootInfo *BootInfoGet(void) {
     return &gBootInfo;
 }
 
+VOID* BootInfoGet_Wrapper(POINTER UnusedArg) {
+    // Panggil fungsi asli
+    return (VOID*)BootInfoGet();
+}
+
+ABI_C NORESULTFUNC MakeMultibootDriverInstance(){
+    CPANSI_STRING DevName = "multiboot";
+
+    DeviceManager::ObjectManager.RegisterDeviceInstance(
+        DevName,
+        DeviceManager::OT_OTHER,
+        nullptr
+    );
+
+    DeviceManager::ObjectManager.RegisterFunctionToTable(
+        DevName,
+        REQ_MULTIBOOT_GET_INFO,
+        (DeviceManager::HandleFunction)BootInfoGet_Wrapper
+    );
+}
+
 // 1. Deklarasi label dari linker.ld (sekarang 64-bit pointers)
 ABI_C void (*__init_array_start[])();
 ABI_C void (*__init_array_end[])();
@@ -210,6 +233,14 @@ ABI_C void KernelEntryPoint(uint64_t mb_info_ptr) {
     for (size_t i = 0; i < count; i++) {
         __init_array_start[i]();
     }
+
+    if (DeviceManager::ObjectManager.FirstInitializeDevOBJManager()) {
+        // Sukses init
+    }
+    MakeMultibootDriverInstance();
+
+    // Deteksi Chipset 
+    Firmware::Chipset::DetectMotherboardChipset();
 
     // Panggil Kernel C++ 64-bit
     KernelMain();
