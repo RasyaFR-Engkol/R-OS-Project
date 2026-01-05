@@ -2,6 +2,9 @@
 #include "rosval.h"
 #include <task.hpp>
 
+// Forward-declare Task type in case inclusion order differs
+namespace Tasking { struct Task; }
+
 // Port PIC 1
 #define PIC1_COMMAND 0x20
 #define PIC1_DATA    0x21
@@ -27,8 +30,8 @@ namespace PIC {
         U32 GetBufferCount();
         // Clear input ASCII buffer (used by TCSETSF)
         void FlushBuffer();
-        void NotifyTaskDied(Tasking::Task* t);
-            void InjectScancode(U8 sc);
+        void NotifyTaskDied(Tasking::Task*);
+        void InjectScancode(U8 sc);
     }
     VOID DisableIRQWhileAndMaskOldPIC();
 }
