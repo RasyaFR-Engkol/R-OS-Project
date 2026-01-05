@@ -64,3 +64,9 @@ namespace IDT{
     U8 AllocateVector();
     VOID FreeVector(U8 vector);
 }
+
+
+ABI_C VOID GPHandler();
+ABI_C VOID GPFaultHandler(U64 error_code, void* reg_context);
+ABI_C VOID IsrStub_PageFault();
+ABI_C VOID IsrStub_GPFault();

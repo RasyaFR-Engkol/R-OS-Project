@@ -73,6 +73,7 @@ namespace IDT {
 
         // Exceptions
         G_IDT[14].Set((VOID*)IsrStub_PageFault, KernelCS, TrapFlags);
+        G_IDT[13].Set((VOID*)IsrStub_GPFault, KernelCS, TrapFlags);
         G_IDT[0x12].Set((VOID*)MCEHandler, KernelCS, TrapFlags); // SIMD FP Exception
 
         // Hardware IRQs and MSI range: map 0..207 to vectors 0x20..0x20+207 (up to 0xEF)
@@ -95,9 +96,6 @@ namespace IDT {
     void RegisterInterruptHandler(U8 vector, InterruptHandler GHandler) {
         // vector is U8 (0..255) so the range check is unnecessary
         G_Handlers[vector] = GHandler;
-        Printk::Write(Printk::Level::LOG_DEBUG,
-                      "IDT: Registered handler for vector 0x%02X at %p\n",
-                      vector, (void*)GHandler.handler);
     }
 
     // Back-compat for earlier misspelling
