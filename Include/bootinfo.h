@@ -4,6 +4,8 @@
 #include "serial.hpp"
 #include <rosval.h>
 
+#define REQ_MULTIBOOT_GET_INFO 0x01
+
 #ifdef __cplusplus
 extern "C" {
 #endif
