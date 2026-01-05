@@ -35,17 +35,18 @@ class SocketFileSystem : public FileSystem{
         void Close(File* file) override;
 
         BOOL Mount(Partition*) override { return TRUE; }
-        File* Open(const char*) override { return nullptr; }
-        File* Create(const char*) override { return nullptr; }
+        File* Open(const char*, U32 Flags) override { return nullptr; }
         BOOL Delete(const char*) override { return FALSE; }
         BOOL Rename(const char*, const char*) override { return FALSE; }
-        BOOL Seek(File*, U64) override { return FALSE; }
+        BOOL Seek(File*, U64, U32 o) override { return FALSE; }
         INTN Ioctl(File*, U32, U64) override { return 0; }
         BOOL Truncate(File*, U64) override { return FALSE; }
         BOOL MKDir(const char*) override { return FALSE; }
         BOOL RMDir(const char*) override { return FALSE; }
         BOOL Flush(File*) override { return TRUE; }
         BOOL Append(File*, U8*, U32) override { return FALSE; }
-        BOOL Cp(const char*, const char*) override { return FALSE; }
         INTN ReadDir(File*, void*, U32) override { return -1; }
+        BOOL Stat(const char* path, FileInfo* info) override {return false;}
+        BOOL Unmount() override {return false;}
+
 };
