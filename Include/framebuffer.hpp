@@ -23,6 +23,7 @@ namespace FB {
     #define FB_CMD_MAP_VRAM  0xFB02
     #define FB_CMD_UPDATE 0xFB03
     #define FB_CMD_SWAP_BUFFERS 0xFB3 
+    #define FB_PRESENT_SOME_AREA_TO_SCREEN 0xFB40
     #define FB_CMD_DISABLE_CONSOLE 0xFB99 
 
     void FlushHW(U32 x, U32 y, U32 w, U32 h);

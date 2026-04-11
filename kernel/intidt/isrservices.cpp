@@ -74,9 +74,10 @@ static BOOL HandleUserPageFault(Tasking::Task *Current, U64 FaultAddr, U64 Error
     if (Vma->BackingFile) {
         if (Vma->BackingFile->type == FT_SHM) {
             // SHM: Fisik dari Region SHM
-            ShmFile *shmf = (ShmFile*)Vma->BackingFile;
+            ShmRegion *Region = (ShmRegion*)Vma->BackingFile->PrivateData;
             U64 OffsetInVMA = PageFaultAddrAligned - Vma->Start;
-            TargetPhysPage = shmf->Region->PhysAddr + Vma->FileOffset + OffsetInVMA;
+            TargetPhysPage = Region->PhysAddr + Vma->FileOffset + OffsetInVMA;
+            Serial::Printf("TARGETPHYSPAGE: %p, VIRTADDRALIGNED: %p.\n", TargetPhysPage, PageFaultAddrAligned);
             // Tidak perlu alloc, tidak perlu baca file (memori sudah shared)
         }
         else if (String::Strcmp((const CHAR8*)Vma->BackingFile->FileName, "/dev/fb0") == 0) {
@@ -117,6 +118,13 @@ static BOOL HandleUserPageFault(Tasking::Task *Current, U64 FaultAddr, U64 Error
         
         // Apakah ini File Biasa? Baca dari disk!
         if (Vma->BackingFile && Vma->BackingFile->type != FT_SHM /* && not FB */) {
+            if (!Vma->BackingFile->Node || !Vma->BackingFile->Node->FSOwner) {
+                // Jangan paksa baca kalau FSOwner ga ada! Ini pasti file invalid / dangler!
+                Serial::Printf("PF FATAL: BackingFile %s has no FSOwner!\n", Vma->BackingFile->FileName);
+                if (WeAllocatedRAM) PageAlloc::PhysicalFreePages(TargetPhysPage, 1);
+                return FALSE; 
+            }
+            
             U64 OffsetInVma = PageFaultAddrAligned - Vma->Start;
             U64 FileOffset = Vma->FileOffset + OffsetInVma;
             

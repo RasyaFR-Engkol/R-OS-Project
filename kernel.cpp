@@ -22,7 +22,6 @@
 #include "kernel/filesys/devfs/devfs.hpp"
 #include "kernel/intidt/idt.hpp"
 #include "kernel/log/fbcon/fbcon.hpp"
-#include "kernel/driver/fb/fbcon_driver.hpp"
 #include "kernel/log/printk/printk.hpp"
 #include "kernel/mm/kmalloc/kmalloc.hpp"
 #include "kernel/mm/mm.hpp"
@@ -138,7 +137,8 @@ ABI_C NORET void KernelMain()
     {
         File *F = VFSManager::Open("/init.elf", O_RDONLY);
         if(F){
-            U64 ELFSize = F->FileSize;
+            Printk::Write(Printk::Level::LOG_INFO, "KernelMain: Successfully opened /init.elf, size %llu bytes.\n", (unsigned long long)F->Node->FileSize);
+            U64 ELFSize = F->Node->FileSize;
             VOID *ELFImage = Kmalloc::Alloc(ELFSize);
             if(!ELFImage){
                 Printk::Write(Printk::Level::LOG_ERR, "KernelMain: failed to allocate memory for init.elf\n");
@@ -153,8 +153,17 @@ ABI_C NORET void KernelMain()
             }
 
             Tasking::CreateUserTask("init", ELFImage);
+
+            Tasking::Task *InitTask = Tasking::GetTaskPID(1);
+            if(InitTask){
+                InitTask->IsCriticalProc = TRUE; // Tandai init sebagai critical process
+                InitTask->IsEssentialSystem = TRUE; // Tandai init sebagai essential system
+                InitTask->IsSudoOrAdmin = TRUE; // Beri akses sudo/admin ke init
+            }
             Kmalloc::Free(ELFImage);
+            Printk::Write(Printk::Level::LOG_INFO, "KernelMain: init.elf loaded and task created successfully.\n");
             VFSManager::Close(F);
+            Printk::Write(Printk::Level::LOG_INFO, "KernelMain: Closed /init.elf file handle.\n");
         } else {
             Printk::Write(Printk::Level::LOG_ERR, "KernelMain: failed to open /mnt/part1/init.elf\n");
         }

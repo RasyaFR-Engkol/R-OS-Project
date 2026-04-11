@@ -59,6 +59,8 @@ static void LapicOnIrqHandler(void *context) {
         PIT::ticks += 1;
         // Fallback kalau kalibrasi gagal
     }
+
+    // Prevent deadline mode starvation: Kalau kita pakai TSC Deadline, pastikan timer tetap jalan di tiap tick walaupun ada delay di handler ini.
     if(!Tasking::SchedulerActive){
         if(ACPI::Timer::UsingTscDeadline){
             U64 NextTarget = Arch::ASM::RdTSC() + ACPI::Timer::TscTicksPerSystemTick;

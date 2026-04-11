@@ -54,9 +54,10 @@ class EXT2FileSystem : public FileSystem{
     public:
         EXT2FileSystem();
         virtual ~EXT2FileSystem();
-
+        virtual U64 Lookup(const char* path) override;
+        virtual BOOL PopulateInode(U64 InodeID, ::Inode* vfsNode) override;
+        virtual U64 CreateNode(const char* path, U32 Flags) override;
         virtual BOOL Mount(Partition *Part) override;
-        virtual File* Open(const char* path, U32 Flags) override;
         virtual void Close(File* file) override;
         virtual U32 Read(File* file, U8* buffer, U32 size) override; 
         virtual U32 Write(File *File, U8 *Buffer, U32 Size) override;

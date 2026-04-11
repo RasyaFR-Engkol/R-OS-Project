@@ -46,9 +46,12 @@ namespace Tasking {
         if(t->Priority >= MLFQ_LEVELS) t->Priority = MLFQ_LEVELS - 1;
 
         if (t->LastBoostEpoch < GlobalBoostEpoch) {
-            t->Priority = 0; // Reset priority
-            t->TimeSlice = GetTimeSliceForPriority(0);
-            t->LastBoostEpoch = GlobalBoostEpoch; // Sync epoch
+            // MASA BOOST: Angkat SEMUA task ke Priority 0 biar kebagian CPU!
+            // Jangan khawatir, task biasa nanti otomatis turun kasta lagi di SchedulerTick.
+            t->Priority = 0; 
+            
+            t->TimeSlice = GetTimeSliceForPriority(t->Priority);
+            t->LastBoostEpoch = GlobalBoostEpoch;
         }
 
         RunQueue &Rq = PriorityQueues[t->Priority];
@@ -300,12 +303,19 @@ namespace Tasking {
                 else PrevTask->TimeSlice = 0;
 
                 PrevTask->TimeUsedInPriority += DeltaTicks;
-                if(PrevTask->IsCriticalProc){
-                    PrevTask->Priority = 0;
 
-                    if (PrevTask->TimeSlice == 0) {
+                if(PrevTask->IsCriticalProc || PrevTask->IsEssentialSystem){
+                    // Set allotment tinggi buat VVIP (misal 1000ms alias 1 detik)
+                    U64 CriticalAllotment = 1000; 
+
+                    if (PrevTask->TimeUsedInPriority >= CriticalAllotment) {
+                        // Kalau VVIP rakus banget, hukum turun ke Prio 1 sementara
+                        PrevTask->Priority = 1; 
+                        PrevTask->TimeUsedInPriority = 0;
+                        PrevTask->TimeSlice = GetTimeSliceForPriority(1);
+                    } else if (PrevTask->TimeSlice == 0) {
+                        PrevTask->Priority = 0; // Tetap di Prio 0
                         PrevTask->TimeSlice = GetTimeSliceForPriority(0);
-                        PrevTask->TimeUsedInPriority = 0; // Reset history
                     }
                 } else {
                     U64 Allotment = GetTimeAllotmentForPriority(PrevTask->Priority);
@@ -320,10 +330,6 @@ namespace Tasking {
                     }
                 }
             }
-
-            // [!!!] INI BAGIAN PALING PENTING [!!!]
-            // Kalau Task masih sehat (RUNNING atau READY), balikin ke antrian!
-            // Jangan Enqueue kalau dia BLOCKED (lagi tidur) atau ZOMBIE (mati).
             if (PrevTask->State == TaskState::RUNNING || PrevTask->State == TaskState::READY) {
                 PrevTask->State = TaskState::READY;
                 
@@ -527,6 +533,12 @@ namespace Tasking {
             Printk::Write(Printk::Level::LOG_INFO, 
                 "PID: %d | State: %s | Prio: %d | Slice: %d\n",
                 t->pid, stateStr, t->Priority, t->TimeSlice
+            );
+
+            Printk::Write(Printk::LOG_INFO, "Is Essential: %s | Is Critical: %s | Is Sudo/Admin: %s\n",
+                t->IsEssentialSystem ? "YES" : "NO",
+                t->IsCriticalProc ? "YES" : "NO",
+                t->IsSudoOrAdmin ? "YES" : "NO"
             );
 
             Printk::Write(Printk::Level::LOG_DEBUG, "PriorityBitmap: 0x%x | ActiveTask: %d\n", PriorityBitmap, ActiveTask);

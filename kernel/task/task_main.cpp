@@ -162,14 +162,19 @@ namespace Tasking {
 	VOID SettingAppPerm(Task *t, U32 Perm){
 		if(!t || !Perm) return;
 
+		Printk::Write(Printk::Level::LOG_INFO, "Setting permissions for PID %d: 0x%x\n", t->pid, Perm);
+		
 		if(Perm & PERM_ADMIN_SUDO){
 			t->IsSudoOrAdmin = TRUE;
+			Printk::Write(Printk::Level::LOG_INFO, "PID %d granted SUDO/ADMIN permissions.\n", t->pid);
 		}
 		if(Perm & PERM_ESSENTIAL_SYSTEM){
 			t->IsEssentialSystem = TRUE;
+			Printk::Write(Printk::Level::LOG_INFO, "PID %d marked as Essential System Process.\n", t->pid);
 		}
 		if(Perm & PERM_SYS_CRITICAL){
 			t->IsCriticalProc = TRUE;
+			Printk::Write(Printk::Level::LOG_INFO, "PID %d marked as Critical Process.\n", t->pid);
 		}
 	}
 }

@@ -13,7 +13,11 @@
 
 ABI_C VOID Syscall_Entry(CpuContext_T *CPUContext){
     U64 syscall_number = CPUContext->rax;
-    //Serial::Printf("[ROS] Syscall_Entry: syscall number %llu\n", (unsigned long long)syscall_number);
+    if(syscall_number == 1001) {
+        Printk::Write(Printk::Level::LOG_DEBUG,
+                      "Syscall_Entry: Sys_SetAppPerm called with RDI=0x%llx\n",
+                      (unsigned long long)CPUContext->rdi);
+    }
 
     switch(syscall_number){
         #include "table/sys_table.hpp"

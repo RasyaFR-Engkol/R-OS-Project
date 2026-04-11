@@ -12,6 +12,8 @@
 #include <task.hpp>
 
 VOID TTY::OnInput(U8 c){
+    Serial::Printf("TTY:'%c' (0x%02X)\n", c, c);
+
     if(c == 0x05){
         Tasking::Debug_DumpProcessState();
     }
@@ -20,7 +22,6 @@ VOID TTY::OnInput(U8 c){
     } else if(c == 0x07){
         Printk::Panic("Triggered panic VIA TTY.\n");
     }
-    Serial::Printf("Char: 0x%x.\n", (unsigned char)c);
 
     if((m_Termios.c_iflag & IXON)){
         if(c == m_Termios.c_cc[VSTOP]){

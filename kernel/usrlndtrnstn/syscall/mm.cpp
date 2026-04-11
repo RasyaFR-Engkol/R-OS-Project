@@ -36,6 +36,9 @@ VOID Sys_Brk(CpuContext_T *CPUContext){
         UPTR PhysPtr = PageAlloc::PhysicalAllocPages(PagesNeeded);
         if(!PhysPtr){ CPUContext->rax = -ROS_NOMEM; return; }
 
+        VOID *VirtPtr = HHDM_PhysToVirt(PhysPtr);
+        String::Memset(VirtPtr, 0, PagesNeeded * PAGE_SIZE); // Zero out the new memory for safety
+
         U64 *UserPML4 = HHDM_PhysToVirt(Current->CR3);
 
         BOOL Success = PageAlloc::MapPages(UserPML4, PhysPtr, CurrentBrk, PagesNeeded, PAGE_PRESENT | PAGE_RW | PAGE_USER);
@@ -455,13 +458,13 @@ VOID Sys_MMap(CpuContext_T *CPUContext){
 
         BackingFile = Current->FDTable[FD];
         if(BackingFile->type == FT_SHM){
-            ShmFile *shmf = (ShmFile*)BackingFile;
+            ShmRegion *Region = (ShmRegion*)BackingFile->PrivateData;
             // SHM offset handling is tricky, assuming 0 for now or handling offset
-            if (Offset + (Pages*PAGE_SIZE) > shmf->Region->SizeInPages * PAGE_SIZE) {
+            if (Offset + (Pages*PAGE_SIZE) > Region->SizeInPages * PAGE_SIZE) {
                 CPUContext->rax = -ROS_INVALID; 
                 return;
             }
-            PhysToMap = shmf->Region->PhysAddr + Offset; // Simplifikasi fisik kontigu
+            PhysToMap = Region->PhysAddr + Offset; // Simplifikasi fisik kontigu
         }
         else if(String::Strcmp((const CHAR8*)BackingFile->FileName, (const CHAR8*)"/dev/fb0") == 0){
             const BootInfo *Bi = BootInfoGet();
@@ -616,7 +619,15 @@ VOID Sys_ShmOpen(CpuContext_T *Ctx){
         return;
     }
 
-    ShmFile *f = new ShmFile(Region);
+    File *f = new File();
+    f->type = FileType::FT_SHM;
+    f->CurrentPosition = 0;
+    f->RefCount = 1;
+    f->IsDirectory = FALSE;
+
+    f->Node = Region->RegionInode;
+    f->PrivateData = (VOID*)Region;
+    String::Strcpy(f->FileName, Region->Name);
     int fd = -1; // Init dengan -1
 
     for(INTN i = 0; i < MAX_FILE_IN_PROCESS; i++){

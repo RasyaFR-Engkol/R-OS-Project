@@ -15,9 +15,9 @@ else
 INCLUDE_ACPICA :=
 endif
 
-CXXFLAGS := -g -std=gnu++20 -ffreestanding -fno-exceptions -fno-rtti -m64 -O2 \
+CXXFLAGS := -g -std=gnu++20 -ffreestanding -fno-exceptions -fno-rtti -m64 -Os \
  -Wall -Wextra -Wpedantic -Werror \
- -Wshadow -Wpointer-arith -Wcast-align -Wundef -Wstrict-overflow=5 \
+ -Wshadow -Wpointer-arith -Wcast-align -Wundef -Wstrict-overflow=5 -Wno-strict-overflow \
  -Wno-unused-parameter -Wno-unused-function \
  -IInclude -mcmodel=kernel -fno-pic -fno-pie \
  -fno-asynchronous-unwind-tables -fno-unwind-tables -fno-omit-frame-pointer \
@@ -30,7 +30,7 @@ CXXFLAGS := -g -std=gnu++20 -ffreestanding -fno-exceptions -fno-rtti -m64 -O2 \
  -DACPI_USE_DO_WHILE_0 -DACPI_DEBUG_OUTPUT=0 $(INCLUDE_ACPICA)
 
 # ACPICA core is C, not C++. We'll compile with a relaxed warning set.
-ACPICA_CFLAGS := -std=gnu11 -ffreestanding -fno-stack-protector -fno-pic -fno-pie -O2 \
+ACPICA_CFLAGS := -std=gnu11 -ffreestanding -fno-stack-protector -fno-pic -fno-pie -Os \
  -mcmodel=kernel \
  -Wall -Wno-unused-parameter -Wno-sign-compare -Wno-missing-field-initializers \
  -Wno-format -Wno-unused-variable -Wno-unused-function -Wno-cast-align \

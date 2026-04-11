@@ -18,7 +18,7 @@ struct SocketFile : public File{
     SocketFile() {
         RefCount = 1;
         IsDirectory = FALSE;
-        FileSize = 0;
+        this->Node->FileSize = 0;
         CurrentPosition = 0;
     }
 
@@ -35,7 +35,9 @@ class SocketFileSystem : public FileSystem{
         void Close(File* file) override;
 
         BOOL Mount(Partition*) override { return TRUE; }
-        File* Open(const char*, U32 Flags) override { return nullptr; }
+        U64 Lookup(const char*) override { return 0; }
+        BOOL PopulateInode(U64, ::Inode*) override { return FALSE; }
+        U64 CreateNode(const char* path, U32 Flags) override;
         BOOL Delete(const char*) override { return FALSE; }
         BOOL Rename(const char*, const char*) override { return FALSE; }
         BOOL Seek(File*, U64, U32 o) override { return FALSE; }

@@ -25,7 +25,7 @@ static File* VFS_Open(const char* Path, U32 flags) {
         Printk::Write(Printk::Level::LOG_DEBUG, "VFS_Open - Failed to resolve path %s\n", Path);
         return nullptr;
     }
-    return FS->Open(RelativePath, flags);
+    return VFSManager::Open(RelativePath, flags);
 }
 
 VOID Sys_Exit(CpuContext_T *CPUContext) {
@@ -154,6 +154,9 @@ VOID Sys_Fork(CpuContext_T *CPUContext) {
     Child->LastBoostEpoch = GlobalBoostEpoch; // Sync epoch biar gak langsung reset lagi
     Child->PGID = Current->PGID;
     Child->PGIDTaskPtr = nullptr; // Safety awal
+    Child->IsCriticalProc = FALSE; // Default non-critical
+    Child->IsEssentialSystem = FALSE; // Default non-essential
+    Child->IsSudoOrAdmin = FALSE; // Default no sudo/admin
 
     // Kalau dia masuk ke grup (PGID != 0), kita harus update rantai
     if (Child->PGID != 0) {
@@ -222,22 +225,22 @@ VOID Sys_Execve(CpuContext_T *CPUContext) {
     }
     
     // 2. Read File (Load ELF)
-    U64 Size = F->FileSize;
+    U64 Size = F->Node->FileSize;
     void* Buffer = Kmalloc::Alloc(Size);
     if (!Buffer) { 
         Printk::Write(Printk::Level::LOG_DERR, "FAILED WHILE ALLOCATING BUFFER: Run out of memory.\n");
-        F->FSOwner->Close(F); 
+        F->Node->FSOwner->Close(F); 
         CPUContext->rax = -1; return; 
     }
     
-    if (F->FSOwner->Read(F, (U8*)Buffer, Size) != Size) {
+    if (F->Node->FSOwner->Read(F, (U8*)Buffer, Size) != Size) {
         Printk::Write(Printk::Level::LOG_DERR, "FAILED WHILE READING FROM VFS: Unknown.\n");
         Kmalloc::Free(Buffer);
-        F->FSOwner->Close(F);
+        F->Node->FSOwner->Close(F);
         CPUContext->rax = -1;
         return;
     }
-    F->FSOwner->Close(F);
+    F->Node->FSOwner->Close(F);
     
     // 3. Create New Address Space
     U64 NewCR3 = Tasking::CreateUserAddressSpace();
@@ -1089,3 +1092,5 @@ VOID Sys_GetClockTime(CpuContext_T *CPUContext){
 
     CPUContext->rax = 0;
 }
+
+VOID Sys_SetAppPerm(CpuContext_T *CPUContext);

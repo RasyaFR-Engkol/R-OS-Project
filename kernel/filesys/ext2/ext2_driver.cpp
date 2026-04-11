@@ -28,6 +28,105 @@ EXT2FileSystem::~EXT2FileSystem() {
     // Kosongkan untuk sekarang
 }
 
+U64 EXT2FileSystem::Lookup(const char* path) {
+    // Kalau path-nya root, langsung return Inode root (2)
+    if (String::Strlen(path) == 0 || String::Strcmp(path, "/") == 0) {
+        return 2; 
+    }
+
+    // Panggil helper lu yang udah ada buat nyari ID-nya
+    return FindInodeForPath(path, nullptr);
+}
+
+BOOL EXT2FileSystem::PopulateInode(U64 InodeID, ::Inode* vfsNode) {
+    if (InodeID == 0 || vfsNode == nullptr) return FALSE;
+
+    EXT2::Inode ext2_disk_inode;
+    
+    // Baca blok Inode dari hardisk
+    if (!ReadInode(InodeID, &ext2_disk_inode)) {
+        return FALSE; 
+    }
+
+    // Pindahin datanya ke standar VFS OS lu
+    vfsNode->FileSize = ext2_disk_inode.i_size;
+    vfsNode->FSOwner = this;
+    vfsNode->InodeID = InodeID;
+    vfsNode->Internal_StartCluster = ext2_disk_inode.i_block[0]; 
+    vfsNode->Internal_DirEntryLBA = 0; // Optional, bisa diisi kalau kamu butuh tracking lokasi direktori entry di disk
+    vfsNode->Internal_DirEntryOffset = 0; // Optional, bisa diisi kalau kamu butuh tracking offset direktori entry di disk
+    
+    // Konversi Tipe File EXT2 ke Tipe File OS lu (FT_DIR, FT_NORMAL, dll)
+    if ((ext2_disk_inode.i_mode & EXT2_S_IFMT) == EXT2_S_IFDIR) {
+        vfsNode->Type = FT_DIR;
+    } else if ((ext2_disk_inode.i_mode & EXT2_S_IFMT) == EXT2_S_IFLNK) {
+        vfsNode->Type = FT_SYMLINK; // Kalau OS lu support symlink
+    } else {
+        vfsNode->Type = FT_NORMAL;
+    }
+    // Bisa tambahin UUID, GID, atau permission juga di sini kalau struct ::Inode lu punya fieldnya
+    
+    return TRUE;
+}
+
+U64 EXT2FileSystem::CreateNode(const char* path, U32 Flags) {
+    ANSI_STRING ParentPath[256];
+    ANSI_STRING FileName[256];
+    
+    // Pisahin "/home/user/test.txt" jadi "/home/user" dan "test.txt"
+    String::SplitPath(path, ParentPath, FileName);
+
+    EXT2::Inode ParentInode;
+    U32 ParentInodeNum;
+
+    // Cari Inode Bapaknya (Directory tempat file ini bakal ditaruh)
+    if(String::Strlen(ParentPath) == 0 || String::Strcmp(ParentPath, "/") == 0) {
+        ParentInodeNum = 2; // Inode root EXT2 itu selalu 2
+        if (!ReadInode(2, &ParentInode)) return 0;
+    } else {
+        ParentInodeNum = FindInodeForPath(ParentPath, &ParentInode);
+        if (ParentInodeNum == 0) return 0; // Folder parent-nya gak ketemu!
+    }
+
+    // 1. Alokasi Inode Baru
+    U32 NewInodeNum = AllocateInode();
+    if (NewInodeNum == 0) return 0; // Hardisk penuh (Inode abis)
+
+    // 2. Setup Meta-data File Baru
+    EXT2::Inode NewInode;
+    String::Memset(&NewInode, 0, sizeof(EXT2::Inode));
+    
+    // Kalau dia bikin direktori (misal lu mau reuse fungsi ini buat MKDIR)
+    // Tapi karena ini dari Open(O_CREAT), pasti file reguler.
+    NewInode.i_mode = EXT2_S_IFREG | 0x1FF; // Regular file, rwxrwxrwx (777)
+    NewInode.i_links_count = 1;
+    
+    U64 now = Arch::Time::NowTicks();
+    NewInode.i_ctime = (U32)now; 
+    NewInode.i_atime = (U32)now;
+    NewInode.i_mtime = (U32)now;
+    NewInode.i_dtime = 0;
+    
+    NewInode.i_gid = (m_DebugDefaultGid != 0xFFFFFFFF) ? m_DebugDefaultGid : 1000;
+    NewInode.i_uid = (m_DebugDefaultUid != 0xFFFFFFFF) ? m_DebugDefaultUid : 1000;
+
+    // 3. Tulis Inode baru ke Disk
+    if (!WriteInode(NewInodeNum, &NewInode)) {
+        FreeInode(NewInodeNum);
+        return 0;
+    }
+    
+    // 4. Daftarin nama file ini ke Folder Bapaknya
+    if (!AddEntryToDirectory(&ParentInode, NewInodeNum, FileName, EXT2_FT_REG_FILE, ParentInodeNum)) {
+        Printk::Write(Printk::Level::LOG_ERR, "EXT2: CreateNode - Failed to add entry to directory. Rolling back inode %u\n", NewInodeNum);
+        FreeInode(NewInodeNum); // Rollback kalau gagal
+        return 0;
+    }
+
+    // Sukses! Balikin nomor KTP-nya ke VFS biar VFS yang masukin ke Cache.
+    return NewInodeNum;
+}
+
 BOOL EXT2FileSystem::ReadBlock(U32 blockNum, PageAlloc::DMAAlloc::DMABuffer** outBuffer) {
     if (blockNum == 0) {
         Printk::Write(Printk::Level::LOG_ERR, "EXT2: ReadBlock(0) attempted. Block 0 is invalid.\n");
@@ -129,9 +228,13 @@ BOOL EXT2FileSystem::Mount(Partition *Part){
 }
 
 // Truncate: shrink (and allow grow as simple size update) file to 'size'
-BOOL EXT2FileSystem::Truncate(File* file, U64 size){
-    if(!file) return FALSE;
-    U32 inodeNum = file->Internal_StartCluster;
+// Truncate: shrink (and allow grow as simple size update) file to 'size'
+BOOL EXT2FileSystem::Truncate(File* file, U64 size) {
+    // 1. Validasi File dan Node VFS-nya
+    if(!file || !file->Node) return FALSE;
+    
+    // 2. Ambil InodeNum dari VFS Inode, bukan dari atribut lawas
+    U32 inodeNum = file->Node->InodeID;
     if(inodeNum == 0) return FALSE;
 
     EXT2::Inode inode;
@@ -142,7 +245,9 @@ BOOL EXT2FileSystem::Truncate(File* file, U64 size){
         inode.i_size = (U32)size;
         if(!WriteInode(inodeNum, &inode)) return FALSE;
         PersistSuperblockAndBGDT();
-        file->FileSize = inode.i_size;
+        
+        // 3. UPDATE KE VFS INODE
+        file->Node->FileSize = inode.i_size;
         return TRUE;
     }
 
@@ -153,7 +258,9 @@ BOOL EXT2FileSystem::Truncate(File* file, U64 size){
         inode.i_size = (U32)size;
         if(!WriteInode(inodeNum, &inode)) return FALSE;
         PersistSuperblockAndBGDT();
-        file->FileSize = inode.i_size;
+        
+        // 3. UPDATE KE VFS INODE
+        file->Node->FileSize = inode.i_size;
         return TRUE;
     }
 
@@ -164,7 +271,7 @@ BOOL EXT2FileSystem::Truncate(File* file, U64 size){
         if(inode.i_block[i] != 0){
             FreeBlock(inode.i_block[i]);
             inode.i_block[i] = 0;
-            inode.i_blocks -= (m_BlockSize / 512);
+            inode.i_blocks -= (m_BlockSize / 512); // i_blocks EXT2 selalu dalam satuan 512B
         }
     }
 
@@ -275,7 +382,9 @@ BOOL EXT2FileSystem::Truncate(File* file, U64 size){
     inode.i_size = (U32)size;
     if(!WriteInode(inodeNum, &inode)) return FALSE;
     PersistSuperblockAndBGDT();
-    file->FileSize = inode.i_size;
+    
+    // 3. UPDATE KE VFS INODE LAGI DI AKHIR
+    file->Node->FileSize = inode.i_size;
     return TRUE;
 }
 
@@ -482,34 +591,44 @@ BOOL EXT2FileSystem::RMDir(const char* path){
 
 // Flush metadata for file
 BOOL EXT2FileSystem::Flush(File* file){
-    if(!file) return FALSE;
-    U32 inodeNum = file->Internal_StartCluster;
+    // [FIX] Validasi Node
+    if(!file || !file->Node) return FALSE;
+    
+    // [FIX] Ambil dari VFS Inode
+    U32 inodeNum = file->Node->InodeID;
     if(inodeNum == 0) return FALSE;
+    
     EXT2::Inode inode;
     if(!ReadInode(inodeNum, &inode)) return FALSE;
     if(!WriteInode(inodeNum, &inode)) return FALSE;
     PersistSuperblockAndBGDT();
     return TRUE;
 }
-
 // Append: seek to EOF and write data. Return TRUE if all bytes written.
 BOOL EXT2FileSystem::Append(File* file, U8* buffer, U32 size){
-    if(!file || !buffer || size == 0) return FALSE;
-    if(file->IsDirectory) return FALSE;
+    if(!file || !file->Node || !buffer || size == 0) return FALSE;
+    
+    // [FIX] Cek tipe dari VFS Inode
+    if(file->Node->Type == FileType::FT_DIR) return FALSE;
 
-    // Seek to EOF
-    if(!Seek(file, file->FileSize, SEEK_CUR)) return FALSE;
+    // [FIX] Ambil ukuran dari VFS Inode
+    // Catatan: Kalau Seek lu pakai referensi posisi sekarang (SEEK_CUR),
+    // masukin 0 atau ubah modenya ke SEEK_SET. Gw asumsikan lu mau ke ujung file (SEEK_SET).
+    if(!Seek(file, file->Node->FileSize, SEEK_SET)) return FALSE;
 
     U32 written = Write(file, buffer, size);
     return (written == size) ? TRUE : FALSE;
 }
 
 INTN EXT2FileSystem::ReadDir(File* dirFile, void* buffer, U32 bufferSize){
-    if(!dirFile || !buffer) return -1;
-    if(!dirFile->IsDirectory) return -1;
+    if(!dirFile || !dirFile->Node || !buffer) return -1;
+    
+    // [FIX] Cek dari VFS Inode
+    if(dirFile->Node->Type != FileType::FT_DIR) return -1;
     if(bufferSize == 0) return 0;
 
-    U32 inodeNum = dirFile->Internal_StartCluster;
+    // [FIX] Ambil dari VFS Inode
+    U32 inodeNum = dirFile->Node->InodeID;
     if(inodeNum == 0) return -1;
 
     EXT2::Inode dirInode;
@@ -522,6 +641,7 @@ INTN EXT2FileSystem::ReadDir(File* dirFile, void* buffer, U32 bufferSize){
     bool stop = false;
 
     // Use CurrentPosition as number of entries already returned
+    // Atribut ini tetep di struct File, jadi aman!
     U64 skip = dirFile->CurrentPosition;
     U64 seen = 0;
 
@@ -539,16 +659,29 @@ INTN EXT2FileSystem::ReadDir(File* dirFile, void* buffer, U32 bufferSize){
             if(hdr.inode != 0 && hdr.name_len > 0){
                 U32 namelen = hdr.name_len;
                 if(namelen > 255) namelen = 255;
+
                 // increment seen count for this entry
-                U64 idx = seen++;
-                if(idx < skip){ Offset += hdr.rec_len; continue; }
+                U64 idx = seen;
+
+                if(idx < skip){ 
+                    seen++;
+                    Offset += hdr.rec_len; 
+                    continue; 
+                }
+
                 // need space for name + NUL
                 U32 need = namelen + 1;
-                if(need > remain){ PageAlloc::DMAAlloc::FreeDMABuffer(DirDataBuffer); return FALSE; }
+                if(need > remain){ 
+                    PageAlloc::DMAAlloc::FreeDMABuffer(DirDataBuffer); 
+                    return FALSE; // BUFFER PENUH! 'seen' JANGAN DITAMBAHIN!
+                }
+
                 String::Memcpy((U8*)out, entryPtr + sizeof(hdr), namelen);
                 out += namelen;
                 *out++ = '\0';
                 remain -= need;
+
+                seen++;
             }
             Offset += hdr.rec_len;
         }
@@ -634,82 +767,6 @@ INTN EXT2FileSystem::ReadDir(File* dirFile, void* buffer, U32 bufferSize){
     return (INTN)used;
 }
 
-File* EXT2FileSystem::Open(const char* path, U32 Flags) {
-    EXT2::Inode inode;
-    U32 InodeNum = FindInodeForPath(path, &inode);
-
-    if(InodeNum > 0){
-        if ((Flags & O_CREAT) && (Flags & O_EXCL)) return nullptr;
-
-        File *file = new File();
-        if(!file){
-            Printk::Write(Printk::Level::LOG_ERR, "EXT2: Open - Failed to allocate File object for %s\n", path);
-            return nullptr;
-        }
-
-        String::Strcpy(file->FileName, path); // TODO: Seharusnya nama file, bukan nama path lengkap
-        file->FileSize = inode.i_size;
-        file->IsDirectory = (inode.i_mode & EXT2_S_IFDIR) ? TRUE : FALSE;
-        file->CurrentPosition = 0;
-        file->FSOwner = this;
-        file->InodeID = InodeNum;
-
-        file->Internal_StartCluster = InodeNum;
-        file->RefCount = 1; // Init RefCount
-        file->type = FileType::FT_NORMAL;
-
-        if(Flags & O_TRUNC){
-            Truncate(file, 0);
-        }
-
-        return file;
-    }
-
-    if(Flags & O_CREAT){
-        char parentPath[256];
-        char fileName[256];
-        String::SplitPath(path, parentPath, fileName);
-
-        EXT2::Inode ParentInode;
-        U32 ParentInodeNum;
-
-        if (String::Strlen(parentPath) == 0 || String::Strcmp(parentPath, "/") == 0) {
-            ParentInodeNum = 2; // Root Inode EXT2
-            ReadInode(2, &ParentInode);
-        } else {
-            ParentInodeNum = FindInodeForPath(parentPath, &ParentInode);
-            if (ParentInodeNum == 0) return nullptr; // Parent gak ada
-        }
-
-        U32 newInodeNum = AllocateInode(); 
-        if (newInodeNum == 0) return nullptr;
-
-        EXT2::Inode NewInode;
-        String::Memset(&NewInode, 0, sizeof(EXT2::Inode));
-        NewInode.i_mode = EXT2_S_IFREG | 0x1FF; // Regular file, rwxrwxrwx
-        NewInode.i_links_count = 1;
-        NewInode.i_ctime = 0;
-        NewInode.i_atime = 0;
-        NewInode.i_mtime = 0;
-        NewInode.i_dtime = 0;
-        NewInode.i_gid = 1000;
-        NewInode.i_uid = 1000;
-
-        WriteInode(newInodeNum, &NewInode);
-        
-        if (!AddEntryToDirectory(&ParentInode, newInodeNum, fileName, EXT2_FT_REG_FILE, ParentInodeNum)) {
-            Printk::Write(Printk::Level::LOG_ERR, "EXT2: Open - Failed to add entry to directory. Rolling back inode %u\n", newInodeNum);
-            FreeInode(newInodeNum); // Hapus inode yang telanjur dibuat
-            return nullptr;
-        }
-
-        return Open(path, Flags & ~O_CREAT);
-
-    }
-
-    return nullptr;
-}
-
 BOOL EXT2FileSystem::Stat(const char *path, FileInfo *info){
     EXT2::Inode inode;
     U32 inodeNum = FindInodeForPath(path, &inode);
@@ -728,20 +785,21 @@ BOOL EXT2FileSystem::Stat(const char *path, FileInfo *info){
 // Copy a file within the filesystem: srcPath and destPath are relative paths starting with '/'
 
 void EXT2FileSystem::Close(File* file) {
+    Serial::Printf("EXT2 CLOSE.\n");
     if(!file) return;
 
-    // If this file belongs to this FS, attempt to flush metadata
-    if(file->FSOwner == this){
-        U32 inodeNum = file->Internal_StartCluster;
+    // Cek VFS Node dan kepemilikannya
+    if(file->Node && file->Node->FSOwner == this){
+        
+        // Ambil ID dari VFS Inode
+        U32 inodeNum = file->Node->InodeID;
         if(inodeNum != 0){
             EXT2::Inode inode;
             if(ReadInode(inodeNum, &inode)){
                 // update timestamps: modification and change time
                 U64 now = Arch::Time::NowTicks();
-                // convert ticks to u32 (best-effort)
                 inode.i_mtime = (U32)now;
                 inode.i_ctime = (U32)now;
-                // update atime if file was read
                 inode.i_atime = (U32)now;
 
                 if(!WriteInode(inodeNum, &inode)){
@@ -749,22 +807,30 @@ void EXT2FileSystem::Close(File* file) {
                 }
             }
         }
-    }
 
-    // Free file object
-    delete file;
+        // ==========================================================
+        // [!] STOP SAMPAI DI SINI! 
+        // JANGAN ADA REFCOUNT ATAU DELETE FILE DI DRIVER EXT2!
+        // ==========================================================
+        
+        // Kalo lu mau flush/sync block disk dari RAM ke Hardisk, di sini tempatnya nanti.
+    }
 }
 
 U32 EXT2FileSystem::Read(File* file, U8* buffer, U32 size) {
-    if(!file || !buffer || size == 0){
+    // [FIX] Validasi Node VFS
+    if(!file || !file->Node || !buffer || size == 0){
+        Printk::Write(Printk::Level::LOG_ERR, "EXT2: Read - Invalid parameters\n");
         return 0;
     }
 
-    if(file->IsDirectory){
+    // [FIX] Cek VFS Type
+    if(file->Node->Type == FileType::FT_DIR){
         Printk::Write(Printk::Level::LOG_WARNING, "EXT2: Read() called on a directory. Returning Directory Handle\n");
     }
 
-    U32 InodeNum = file->Internal_StartCluster;
+    // [FIX] Ambil dari VFS Inode
+    U32 InodeNum = file->Node->InodeID;
     EXT2::Inode inode;
     if(!ReadInode(InodeNum, &inode)){
         Printk::Write(Printk::Level::LOG_ERR, "EXT2: Read - Failed to read inode %u\n", InodeNum);
@@ -772,15 +838,20 @@ U32 EXT2FileSystem::Read(File* file, U8* buffer, U32 size) {
     }
 
     if(file->CurrentPosition >= inode.i_size){
+        Printk::Write(Printk::Level::LOG_INFO, "EXT2: Read - CurrentPosition %u is at or beyond EOF (i_size %u)\n", file->CurrentPosition, inode.i_size);
         return 0; // EOF
     }
 
-    U32 BytesToEnd = file->FileSize - file->CurrentPosition;
+    // Pakai i_size asli fisik untuk ngitung sisa bytes
+    U32 BytesToEnd = inode.i_size - file->CurrentPosition;
     if(size > BytesToEnd){
         size = BytesToEnd;
     }
 
-    if(size == 0) return 0; // asumsi file rusak atau EOF
+    if(size == 0) {
+        Printk::Write(Printk::Level::LOG_INFO, "EXT2: Read - No bytes to read\n");
+        return 0;
+    } // asumsi file rusak atau EOF
 
     U32 TotalBytesRead = 0;
     PageAlloc::DMAAlloc::DMABuffer* block_buffer = nullptr;
@@ -790,48 +861,53 @@ U32 EXT2FileSystem::Read(File* file, U8* buffer, U32 size) {
         U32 OffsetInBlock = file->CurrentPosition % m_BlockSize;
 
         U32 DiskBlockNum = GetBlockNumForFileOffset(&inode, FileBlockIndex);
-        if(DiskBlockNum == 0){
-            Printk::Write(Printk::Level::LOG_ERR, "EXT2: Read - Invalid block number for file offset.\n");
-            break;
-        }
-
+        
         U32 BytesFromThisBlock = m_BlockSize - OffsetInBlock;
         if(BytesFromThisBlock > size){
             BytesFromThisBlock = size;
         }
 
-        if(!ReadBlock(DiskBlockNum, &block_buffer)){
-            Printk::Write(Printk::Level::LOG_ERR, "EXT2: Read - Failed to read block %u\n", DiskBlockNum);
-            break;
+        if(DiskBlockNum == 0){
+            // [!] IMPROVEMENT: SPARSE FILE SUPPORT
+            // Kalau bloknya 0 tapi posisi masih di dalam i_size, itu bukan error. 
+            // Itu artinya bloknya emang kosong (isinya 0 semua).
+            String::Memset(buffer + TotalBytesRead, 0, BytesFromThisBlock);
+        } else {
+            // Blok beneran ada, baca dari disk
+            if(!ReadBlock(DiskBlockNum, &block_buffer)){
+                Printk::Write(Printk::Level::LOG_ERR, "EXT2: Read - Failed to read block %u\n", DiskBlockNum);
+                break;
+            }
+
+            String::Memcpy(buffer + TotalBytesRead, 
+                (U8*)block_buffer->VirtAddr + OffsetInBlock, BytesFromThisBlock);
+
+            PageAlloc::DMAAlloc::FreeDMABuffer(block_buffer);
+            block_buffer = nullptr;
         }
-
-        String::Memcpy(buffer + TotalBytesRead, 
-            (U8*)block_buffer->VirtAddr + OffsetInBlock, BytesFromThisBlock);
-
-        PageAlloc::DMAAlloc::FreeDMABuffer(block_buffer);
-        block_buffer = nullptr;
 
         file->CurrentPosition += BytesFromThisBlock;
         TotalBytesRead += BytesFromThisBlock;
         size -= BytesFromThisBlock;
-
-        if(file->CurrentPosition >= inode.i_size){
-            break; // EOF
-        }
     }
 
-    return TotalBytesRead;
+    Printk::Write(Printk::Level::LOG_INFO, "EXT2: Read - TotalBytesRead %u, NewPosition %u\n", TotalBytesRead, file->CurrentPosition);
 
+    return TotalBytesRead;
 }
 
 U32 EXT2FileSystem::Write(File *File, U8 *Buffer, U32 Size) {
-    if(!File || !Buffer || Size == 0) return 0;
-    if(File->IsDirectory){
+    // [FIX] Validasi Node VFS
+    if(!File || !File->Node || !Buffer || Size == 0) return 0;
+    
+    // [FIX] Cek VFS Type
+    if(File->Node->Type == FileType::FT_DIR){
         Printk::Write(Printk::Level::LOG_WARNING, "EXT2: Write() called on a directory.\n");
         return 0;
     }
 
-    U32 InodeNum = File->Internal_StartCluster;
+    // [FIX] Ambil dari VFS Inode
+    U32 InodeNum = File->Node->InodeID;
     EXT2::Inode inode;
     if(!ReadInode(InodeNum, &inode)){
         Printk::Write(Printk::Level::LOG_ERR, "EXT2: Write - Failed to read inode %u\n", InodeNum);
@@ -885,23 +961,11 @@ U32 EXT2FileSystem::Write(File *File, U8 *Buffer, U32 Size) {
         Printk::Write(Printk::Level::LOG_WARNING, "EXT2: Write - Failed to persist inode %u\n", InodeNum);
     }
 
-    // Persist BGDT (block allocations changed BGDT counters)
-    U32 BGDTStartBlocks = (m_BlockSize == 1024) ? 2 : 1;
-    for(U32 i = 0; i < m_BGDT_SizeInBlocks; i++){
-        PageAlloc::DMAAlloc::DMABuffer *tmp = PageAlloc::DMAAlloc::AllocateDMABytes(m_BlockSize);
-        if(!tmp){
-            Printk::Write(Printk::Level::LOG_WARNING, "EXT2: Write - failed allocate DMABuffer to write BGDT block %u\n", i);
-            break;
-        }
-        U8 *src = ((U8*)m_BGDT) + (i * m_BlockSize);
-        String::Memcpy((U8*)tmp->VirtAddr, src, m_BlockSize);
-        if(!WriteBlock(BGDTStartBlocks + i, tmp)){
-            Printk::Write(Printk::Level::LOG_WARNING, "EXT2: Write - failed write BGDT block %u\n", BGDTStartBlocks + i);
-        }
-        PageAlloc::DMAAlloc::FreeDMABuffer(tmp);
-    }
+    // [!] IMPROVEMENT: Gak usah loop panjang-panjang nulis array, panggil helper lu aja!
+    PersistSuperblockAndBGDT();
 
-    File->FileSize = inode.i_size;
+    // [FIX] Update metadata size di VFS Inode RAM
+    File->Node->FileSize = inode.i_size;
     return totalWritten;
 }
 
@@ -934,38 +998,7 @@ BOOL EXT2FileSystem::Delete(const char* path) {
 
     // If it's a directory, ensure it's empty (only . and ..)
     if(targetInode.i_mode & EXT2_S_IFDIR){
-        // Simple check: scan direct blocks for any entry other than . and ..
-        PageAlloc::DMAAlloc::DMABuffer* dbuf = nullptr;
-        for(int i = 0; i < 12 && targetInode.i_block[i] != 0; i++){
-            if(!ReadBlock(targetInode.i_block[i], &dbuf)) continue;
-            U8* p = (U8*)dbuf->VirtAddr;
-                U32 off = 0;
-                while(off < m_BlockSize){
-                    struct DirentHeader { U32 inode; U16 rec_len; U8 name_len; U8 file_type; } hdr;
-                    String::Memcpy(&hdr, p + off, sizeof(hdr));
-                    if(hdr.rec_len == 0) break;
-                    if(hdr.inode != 0){
-                        // copy name into temporary buffer
-                        CHAR8 namebuf[256];
-                        U32 namelen = hdr.name_len;
-                        if(namelen > 255) namelen = 255;
-                        String::Memcpy(namebuf, p + off + sizeof(hdr), namelen);
-                        namebuf[namelen] = '\0';
-
-                        // compare names
-                        if(!ext2_dirent_name_compare(namebuf, hdr.name_len, ".") &&
-                           !ext2_dirent_name_compare(namebuf, hdr.name_len, "..")){
-                            PageAlloc::DMAAlloc::FreeDMABuffer(dbuf);
-                            Printk::Write(Printk::Level::LOG_WARNING, "EXT2: Delete - directory not empty: %s\n", path);
-                            return FALSE;
-                        }
-                    }
-                    off += hdr.rec_len;
-                    if(hdr.rec_len == 0) break;
-                }
-            PageAlloc::DMAAlloc::FreeDMABuffer(dbuf);
-            dbuf = nullptr;
-        }
+        return RMDir(path);
     }
 
     // Remove directory entry from parent
@@ -976,8 +1009,6 @@ BOOL EXT2FileSystem::Delete(const char* path) {
     if(!WriteInode(targetInodeNum, &targetInode)){
         Printk::Write(Printk::Level::LOG_WARNING, "EXT2: Delete - failed to write inode %u after unlink\n", targetInodeNum);
     }
-
-
 
     // If link count reached zero, free data blocks and inode bitmaps
     if(targetInode.i_links_count == 0){
@@ -1192,8 +1223,11 @@ BOOL EXT2FileSystem::Rename(const char* oldPath, const char* newPath) {
 }
 
 BOOL EXT2FileSystem::Seek(File* file, U64 position, U32 Origin) {
-    if(!file) return FALSE; 
-    if(file->IsDirectory){
+    // [FIX] Validasi VFS Node
+    if(!file || !file->Node) return FALSE; 
+    
+    // [FIX] Cek tipe lewat VFS Node
+    if(file->Node->Type == FileType::FT_DIR){
         Printk::Write(Printk::Level::LOG_WARNING, "EXT2: Seek() called on a directory.\n");
         return FALSE;
     }
@@ -1209,7 +1243,8 @@ BOOL EXT2FileSystem::Seek(File* file, U64 position, U32 Origin) {
             break;
         }
         case SEEK_END:{
-            NewPos = file->FileSize + position;
+            // [FIX] Ambil FileSize dari VFS Node
+            NewPos = file->Node->FileSize + position;
             break;
         }
         default:{

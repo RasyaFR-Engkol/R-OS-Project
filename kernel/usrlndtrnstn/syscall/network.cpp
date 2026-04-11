@@ -43,7 +43,7 @@ VOID Sys_Socket(CpuContext_T *CPUContext){
     }
 
     SocketFile* sockFile = new SocketFile();
-    sockFile->FSOwner = SocketFileSystem::GetInstance();
+    sockFile->Node->FSOwner = SocketFileSystem::GetInstance();
 
     if (type == SOCK_STREAM) { // TCP
         Printk::Write(Printk::Level::LOG_DEBUG, "Sys_Socket: Creating TCP socket\n");
@@ -132,7 +132,7 @@ VOID Sys_Connect(CpuContext_T *CPUContext) {
     SocketFile* sockFile = (SocketFile*)Curtask->FDTable[fd];
     
     // Pastikan ini beneran socket, bukan file biasa!
-    if (sockFile->FSOwner != SocketFileSystem::GetInstance()) {
+    if (sockFile->Node->FSOwner != SocketFileSystem::GetInstance()) {
         Printk::Write(Printk::Level::LOG_DEBUG, "Sys_Connect: FD %llu is not a socket\n", (unsigned long long)fd);
         CPUContext->rax = -1; // ENOTSOCK
         return;

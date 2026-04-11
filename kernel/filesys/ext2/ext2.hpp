@@ -1,8 +1,6 @@
 #pragma once
 #include <rosval.h>
-#include "../filesystem.hpp"
 #include "../partition.hpp"
-#include "../iblockdevice.hpp"
 
 #define EXT2_SUPER_MAGIC 0xEF53
 #define EXT2_N_BLOCKS 15
@@ -20,6 +18,18 @@
 #define EXT2_FT_FIFO     5
 #define EXT2_FT_SOCK     6
 #define EXT2_FT_SYMLINK  7
+
+/* Mask untuk tipe file */
+#define EXT2_S_IFMT   0xF000
+
+/* Nilai untuk masing-masing tipe file */
+#define EXT2_S_IFSOCK 0xC000  /* Socket */
+#define EXT2_S_IFLNK  0xA000  /* Symbolic link */
+#define EXT2_S_IFREG  0x8000  /* Regular file */
+#define EXT2_S_IFBLK  0x6000  /* Block device */
+#define EXT2_S_IFDIR  0x4000  /* Directory */
+#define EXT2_S_IFCHR  0x2000  /* Character device */
+#define EXT2_S_IFIFO  0x1000  /* FIFO */
 
 namespace EXT2{
     struct SuperBlock{

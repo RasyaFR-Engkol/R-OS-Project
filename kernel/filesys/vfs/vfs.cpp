@@ -4,9 +4,49 @@
 #include <string.hpp>
 #include <logging.hpp>
 #include "../../dev/devicemanager.hpp"
+#include <rwlock_simple.hpp>
+#include "../../mm/shm/shm.hpp"
 
 #define MAX_FS_DRIVERS 10
 #define MAX_MOUNT_POINTS 20
+
+namespace {
+    #define MAX_VFS_CACHED_INODES 128
+    ::Inode* g_InodeCache[MAX_VFS_CACHED_INODES] = {nullptr};
+
+    ::Inode* GetCachedInode(FileSystem* fs, U32 InodeNum) {
+        for (int i = 0; i < MAX_VFS_CACHED_INODES; i++) {
+            // Harus cek FS-nya juga! Siapa tau Inode 5 di EXT2 beda sama Inode 5 di FAT32
+            if (g_InodeCache[i] != nullptr && 
+                g_InodeCache[i]->FSOwner == fs && 
+                g_InodeCache[i]->InodeID == InodeNum) {
+                return g_InodeCache[i];
+            }
+        }
+        return nullptr;
+    }
+
+    void AddCachedInode(::Inode* node) {
+        for (int i = 0; i < MAX_VFS_CACHED_INODES; i++) {
+            if (g_InodeCache[i] == nullptr) {
+                g_InodeCache[i] = node;
+                return;
+            }
+        }
+        Printk::Write(Printk::Level::LOG_WARNING, "VFS: Inode Cache Full!\n");
+    }
+
+    VOID RemoveCachedInode(FileSystem *Fs, U32 InodeNum){
+        for(int i = 0; i < MAX_VFS_CACHED_INODES; i++){
+            if(g_InodeCache[i] != nullptr && 
+               g_InodeCache[i]->FSOwner == Fs && 
+               g_InodeCache[i]->InodeID == InodeNum){
+                g_InodeCache[i] = nullptr;
+                return;
+            }
+        }
+    }
+}
 
 VOID CanonicalizePath(const char* cwd, const char* input, char* output) {
     char temp[256];
@@ -84,6 +124,7 @@ namespace VFSManager{
     };
     static MountPoint g_MountPoints[MAX_MOUNT_POINTS];
     static U32 g_MountPointCount = 0;
+    static RwLock g_VFSLock; // Lock global untuk operasi VFS (Mount, Resolve, dll)
 
     VOID RegisterFileSystem(const char *fsName, FSDriverFactory factory){
         if(g_DriverCount >= MAX_FS_DRIVERS){
@@ -130,11 +171,14 @@ namespace VFSManager{
             Printk::Write(Printk::Level::LOG_WARNING, "VFS: Mount point %s already exists\n", path);
             return FALSE;
         }
+
+        g_VFSLock.AcquireWrite();
         // Ensure partition is mounted (instantiate driver already done in Partition::Mount)
         FileSystem* fs = Part->GetFilesystem();
         if(!fs){
             Printk::Write(Printk::Level::LOG_ERR, "VFS: Partition has no filesystem for mount %s\n", path);
             return FALSE;
+            g_VFSLock.ReleaseWrite();
         }
         // Record mount point
         String::Strncpy(g_MountPoints[g_MountPointCount].path, path, sizeof(g_MountPoints[g_MountPointCount].path)-1);
@@ -142,6 +186,7 @@ namespace VFSManager{
         g_MountPoints[g_MountPointCount].fs = fs;
         g_MountPointCount++;
         Printk::Write(Printk::Level::LOG_INFO, "VFS: Mounted FS at %s\n", path);
+        g_VFSLock.ReleaseWrite();
         return TRUE;
     }
 
@@ -242,10 +287,13 @@ namespace VFSManager{
         CanonicalizePath("/", path, CurrentPath);
         INTN LoopCount = 0;
 
+        g_VFSLock.AcquireRead();
+
         while(LoopCount < MAX_SYMLINK_DEPTH){
             FileSystem* fs = nullptr;
             char rel[256];
             if (!FindMountPoint(CurrentPath, &fs, rel)) {
+                g_VFSLock.ReleaseRead();
                 return FALSE; // Gak ketemu mount point
             }
 
@@ -254,6 +302,7 @@ namespace VFSManager{
             if (!fs->Stat(rel, &Info)) {
                 if(outFS) *outFS = fs;
                 if(OutRelativePath) String::Strncpy(OutRelativePath, rel, 255);
+                g_VFSLock.ReleaseRead();
                 return TRUE; 
             }
 
@@ -264,13 +313,17 @@ namespace VFSManager{
                 if (!FollowLastSymlink) {
                     if(outFS) *outFS = fs;
                     if(OutRelativePath) String::Strncpy(OutRelativePath, rel, 255);
+                    g_VFSLock.ReleaseRead();
                     return TRUE;
                 }
 
                 // Kalau user minta follow (stat/open), kita BACA isinya.
                 // Driver harus implement ReadLink!
                 I64 len = fs->ReadLink(rel, LinkTarget, 255);
-                if (len < 0) return FALSE; // Error baca link
+                if (len < 0) {
+                    g_VFSLock.ReleaseRead();
+                    return FALSE;
+                }
                 LinkTarget[len] = '\0';
 
                 // D. Rakit Path Baru
@@ -303,69 +356,125 @@ namespace VFSManager{
 
             if(outFS) *outFS = fs;
             if(OutRelativePath) String::Strncpy(OutRelativePath, rel, 255);
+            g_VFSLock.ReleaseRead();
             return TRUE;
         }
+        g_VFSLock.ReleaseRead();
         return FALSE; // ga ketemu apa apa kan?
     }
 
     File* Open(const char* path, U32 Flags){
-        FileSystem* fs = nullptr; char rel[256];
-        if(!ResolvePath(path, &fs, rel)) {
-            Printk::Write(Printk::Level::LOG_ERR, "VFS: Open - ResolvePath failed for '%s'\n", path);
+        FileSystem *Fs = nullptr;
+        CHAR8 Rel[256];
+
+        if(!ResolvePath(path, &Fs, Rel)) {
+            Printk::Write(Printk::Level::LOG_ERR, "VFS: Open failed to resolve path '%s'\n", path);
             return nullptr;
         }
-        return fs->Open(rel, Flags);
+
+        U64 InodeNum = Fs->Lookup(Rel);
+
+        if(InodeNum == 0 && (Flags & O_CREAT)) {
+            InodeNum = Fs->CreateNode(Rel, Flags);
+            if(InodeNum == 0) {
+                Printk::Write(Printk::Level::LOG_ERR, "VFS: Open failed to create node for path '%s'\n", path);
+                return nullptr;
+            }
+        } else if (InodeNum == 0) {
+            Printk::Write(Printk::Level::LOG_ERR, "VFS: Open failed to find node for path '%s'\n", path);
+            return nullptr;
+        }
+
+        ::Inode *VFSNode = GetCachedInode(Fs, InodeNum);
+
+        if(VFSNode != nullptr) {
+            VFSNode->RefCount++;
+        } else {
+            VFSNode = new ::Inode();
+            if(!VFSNode) return nullptr;
+
+            VFSNode->FSOwner = Fs;
+            VFSNode->InodeID = InodeNum;
+            VFSNode->RefCount = 1;
+
+            Fs->PopulateInode(InodeNum, VFSNode);
+
+            AddCachedInode(VFSNode);
+        }
+
+        File *file = new File();
+        if(!file) {
+            VFSNode->RefCount--;
+            Printk::Write(Printk::Level::LOG_ERR, "VFS: Open failed to allocate File object for path '%s'\n", path);
+            return nullptr;
+        }
+
+        String::Strcpy(file->FileName, path);
+        file->CurrentPosition = 0;
+        file->Flags = Flags;
+        file->Node = VFSNode; // Hubungkan ke Inode
+        Serial::Printf("VFS NOTE: WE OPEN FILE '%s' WITH INODE ID %llu ON FS %p WITH NODE MEMORY %p\n", path, InodeNum, Fs, VFSNode);
+
+        if (Flags & O_TRUNC) {
+            Fs->Truncate(file, 0); // O_TRUNC dikerjain kuli
+        }
+
+        return file;
     }
 
     // Ensure parent directories exist inside the filesystem for the given relative path.
     // This is a conservative, debug-friendly helper that implements mkdir -p semantics.
     static BOOL EnsureParentDirs(FileSystem* fs, const char* relPath){
         if(!fs || !relPath) return FALSE;
-        // relPath expected to start with '/'
         U32 len = (U32)String::Strlen(relPath);
         if(len == 0) return TRUE;
-        // find parent portion (strip trailing component)
-        // e.g. relPath = "/a/b/c.txt" -> parent = "/a/b"
+
         const char* last = nullptr;
         for(U32 i=0;i<len;i++) if(relPath[i] == '/') last = &relPath[i];
-        // If only root or no slash, nothing to do
-        // But relPath always begins with '/', so if last == &relPath[0], parent is root
         if(!last || last == &relPath[0]) return TRUE;
-        // Copy parent path
+
         CHAR8 parent[256]; U32 pLen = (U32)(last - relPath);
         if(pLen >= sizeof(parent)) return FALSE;
         String::Memcpy(parent, relPath, pLen); parent[pLen] = '\0';
 
-        // Iterate path components from top to bottom, creating as needed
         CHAR8 accum[256]; accum[0] = '/'; accum[1] = '\0';
         U32 pos = 1;
-        U32 i = 1; // skip initial '/'
+        U32 i = 1; 
+
         while(i <= pLen){
-            // find next slash or end
             U32 j = i;
             while(j < pLen && parent[j] != '/') j++;
             U32 compLen = j - i;
             if(compLen == 0){ i = j+1; continue; }
             if(pos + 1 + compLen >= sizeof(accum)) return FALSE;
-            // append component
+            
             if(accum[pos-1] != '/') { accum[pos++] = '/'; accum[pos] = '\0'; }
             String::Memcpy(accum + pos, parent + i, compLen);
             pos += compLen; accum[pos] = '\0';
 
-            // Check if exists by trying to open
-            File* f = fs->Open(accum, O_RDWR);
-            if(f){
-                // exists; ensure it's a directory
-                if(!f->IsDirectory){ fs->Close(f); return FALSE; }
-                fs->Close(f);
+            // ========================================================
+            // CARA BARU NGECEK FOLDER (GAK PERLU BIKIN FILE OBJECT)
+            // ========================================================
+            U32 inodeId = fs->Lookup(accum);
+            
+            if(inodeId != 0) {
+                // Folder/File ketemu di disk!
+                // Cek apakah dia beneran folder? Minta info speknya:
+                ::Inode tempNode;
+                if(fs->PopulateInode(inodeId, &tempNode)){
+                    if(tempNode.Type != FT_DIR) return FALSE; // Nabrak, ternyata itu file biasa
+                }
             } else {
-                // try to create directory
+                // Gak ada di disk, kita coba bikin (MKDir)
                 if(!fs->MKDir(accum)){
-                    // If MKDir failed, maybe it now exists (race) -> try Open again
-                    File* f2 = fs->Open(accum, O_RDWR);
-                    if(!f2) return FALSE;
-                    if(!f2->IsDirectory){ fs->Close(f2); return FALSE; }
-                    fs->Close(f2);
+                    // Kalo gagal, cek lagi siapa tau ada program lain yang baru aja bikin (Race Condition)
+                    inodeId = fs->Lookup(accum);
+                    if(inodeId == 0) return FALSE; 
+                    
+                    ::Inode tempNode;
+                    if(!fs->PopulateInode(inodeId, &tempNode) || tempNode.Type != FT_DIR) {
+                        return FALSE; 
+                    }
                 }
             }
 
@@ -377,49 +486,146 @@ namespace VFSManager{
     // Create with parent directories created as needed
     File* CreateWithParents(const char *Path){
         FileSystem* fs = nullptr; char rel[256];
+        
         if(!ResolvePath(Path, &fs, rel)){
             Printk::Write(Printk::Level::LOG_DEBUG, "VFS: CreateWithParents - ResolvePath failed for '%s'\n", Path);
             return nullptr;
         }
+        
         if(!EnsureParentDirs(fs, rel)){
             Printk::Write(Printk::Level::LOG_WARNING, "VFS: CreateWithParents - failed to ensure parents for '%s'\n", rel);
             return nullptr;
         }
-        return fs->Open(rel, O_RDWR | O_CREAT);
+        
+        // Langsung panggil VFSManager::Open pakai Path awal!
+        return Open(Path, O_RDWR | O_CREAT);
     }
 
-    void Close(File* file){
-        if(!file) return;
-        if(file->FSOwner) {
-            file->FSOwner->Close(file);
-        } else {
-            // No filesystem owner: free the File object directly.
-            delete file;
+    VOID Close(File* file) {
+        if (!file) return;
+
+        // 1. Cek RefCount sesi File (PENTING BANGET buat Fork/Dup!)
+        file->RefCount--;
+        if (file->RefCount > 0) {
+            return; // Jangan diapa-apain, FD ini masih dipake di tempat lain!
         }
+
+        // ==========================================
+        // 2. JALUR KHUSUS SHM
+        // ==========================================
+        if (file->type == FileType::FT_SHM) {
+            ShmRegion* Region = (ShmRegion*)file->PrivateData;
+            
+            if (Region) {
+                SharedMemoryManager::Release(Region);
+            }
+
+            // Langsung delete object File-nya dan RETURN.
+            // JANGAN biarin dia turun ke bawah, karena Inode SHM
+            // itu urusannya SharedMemoryManager, bukan urusan VFS!
+            delete file;
+            return;
+        }
+
+        // ==========================================
+        // 3. JALUR NORMAL (File Disk / Direktori)
+        // ==========================================
+        FileSystem* fs = file->Node ? file->Node->FSOwner : nullptr;
+
+        if (fs) {
+            fs->Close(file); // Kasih tau driver (FAT32/Ext2) buat ngelepas file
+        }
+
+        // Cleanup Inode (Tersangka 1 lu udah aman sekarang)
+        if (file->Node) {
+            file->Node->RefCount--; 
+            if (file->Node->RefCount <= 0) {
+                // Kalau udah gak ada file yang nunjuk ke Inode ini, hapus dari cache & RAM
+                RemoveCachedInode(fs, file->Node->InodeID); 
+                delete file->Node; 
+            }
+        } 
+
+        // Tersangka 2 lu juga aman, karena File RefCount udah 0 di cek nomor 1
+        delete file; 
     }
 
-    U32 Read(File* file, U8* buffer, U32 size){ if(!file || !file->FSOwner) return 0; return file->FSOwner->Read(file, buffer, size); }
-    U32 Write(File *FileObj, U8 *Buffer, U32 Size){ if(!FileObj || !FileObj->FSOwner) return 0; return FileObj->FSOwner->Write(FileObj, Buffer, Size); }
+    U32 Read(File* file, U8* buffer, U32 size){
+        if(!file) {
+            Printk::Write(Printk::Level::LOG_ERR, "VFS: Read called with NULL File object\n");
+            return 0;
+        }
 
+        if(file->type == FT_PIPE){
+            return PipeFileSystem::GetInstance()->Read(file, buffer, size);
+        }
+        
+
+        if(!file->Node || !file->Node->FSOwner) {
+            Printk::Write(Printk::Level::LOG_ERR, "VFS: Read failed - File object has no valid node or filesystem owner\n");
+            return 0;
+        }
+
+        file->Node->Lock.Acquire();
+        U32 bytesRead = file->Node->FSOwner->Read(file, buffer, size);
+        file->Node->Lock.Release();
+        
+        return bytesRead; 
+    }
+
+    U32 Write(File *FileObj, U8 *Buffer, U32 Size){ 
+        if(!FileObj) return 0;
+
+        if(FileObj->type == FT_PIPE){
+            return PipeFileSystem::GetInstance()->Write(FileObj, Buffer, Size);
+        }
+
+        if(!FileObj->Node || !FileObj->Node->FSOwner) return 0;
+
+        FileObj->Node->Lock.Acquire();
+        U32 written = FileObj->Node->FSOwner->Write(FileObj, Buffer, Size);
+        FileObj->Node->Lock.Release();
+        
+        return written;
+    }
     // Debug wrapper to trace VFS write calls (helps ensure caller passes proper File* and FSOwner)
     U32 DebugWrite(File *FileObj, U8 *Buffer, U32 Size){
         if(!FileObj){ Printk::Write(Printk::Level::LOG_DEBUG, "VFS: DebugWrite called with NULL FileObj\n"); return 0; }
-        Printk::Write(Printk::Level::LOG_DEBUG, "VFS: DebugWrite FileObj=%p FSOwner=%p Size=%u\n", (void*)FileObj, (void*)FileObj->FSOwner, Size);
-        if(!FileObj->FSOwner){ Printk::Write(Printk::Level::LOG_ERR, "VFS: DebugWrite - FileObj has no FSOwner\n"); return 0; }
-        return FileObj->FSOwner->Write(FileObj, Buffer, Size);
+        
+        if(FileObj->type == FT_PIPE) return PipeFileSystem::GetInstance()->Write(FileObj, Buffer, Size);
+        
+        if(!FileObj->Node || !FileObj->Node->FSOwner){ 
+            Printk::Write(Printk::Level::LOG_ERR, "VFS: DebugWrite - FileObj has no FSOwner\n"); return 0; 
+        }
+
+        FileObj->Node->Lock.Acquire();
+        U32 written = FileObj->Node->FSOwner->Write(FileObj, Buffer, Size);
+        FileObj->Node->Lock.Release();
+        return written;
     }
 
     U32 Append(const char* path, U8* Buffer, U32 Size){
         if(!path || !Buffer || Size == 0) return 0;
-        FileSystem* fs = nullptr; char rel[256];
-        if(!ResolvePath(path, &fs, rel)) return 0;
-        // Try to open existing; if not exists, create
-        File* f = fs->Open(rel, O_RDWR | O_APPEND | O_CREAT);
-        if(f->IsDirectory){ fs->Close(f); return 0; }
-        // Seek to end
-        (void)Seek(f, f->FileSize, SEEK_END);
-        U32 written = fs->Write(f, Buffer, Size);
-        fs->Close(f);
+        
+        // Langsung panggil VFSManager::Open (fungsi Open yang lu bikin di vfs.cpp)
+        // Dia butuh absolute path, jadi langsung passing 'path' aja!
+        File* f = Open(path, O_RDWR | O_APPEND | O_CREAT);
+        if(!f) return 0; 
+        
+        // PENTING: Cek IsDirectory sekarang harus lewat Node-nya!
+        if(f->Node && f->Node->Type == FT_DIR){ 
+            Close(f); 
+            return 0; 
+        }
+        
+        // Panggil Seek (FileSize sekarang ada di Node)
+        if (f->Node) {
+            (void)Seek(f, f->Node->FileSize, SEEK_END);
+        }
+        
+        // Panggil VFSManager::Write biar otomatis ke-lock!
+        U32 written = Write(f, Buffer, Size); 
+        Close(f);
         return written;
     }
 
@@ -442,14 +648,23 @@ namespace VFSManager{
     }
 
     BOOL Seek(File* file, U64 position, U32 origin){
-        if(!file || !file->FSOwner) return FALSE;
-        // Delegate to filesystem so it can update cluster cursor/state correctly
-        return file->FSOwner->Seek(file, position, origin);
+        if(!file || file->type == FT_PIPE) return FALSE; // Pipe gak bisa di-seek
+        if(!file->Node || !file->Node->FSOwner) return FALSE;
+        
+        file->Node->Lock.Acquire();
+        BOOL result = file->Node->FSOwner->Seek(file, position, origin);
+        file->Node->Lock.Release();
+        return result;
     }
 
     BOOL Truncate(File* file, U64 size){
-        if(!file || !file->FSOwner) return FALSE;
-        return file->FSOwner->Truncate(file, size);
+        if(!file || file->type == FT_PIPE) return FALSE;
+        if(!file->Node || !file->Node->FSOwner) return FALSE;
+        
+        file->Node->Lock.Acquire();
+        BOOL result = file->Node->FSOwner->Truncate(file, size);
+        file->Node->Lock.Release();
+        return result;
     }
 
     BOOL MKDir(const char* path){
@@ -465,18 +680,33 @@ namespace VFSManager{
     }
 
     BOOL Flush(File* file){
-        if(!file || !file->FSOwner) return FALSE;
-        return file->FSOwner->Flush(file);
+        if(!file || file->type == FT_PIPE) return FALSE;
+        if(!file->Node || !file->Node->FSOwner) return FALSE;
+        
+        file->Node->Lock.Acquire();
+        BOOL result = file->Node->FSOwner->Flush(file);
+        file->Node->Lock.Release();
+        return result;
     }
 
     INTN ReadDir(File* dirFile, void* buffer, U32 bufferSize){
-        if(!dirFile || !dirFile->FSOwner) return -1;
-        return dirFile->FSOwner->ReadDir(dirFile, buffer, bufferSize);
+        if(!dirFile || dirFile->type == FT_PIPE) return -1;
+        if(!dirFile->Node || !dirFile->Node->FSOwner) return -1;
+        
+        dirFile->Node->Lock.Acquire();
+        INTN result = dirFile->Node->FSOwner->ReadDir(dirFile, buffer, bufferSize);
+        dirFile->Node->Lock.Release();
+        return result;
     }
 
     INTN Ioctl(File* file, U32 command, U64 arg){
-        if(!file || !file->FSOwner) return -1;
-        return file->FSOwner->Ioctl(file, command, arg);
+        if(!file || file->type == FT_PIPE) return -1;
+        if(!file->Node || !file->Node->FSOwner) return -1;
+        
+        file->Node->Lock.Acquire();
+        INTN result = file->Node->FSOwner->Ioctl(file, command, arg);
+        file->Node->Lock.Release();
+        return result;
     }
 
     BOOL SyncAll(){

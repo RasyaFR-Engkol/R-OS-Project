@@ -235,12 +235,26 @@ VOID Sys_Close(CpuContext_T *CPUContext){
     U64 fd = CPUContext->rdi;
 
     Tasking::Task *Curtask = Tasking::GetCurrentTaskPtr();
-    if (!Curtask || fd >= MAX_FILE_IN_PROCESS || !Curtask->FDTable[fd]) {
+    if (!Curtask) {
         CPUContext->rax = -ROS_ERROR_BAD_FD;
-        Printk::Write(Printk::Level::LOG_DERR, "BAD FD, NO CURTASK, MAXIMAL FD.\n");
+        Printk::Write(Printk::Level::LOG_DERR, "[SYS_CLOSE] Failed: No Current Task!\n");
         return;
     }
 
+    // Kalau user ngirim fd = -1 (0xFFFFFFFFFFFFFFFF), jangan panik.
+    // Tulis nilai FD aslinya (pakai format signed %lld kalau perlu, atau %llu)
+    if (fd >= MAX_FILE_IN_PROCESS) {
+        CPUContext->rax = -ROS_ERROR_BAD_FD;
+        // Print nilai fd-nya. Kalau hasilnya 18446744073709551615, berarti itu fix -1 dari user.
+        Printk::Write(Printk::Level::LOG_DERR, "[SYS_CLOSE] BAD FD: %llu (out of bounds)\n", fd);
+        return;
+    }
+
+    if (!Curtask->FDTable[fd]) {
+        CPUContext->rax = -ROS_ERROR_BAD_FD;
+        Printk::Write(Printk::Level::LOG_DERR, "[SYS_CLOSE] BAD FD: %llu is NULL (never opened or already closed)\n", fd);
+        return;
+    }
     File *FileDescriptor = Curtask->FDTable[fd];
     
     // Decrement RefCount
@@ -519,8 +533,8 @@ VOID Sys_Pipe(CpuContext_T *CPUContext){
     PipeFile *FWrite = new PipeFile(Buf, TRUE);
 
     FileSystem* pipeDriver = PipeFileSystem::GetInstance();
-    FRead->FSOwner = pipeDriver;
-    FWrite->FSOwner = pipeDriver;
+    FRead->Node->FSOwner = pipeDriver;
+    FWrite->Node->FSOwner = pipeDriver;
 
     Curtask->FDTable[FDRead] = FRead;
     Curtask->FDTable[FDWrite] = FWrite;
@@ -698,8 +712,8 @@ VOID Sys_Fstat(CpuContext_T *CPUContext){
     struct kernel_stat kstat;
     String::Memset(&kstat, 0, sizeof(kstat));
 
-    kstat.st_size = Handle->FileSize;
-    kstat.st_ino  = Handle->InodeID; // Pastikan struct File udah diupdate
+    kstat.st_size = Handle->Node->FileSize;
+    kstat.st_ino  = Handle->Node->InodeID; // Pastikan struct File udah diupdate
 
     // 4. Tentukan Mode (File Biasa, Folder, atau Pipe/Socket?)
     // Ini penting biar 'ls' atau shell tau cara treat fd ini.

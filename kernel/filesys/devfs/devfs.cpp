@@ -6,7 +6,6 @@
 #define PRINTK_MODULE_NAME "DevFS"
 #include <logging.hpp>
 #include "../../dev/devicemanager.hpp"
-#include "../../driver/fb/fbcon_driver.hpp"
 #include "../../task/reserved/inputdaemon/driver/mouse.hpp"
 
 // Forward declaration for serial devfs registration helper implemented in
@@ -54,129 +53,70 @@ PipeBuffer *CreateNamedPipe(const CHAR8* Name){
             buf->RefCount = 0;
             buf->Lock.Init();
             NamedPipe[i].Buffer = buf;
+            Printk::Write(Printk::Level::LOG_INFO, "DevFS: Created named pipe '%s'\n", Name);
             return buf;
         }
     }
+    Printk::Write(Printk::Level::LOG_ERR, "DevFS: Failed to create named pipe '%s', limit reached\n", Name);
     return nullptr; 
 }
 
-File* DevFS::Open(const char* path, U32 Flags) {
-    // Path dari VFS akan relatif, e.g. "/hda"
-    // Kita asumsikan VFSManager::ResolvePath memberi kita path seperti "/hda"
-    // (Seperti di vfs.cpp Anda, path rel akan diawali '/')
-
-    if (!path || path[0] != '/') return nullptr;
-    const char* devName = path + 1; // Lewati '/'
-
-    PipeBuffer *TargetBuf = GetNamedPipeBuffer(devName);
-
-    if(!TargetBuf && (Flags & O_CREAT)){
-        TargetBuf = CreateNamedPipe(devName);
-        if(!TargetBuf) return nullptr;
+U64 DevFS::CreateNode(const char* path, U32 Flags) {
+    if(!path || path[0] == '\0') {
+        Printk::Write(Printk::Level::LOG_ERR, "DevFS: CreateNode called with invalid path\n");
+        return 0;
     }
 
-    else if(TargetBuf && (Flags & O_CREAT) && (Flags & O_EXCL)){
-        return nullptr;;
+    // --- TAMBAHAN BARU: STRIP SLASH DI SINI ---
+    const char* devName = (path[0] == '/') ? path + 1 : path;
+
+    // Passing devName yang udah bersih ke PipeFS
+    return PipeFileSystem::GetInstance()->CreateNode(devName, Flags);
+}
+
+U64 DevFS::Lookup(const char* path) {
+    if (!path || path[0] == '\0') return 0;
+    const char* devName = (path[0] == '/') ? path + 1 : path;
+
+    PipeBuffer* pipe = GetNamedPipeBuffer(devName);
+    if (pipe) {
+        return (U64)(UPTR)pipe; // Ketemu pipanya, return InodeID 64-bit
+    } 
+
+    // Cari di registry
+    for (int i = 0; i < MAX_ENTRIES; i++) {
+        if (m_Entries[i].Used && String::Strcmp(m_Entries[i].Name, devName) == 0) {
+            // Kita pakai alamat pointer device sebagai InodeID unik
+            return (U64)(UPTR)m_Entries[i].Ptr.Char; 
+        }
     }
+    return 0; // Gak ketemu
+}
 
-    if(TargetBuf){
-        BOOL IsWriteMode = (Flags & O_WRONLY) || (Flags & O_RDWR);
+BOOL DevFS::PopulateInode(U64 InodeID, ::Inode* vfsNode) {
+    if (!vfsNode) return FALSE;
 
-        PipeFile *PF = new PipeFile(TargetBuf, IsWriteMode);
-        PF->FSOwner = PipeFileSystem::GetInstance();
-        PF->RefCount = 1;
-        PF->type = FileType::FT_PIPE;
-        PF->Flags = Flags;
-        String::Strcpy(PF->FileName, devName);
-
-        TargetBuf->RefCount++;
-
-        return PF;
-    }
-
-    if (devName[0] == '\0') {
-        DevFile* f = new DevFile();
-        f->CurrentPosition = 0;
-        f->IsDirectory = TRUE; // Tandai sebagai direktori
-        f->FileSize = 0;
-        String::Strcpy(f->FileName, "/"); // atau "dev"
-        f->FSOwner = this;
-        f->Type = DevFile::DeviceType::NONE; // Bukan device
-        f->dev.BlockDev = nullptr;
-        f->RefCount = 1; // Init RefCount
-        return f;
-    }
-
-    // First: check DevFS local registry for an exact name match
-    for (int i = 0; i < MAX_ENTRIES; ++i) {
-        if (!m_Entries[i].Used) continue;
-        if (String::Strcmp((const CHAR8*)m_Entries[i].Name, (const CHAR8*)devName) == 0) {
-            // Create handle depending on type
-            if (m_Entries[i].Type == DevFile::DeviceType::CHAR) {
-                DevFile* f = new DevFile();
-                f->CurrentPosition = 0;
-                f->IsDirectory = FALSE;
-                String::Strcpy(f->FileName, devName);
-                f->FSOwner = this;
-                f->Type = DevFile::DeviceType::CHAR;
-                f->dev.CharDev = m_Entries[i].Ptr.Char;
-                f->FileSize = 0;
-                f->RefCount = 1; // Init RefCount
-                f->type = FileType::FT_DEVCHAR;
-                return f;
-            } else if (m_Entries[i].Type == DevFile::DeviceType::BLOCK) {
-                DevFile* f = new DevFile();
-                f->CurrentPosition = 0;
-                f->IsDirectory = FALSE;
-                String::Strcpy(f->FileName, devName);
-                f->FSOwner = this;
-                f->Type = DevFile::DeviceType::BLOCK;
-                f->dev.BlockDev = m_Entries[i].Ptr.Block;
-                f->FileSize = 0;
-                f->RefCount = 1; // Init RefCount
-                f->type = FileType::FT_DEVBLOK;
-                return f;
-            }
+    for(INTN i = 0; i < 10; i++){
+        if(NamedPipe[i].Buffer != nullptr && (U64)(UPTR)NamedPipe[i].Buffer == InodeID){
+            vfsNode->Type = FT_PIPE;
+            vfsNode->FSOwner = this; // Tetep DevFS ownernya di mata VFS
+            vfsNode->FileSize = NamedPipe[i].Buffer->BytesAvailable;
+            vfsNode->InodeID = InodeID;
+            return TRUE;
         }
     }
 
-    // 1. Coba cari sebagai block device
-    IBlockDevice* bdev = DeviceManager::FindBlockDevice(devName);
-    if (bdev) {
-        DevFile* f = new DevFile();
-        f->CurrentPosition = 0;
-        f->IsDirectory = FALSE;
-        String::Strcpy(f->FileName, devName);
-        f->FSOwner = this;
-        f->Type = DevFile::DeviceType::BLOCK;
-        f->dev.BlockDev = bdev;
-        // f->FileSize = bdev->GetSectorCount() * 512; // (Jika Anda menambahkan GetSectorCount ke IBlockDevice)
-        f->FileSize = 0;
-        f->RefCount = 1; // Init RefCount
-        f->type = FileType::FT_DEVBLOK;
-        f->Flags = Flags;
-        return f;
+    // Kita cari tahu ini InodeID punya siapa dengan scan registry lagi
+    for (int i = 0; i < MAX_ENTRIES; i++) {
+        if (m_Entries[i].Used && (U64)(UPTR)m_Entries[i].Ptr.Char == InodeID) {
+            vfsNode->Type = (m_Entries[i].Type == DevFile::DeviceType::CHAR) ? FT_DEVCHAR : FT_DEVBLOK;
+            vfsNode->FSOwner = this;
+            vfsNode->FileSize = 0; 
+            vfsNode->InodeID = InodeID;
+            return TRUE;
+        }
     }
-
-    // 2. Jika tidak ketemu, coba cari sebagai char device
-    ICharDevice* cdev = DeviceManager::FindCharDevice(devName);
-    if (cdev) {
-        DevFile* f = new DevFile();
-        f->CurrentPosition = 0;
-        f->IsDirectory = FALSE;
-        String::Strcpy(f->FileName, devName);
-        f->FSOwner = this;
-        f->Type = DevFile::DeviceType::CHAR;
-        f->dev.CharDev = cdev;
-        f->FileSize = 0; // Char device tidak punya ukuran
-        f->RefCount = 1; // Init RefCount
-        f->type = FileType::FT_DEVCHAR;
-        f->Flags = Flags;
-        return f;
-    }
-    
-    // 3. Jika tidak ketemu keduanya
-    return nullptr; // Device tidak ditemukan
+    return FALSE;
 }
 
 BOOL DevFS::Mount(Partition *Part){
@@ -258,24 +198,33 @@ BOOL DevFS::UnregisterDevice(const CHAR8* name){
     return FALSE;
 }
 
-void DevFS::Close(File* file){
-    if(!file) return;
-    // Files returned by DevFS are allocated with new DevFile()
-    delete file;
+void DevFS::Close(File* file) {
+    // KOSONGIN AJA! 
+    // Biar VFSManager (Si Mandor) yang bersih-bersih memori Node dan File.
+    return;
 }
 
 U32 DevFS::Read(File* file, U8* buffer, U32 size){
-    if(!file || !buffer || size == 0) return 0;
-    DevFile* df = static_cast<DevFile*>(file);
+    //Serial::Printf("DevFS: Read called for file=%p, buffer=%p, size=%u\n", file, buffer, size);
+    // Pastiin file->Node aman biar gak null pointer
+    if(!file || !buffer || size == 0 || !file->Node) return 0;
 
-    if(df->Type == DevFile::DeviceType::CHAR){
-        if(df->dev.CharDev) return df->dev.CharDev->Read(file, buffer, size);
+    if(file->Node->Type == FT_DEVCHAR){
+        // Tarik pointer ICharDevice dari InodeID (sesuai fungsi Lookup/Stat lu)
+        ICharDevice* cdev = (ICharDevice*)(UPTR)file->Node->InodeID;
+        //Serial::Printf("Reading from device: %s\n", cdev->GetDeviceName());
+        if(cdev) return cdev->Read(file, buffer, size);
         return 0;
-    } else if(df->Type == DevFile::DeviceType::BLOCK){
-        if(!df->dev.BlockDev) return 0;
-        // Calculate sector range (assume 512-byte sectors)
+
+    } else if(file->Node->Type == FT_DEVBLOK){
+        // Tarik pointer IBlockDevice dari InodeID
+        IBlockDevice* bdev = (IBlockDevice*)(UPTR)file->Node->InodeID;
+        if(!bdev) return 0;
+
+        // Logika DMA lu yang udah solid kemaren.
+        // PENTING: Pake file->CurrentPosition, bukan df->CurrentPosition lagi.
         const U32 SECTOR = 512;
-        U64 startByte = df->CurrentPosition;
+        U64 startByte = file->CurrentPosition; 
         U64 endByte = startByte + (U64)size;
         U64 firstLBA = startByte / SECTOR;
         U32 offset = (U32)(startByte % SECTOR);
@@ -283,14 +232,16 @@ U32 DevFS::Read(File* file, U8* buffer, U32 size){
         U32 count = (U32)(lastLBA - firstLBA + 1);
 
         PageAlloc::DMAAlloc::DMABuffer *buf = nullptr;
-        if(!df->dev.BlockDev->ReadSectors(firstLBA, count, &buf)) return 0;
+        
+        // Panggil ReadSectors langsung dari bdev
+        if(!bdev->ReadSectors(firstLBA, count, &buf)) return 0;
 
-        // Ensure we don't copy past the DMA buffer
         SIZE_T available = (SIZE_T)count * SECTOR;
         if (offset >= (U32)available) {
             PageAlloc::DMAAlloc::FreeDMABuffer(buf);
             return 0;
         }
+        
         U32 maxCopy = (U32)(available - offset);
         U32 toCopy = (size > maxCopy) ? maxCopy : size;
 
@@ -299,76 +250,86 @@ U32 DevFS::Read(File* file, U8* buffer, U32 size){
 
         PageAlloc::DMAAlloc::FreeDMABuffer(buf);
 
-        df->CurrentPosition += toCopy;
+        // Update posisi
+        file->CurrentPosition += toCopy;
         return toCopy;
+    } else if (file->Node->Type == FT_PIPE) {
+        return PipeFileSystem::GetInstance()->Read(file, buffer, size);
     }
+    
     return 0;
 }
 
 U32 DevFS::Write(File *File, U8 *Buffer, U32 Size){
-    if(!File || !Buffer || Size == 0) return 0;
-    DevFile* df = static_cast<DevFile*>(File);
+    //Serial::Printf("DevFS: Write called for file=%p, buffer=%p, size=%u\n", File, Buffer, Size);
+    // Pastiin File dan Node aman!
+    if(!File || !Buffer || Size == 0 || !File->Node) return 0;
 
-    if(df->Type == DevFile::DeviceType::CHAR){
-        if(df->dev.CharDev) return df->dev.CharDev->Write(File, Buffer, Size);
+    // 1. Karakter Device
+    if(File->Node->Type == FT_DEVCHAR){
+        ICharDevice* cdev = (ICharDevice*)(UPTR)File->Node->InodeID;
+        //Serial::Printf("Reading from device: %s\n", cdev->GetDeviceName());
+        if(cdev) return cdev->Write(File, Buffer, Size);
         return 0;
-    } else if(df->Type == DevFile::DeviceType::BLOCK){
-        if(!df->dev.BlockDev) return 0;
+    } 
+    // 2. Block Device
+    else if(File->Node->Type == FT_DEVBLOK){
+        IBlockDevice* bdev = (IBlockDevice*)(UPTR)File->Node->InodeID;
+        if(!bdev) return 0;
+
         const U32 SECTOR = 512;
-        U64 startByte = df->CurrentPosition;
+        // Pake File->CurrentPosition (bukan df-> lagi)
+        U64 startByte = File->CurrentPosition;
         U64 endByte = startByte + (U64)Size;
         U64 firstLBA = startByte / SECTOR;
         U32 offset = (U32)(startByte % SECTOR);
         U64 lastLBA = (endByte == 0) ? firstLBA : (endByte - 1) / SECTOR;
         U32 count = (U32)(lastLBA - firstLBA + 1);
 
-        // Allocate or obtain a buffer we can write back. For partial-sector
-        // writes we must preserve existing bytes in the sectors we don't
-        // intend to modify. Strategy:
-        //  - If the write exactly covers whole sectors (offset==0 && Size >= count*SECTOR)
-        //    then allocate a fresh DMA buffer and copy user's data directly.
-        //  - Otherwise, read the existing sectors into a DMA buffer, modify the
-        //    relevant bytes, and write the buffer back.
-
         SIZE_T bytesNeeded = (SIZE_T)count * SECTOR;
         PageAlloc::DMAAlloc::DMABuffer *buf = nullptr;
 
         if (offset == 0 && (SIZE_T)Size >= bytesNeeded) {
-            // Full-sector write: create a buffer and copy directly.
+            // Full-sector write
             buf = PageAlloc::DMAAlloc::AllocateDMABytes(bytesNeeded);
             if (!buf) return 0;
             U8 *dst = (U8*)(UPTR)buf->VirtAddr;
-            // Copy up to bytesNeeded (Size may be larger, but we only write bytesNeeded)
             U32 toCopy = (Size > (U32)bytesNeeded) ? (U32)bytesNeeded : Size;
             String::Memcpy(dst, Buffer, toCopy);
-            // If Size < bytesNeeded, zero the remainder to avoid leaking data
+            
             if ((SIZE_T)toCopy < bytesNeeded) {
                 String::Memset(dst + toCopy, 0, bytesNeeded - toCopy);
             }
         } else {
-            // Partial-sector write: read existing sectors, then patch.
-            if(!df->dev.BlockDev->ReadSectors(firstLBA, count, &buf)) return 0;
+            // Partial-sector write
+            // Panggil bdev langsung (bukan df->dev.BlockDev)
+            if(!bdev->ReadSectors(firstLBA, count, &buf)) return 0;
             U8 *dst = (U8*)(UPTR)buf->VirtAddr + offset;
-            // Only copy the user's Size bytes (won't touch bytes outside [offset, offset+Size))
             String::Memcpy(dst, Buffer, Size);
         }
 
-        BOOL ok = df->dev.BlockDev->WriteSectors(firstLBA, count, buf);
+        // Panggil bdev langsung
+        BOOL ok = bdev->WriteSectors(firstLBA, count, buf);
         PageAlloc::DMAAlloc::FreeDMABuffer(buf);
         if(!ok) return 0;
 
-        df->CurrentPosition += Size;
+        // Update posisi
+        File->CurrentPosition += Size;
         return Size;
+    } else if (File->Node->Type == FT_PIPE) {
+        return PipeFileSystem::GetInstance()->Write(File, Buffer, Size);
     }
+    
     return 0;
 }
 
 INTN DevFS::Ioctl(File* file, U32 command, U64 arg){
-    if(!file) return -1;
-    DevFile* df = static_cast<DevFile*>(file);
+    if(!file || !file->Node) return -1;
 
-    if(df->Type == DevFile::DeviceType::CHAR){
-        if(df->dev.CharDev) return df->dev.CharDev->Ioctl(file, command, arg);
+    // Cuma Character Device yang biasanya nerima Ioctl (kayak set baud rate Serial, dll)
+    if(file->Node->Type == FT_DEVCHAR){
+        ICharDevice* cdev = (ICharDevice*)(UPTR)file->Node->InodeID;
+        if(cdev) return cdev->Ioctl(file, command, arg);
         return -1;
     }
     return -1;
@@ -410,9 +371,11 @@ BOOL DevFS::Flush(File* file){
 BOOL DevFS::Append(File* file, U8* buffer, U32 size){
     // Default to writing at current position
     if(!file || !buffer || size == 0) return FALSE;
-    U32 written = Read(file, buffer, size); // Use Write semantics
-    (void)written;
-    return TRUE;
+    
+    // Ganti Read jadi Write!
+    U32 written = Write(file, buffer, size); 
+    
+    return (written > 0);
 }
 
 INTN DevFS::ReadDir(File* dirFile, void* buffer, U32 bufferSize){
@@ -531,6 +494,26 @@ BOOL DevFS::Stat(const char *path, FileInfo *Info){
 
     // 6. Gak ketemu
     return FALSE;
+}
+
+short DevFS::Poll(File* file, short events) {
+    if (!file || !file->Node) return 0;
+
+    // Tarik pointer ICharDevice dari Inode. 
+    // Sesuaikan sama cara lu nyimpen pointernya pas DevFS::CreateNode / Lookup!
+    if(file->Node->Type == FT_DEVCHAR){
+        ICharDevice* cdev = (ICharDevice*)(UPTR)file->Node->InodeID;
+        if(cdev) return cdev->Poll(file, events);
+        return 0;
+    } else if (file->Node->Type == FT_PIPE) {
+        return PipeFileSystem::GetInstance()->Poll(file, events);
+    }
+    
+    return 0;
+}
+
+namespace FBDriver{
+    BOOL RegisterFBToDevFS(DevFS* devfs);
 }
 
 namespace DEVFS{

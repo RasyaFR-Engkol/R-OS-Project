@@ -381,7 +381,7 @@ namespace Kmalloc {
             return;
         }
         if (block->magic != MAGIC_ALLOC) {
-            Printk::Write(Printk::Level::LOG_EMERG, "[kmalloc] invalid or double free at %p (magic=0x%x)\n", ptr, block->magic);
+            Printk::Panic("[kmalloc] invalid or double free at %p (magic=0x%x)\n", ptr, block->magic);
             Arch::RestoreInterrupts(Kmallock);
             return;
         }
@@ -422,7 +422,6 @@ namespace Kmalloc {
         block->magic = MAGIC_FREE;
 
         insert_and_coalesce(block);
-
 
         Arch::RestoreInterrupts(Kmallock);
     }

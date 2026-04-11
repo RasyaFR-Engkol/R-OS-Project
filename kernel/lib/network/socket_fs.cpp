@@ -1,3 +1,4 @@
+#include "rosval.h"
 #include <network/socket_fs.hpp>
 #include <network/tcp.hpp>
 #include <network/udp.hpp>
@@ -64,4 +65,10 @@ void SocketFileSystem::Close(File* file) {
         Network::ICMPClose(sockFile->Handle.Icmp);
     }
     delete sockFile;
+}
+
+U64 SocketFileSystem::CreateNode(const char* path, U32 Flags) {
+    Printk::Write(Printk::Level::LOG_DEBUG, "SocketFileSystem::CreateNode: Creating socket with path '%s' and flags 0x%X\n", path, Flags);
+    Printk::Write(Printk::Level::LOG_DEBUG, "UNIMPLEMENTED\n");
+    return 0;
 }

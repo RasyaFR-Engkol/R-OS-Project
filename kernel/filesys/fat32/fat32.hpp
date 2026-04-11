@@ -59,6 +59,15 @@ struct FAT32_DirectoryEntry {
     U32 FileSize;          // 0x1C
 } PACKSTRUCT;
 
+struct FAT32_VNode {
+    U32 StartCluster;
+    U32 FileSize;
+    BOOL IsDirectory;
+    U64 EntryLBA;     // Lokasi sektor LBA dari Directory Entry-nya
+    U32 EntryOffset;  // Offset byte di dalem sektornya
+    U32 RefCount;     // (Opsional) Kalo VFS lu pake sistem RefCount
+};
+
 // kelas driver FAT32
 
 class FAT32FileSystem : public FileSystem{
@@ -67,7 +76,9 @@ class FAT32FileSystem : public FileSystem{
         virtual ~FAT32FileSystem();
 
         virtual BOOL Mount(Partition *Part) override;
-        virtual File *Open(const char* path, U32 Flags) override;
+        virtual U64 Lookup(const char* path) override;
+        virtual BOOL PopulateInode(U64 InodeID, ::Inode* vfsNode) override;
+        virtual U64 CreateNode(const char* path, U32 Flags) override;
         virtual void Close(File* file) override;
         virtual U32 Read(File* file, U8* buffer, U32 size) override;
         virtual U32 Write(File *File, U8 *Buffer, U32 Size) override;
@@ -156,6 +167,9 @@ class FAT32FileSystem : public FileSystem{
     BOOL CreateDirectoryEntry(U32 dirStartCluster, const char* name, U32 startCluster, U32 fileSize, U64* outEntryLBA = nullptr, U32* outEntryOffset = nullptr);
 
     BOOL FreeClusterChain(U32 StartCluster);
+
+    // Helper untuk menghapus SFN dan LFN berantai (backward walking)
+    BOOL RemoveDirectoryEntryAndLFNs(U32 dirStartCluster, U64 entryLBA, U32 entryOffset);
 
 private:
     // --- Variabel Internal ---

@@ -1,5 +1,6 @@
 #include <rosval.h>
 #include "mouse.hpp"
+#include "serial.hpp"
 
 static MouseDevice* g_MouseDevice = nullptr;
 
@@ -27,9 +28,17 @@ MouseDevice::MouseDevice(){
 
 short MouseDevice::Poll(File* file, short events){
     short revents = 0;
+    
+    m_Lock.Acquire(); // Kunci dulu jir biar gak diinterupsi pas ngecek
+    
     if (events & POLLIN) {
-        if (m_Head != m_Tail) revents |= POLLIN; // Ada data buat dibaca
+        if (m_Head != m_Tail) {
+            revents |= POLLIN; // Ada data buat dibaca
+        }
     }
+    
+    m_Lock.Release(); // Baru lepas
+    
     return revents;
 }
 

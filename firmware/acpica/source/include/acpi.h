@@ -2,6 +2,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include <rosval.h>
 
 /* Basic integer types used by ACPICA-style code */
 typedef uint8_t  UINT8;
@@ -53,7 +54,7 @@ typedef struct { uint8_t Bus; uint8_t Device; uint8_t Function; uint8_t Padding;
 /* Minimal printf-like facility placeholder (real OSL provides AcpiOsPrintf) */
 
 /* Forward declare table header type used by some callers */
-typedef struct {
+typedef struct ROS_PACKED {
     char Signature[4];
     uint32_t Length;
     uint8_t Revision;
@@ -66,7 +67,7 @@ typedef struct {
 } ACPI_TABLE_HEADER;
 
 /* Minimal BGRT table used by our BGRT helper */
-typedef struct {
+typedef struct ROS_PACKED{
     ACPI_TABLE_HEADER Header;
     UINT8 Version;
     UINT8 Status;
@@ -78,14 +79,14 @@ typedef struct {
 } ACPI_TABLE_BGRT;
 
 /* Minimal MCFG allocation entry */
-typedef struct {
+typedef struct ROS_PACKED{
     UINT64 Address;
     UINT16 PciSegment;
     UINT8 StartBusNumber;
     UINT8 EndBusNumber;
 } ACPI_MCFG_ALLOCATION;
 
-typedef struct {
+typedef struct ROS_PACKED{
     ACPI_TABLE_HEADER Header;
     UINT32 Flags;
 } ACPI_TABLE_WAET;

@@ -18,6 +18,7 @@ struct File;
 #define O_EXCL      0x0080  // Error if O_CREAT and file exists
 #define O_TRUNC     0x0200  // Truncate file to 0 length
 #define O_APPEND    0x0400  // Append mode
+#define O_NONBLOCK  0x00000800  // Atau 04000 dalam octal
 
 #define MAX_SYMLINK_DEPTH 16
 
@@ -97,9 +98,13 @@ struct PipeFile : public File {
         IsWriteEnd = WriteMode;
         RefCount = 1;
         IsDirectory = FALSE;
-        FileSize = 0;
         CurrentPosition = 0;
-        // FSOwner nanti di-set dari luar
+        type = FT_PIPE;
+        
+        // [PENTING] Pipe jalan di memori, gak punya file fisik di disk.
+        // Jadi Node kita set nullptr. Driver PipeFileSystem lu bakal
+        // ngelewatin ini dan pake buf->Lock buat sinkronisasi.
+        Node = nullptr; 
     }
 
     virtual short Poll(short events) override {
@@ -145,54 +150,101 @@ struct PipeFile : public File {
 };
 
 void RemoveNamedPipeEntry(PipeBuffer* targetBuf);
+PipeBuffer *GetNamedPipeBuffer(const CHAR8* name);
+PipeBuffer *CreateNamedPipe(const CHAR8* Name);
 
 // --- DRIVER (Jembatan ke VFS) ---
 class PipeFileSystem : public FileSystem {
 private:
     CONSTANT U32 BUFFERSIZE = 4096;
 public:
-    // Singleton Instance (biar hemat memori, cukup 1 driver buat semua pipe)
     static PipeFileSystem* GetInstance();
 
-    // Implementasi Virtual Function dari FileSystem
-    
     BOOL Mount(Partition *Part) override { return TRUE; }
-    BOOL Unmount() override {return false;}
-    File* Open(const char* path, U32 Flags) override { return nullptr; } // Pipe gak bisa di-open via path
+    BOOL Unmount() override { return FALSE; }
 
-    // LOGIC BACA (Pindahan dari kode kamu tadi)
+    // ==============================================================
+    // [BARU] 3 FUNGSI KULI VFS
+    // ==============================================================
+    U64 Lookup(const char* path) override {
+        if (!path || path[0] == '\0') return 0;
+        // Cari named pipe dari helper lu
+        PipeBuffer* pipe = GetNamedPipeBuffer(path);
+        if (pipe) return (UPTR)pipe; // Alamat memori jadi InodeID
+        return 0;
+    }
+
+    BOOL PopulateInode(U64 InodeID, ::Inode* vfsNode) override {
+        if (InodeID == 0 || !vfsNode) return FALSE;
+        PipeBuffer* pipe = (PipeBuffer*)(UPTR)InodeID;
+
+        vfsNode->Type = FT_PIPE;
+        vfsNode->FSOwner = this;
+        vfsNode->FileSize = pipe->BytesAvailable; 
+        vfsNode->InodeID = InodeID;
+        return TRUE;
+    }
+
+    U64 CreateNode(const char* path, U32 Flags) override {
+        if (!path || path[0] == '\0') {
+            Printk::Write(Printk::Level::LOG_ERR, "PipeFS: CreateNode called with invalid path\n");
+            return 0;
+        }
+        PipeBuffer* pipe = CreateNamedPipe(path);
+        if (!pipe) {
+            Printk::Write(Printk::Level::LOG_ERR, "PipeFS: Failed to create named pipe\n");
+            return 0;
+        }
+        return (UPTR)pipe; // Alamat memori pipe baru jadi InodeID
+    }
+    // ==============================================================
+
+    // LOGIC BACA
     U32 Read(File* file, U8* Buffer, U32 Size) override {
-        PipeFile *PF = (PipeFile*)file;
-        if(PF->IsWriteEnd) return 0; // pembacaan masih mungkin kalo caller batu
+        if(!file || !file->Node || !Buffer || Size == 0) return 0;
+
+        PipeBuffer *buf = (PipeBuffer*)(UPTR)file->Node->InodeID;
+        if(!buf) return 0;
+
+        if((file->Flags & O_WRONLY) && !(file->Flags & O_RDWR)) return 0;
 
         U32 RDCount = 0;
-        PipeBuffer *buf = PF->buf;
         buf->Lock.Acquire();
 
         while(RDCount < Size){
-            if(buf->BytesAvailable == 0){
+            // --- BAGIAN YANG DIREVISI ---
+            while(buf->BytesAvailable == 0){
                 if(buf->IsWriteClosed){
-                    break;
+                    // Kalau writer udah tutup pipanya, kita berhenti baca.
+                    buf->Lock.Release();
+                    return RDCount;
+                } 
+
+                if(file->Flags & O_NONBLOCK) {
+                    buf->Lock.Release();
+                    return RDCount; // Return 0 (atau jumlah bytes yg udh sempet kebaca)
                 }
-                break;
+
+                buf->Lock.Release();
+                Tasking::SleepOn(buf->Waiters); // Tidur nunggu ada yang nulis
+                buf->Lock.Acquire();            // Bangun-bangun, ambil lock lagi
             }
+            // -----------------------------
+
             U32 BytesNeeded = Size - RDCount;
             U32 BytesAvailable = buf->BytesAvailable;
             U32 BytesToEnd = BUFFERSIZE - buf->ReadPos;
 
-            // Ambil minimum: Butuh berapa vs Ada berapa vs Mentok ujung array
             U32 ChunkSize = String::Min(BytesNeeded, BytesAvailable);
             ChunkSize = String::Min(ChunkSize, BytesToEnd);
 
-            // --- 3. MEMCPY ---
             String::Memcpy(&Buffer[RDCount], &buf->data[buf->ReadPos], ChunkSize);
 
-            // --- 4. UPDATE POINTERS ---
             buf->ReadPos = (buf->ReadPos + ChunkSize) % BUFFERSIZE;
             buf->BytesAvailable -= ChunkSize;
             RDCount += ChunkSize;
 
-            // Bangunin Writer! (Woy udah agak kosong nih, silakan tulis lagi!)
+            // Bangunin si Writer yang mungkin ketiduran gara-gara pipa kepenuhan
             Tasking::WakeUp(buf->FullWaiters);
         }
         buf->Lock.Release();
@@ -201,15 +253,19 @@ public:
 
     // LOGIC TULIS
     U32 Write(File *file, U8 *Buf, U32 Size) override {
-        PipeFile* pfile = (PipeFile*)file;
-        if(!pfile->IsWriteEnd) return 0;
+        if(!file || !file->Node || !Buf || Size == 0) return 0;
+
+        PipeBuffer* buf = (PipeBuffer*)(UPTR)file->Node->InodeID;
+        if(!buf) return 0;
+
+        // Kalau file ini dibuka cuma buat BACA, ngapain dia nulis?
+        // (O_RDONLY biasanya 0, O_WRONLY biasanya 1, O_RDWR biasanya 2)
+        if(!(file->Flags & O_WRONLY) && !(file->Flags & O_RDWR)) return 0;
 
         U32 WriteCount = 0;
-        PipeBuffer* buf = pfile->buf;
         buf->Lock.Acquire();
 
         while(WriteCount < Size){
-
             while(buf->BytesAvailable == BUFFERSIZE){
                 if(buf->IsWriteClosed){
                     buf->Lock.Release();
@@ -240,27 +296,26 @@ public:
         return WriteCount;
     }
 
+    // LOGIC CLOSE (RAM Friendly!)
     void Close(File* file) override {
-        PipeFile* pfile = (PipeFile*)file;
-        PipeBuffer* buf = pfile->buf; // Ambil pointer buffer
+        if(!file || !file->Node) return;
 
-        if(!buf) { delete pfile; return; }
+        PipeBuffer* buf = (PipeBuffer*)(UPTR)file->Node->InodeID;
+        if(!buf) return;
 
         buf->Lock.Acquire();
 
-        // 1. Logic EOF Writer (Yang lama tetep ada)
-        if(pfile->IsWriteEnd) {
+        // 1. Logic EOF Writer: Cek apakah yang nge-close ini Writer?
+        if((file->Flags & O_WRONLY) || (file->Flags & O_RDWR)) {
             buf->IsWriteClosed = TRUE;
             Tasking::WakeUp(buf->Waiters);
             Tasking::WakeUp(buf->FullWaiters);
-        }
-        else {
+        } else {
             Tasking::WakeUp(buf->FullWaiters);
         }
 
-        // 2. [BARU] Logic Memory Management
-        buf->RefCount--; // Kurangi 1 nyawa
-
+        // 2. Logic Memory Management
+        if(buf->RefCount > 0) buf->RefCount--; 
         BOOL shouldDelete = (buf->RefCount == 0);
 
         buf->Lock.Release();
@@ -268,10 +323,9 @@ public:
         if (shouldDelete) {
             RemoveNamedPipeEntry(buf);
             delete buf; 
-            // Printk::Write(Printk::Level::LOG_INFO, "Pipe resource destroyed.\n");
         }
 
-        delete pfile;
+        // PENTING: Gak ada lagi 'delete pfile;' di sini! Biar VFS yang ngurus!
     }
 
     // Dummy overrides
@@ -283,14 +337,48 @@ public:
     BOOL RMDir(const char* path) override { return FALSE; }
     BOOL Flush(File* file) override { return TRUE; }
     BOOL Append(File* file, U8* buffer, U32 size) override { return FALSE; }
-    BOOL Stat(const char* path, FileInfo* info) override {return false;}
-    INTN ReadDir(File* dirFile, void* buffer, U32 bufferSize) override {
-        return -1; // Error: Pipe bukan direktori, tidak bisa di-ls
+    BOOL Stat(const char* path, FileInfo* info) override {
+        // Biar konsisten sama Lookup
+        U64 id = Lookup(path);
+        if(id == 0) return FALSE;
+        PipeBuffer* buf = (PipeBuffer*)(UPTR)id;
+        info->Size = buf->BytesAvailable;
+        info->Type = FT_PIPE;
+        info->IsDirectory = FALSE;
+        info->InodeID = id;
+        return TRUE;
+    }
+    INTN ReadDir(File* dirFile, void* buffer, U32 bufferSize) override { return -1; }
+
+    short Poll(File* file, short events) override {
+        if(!file || !file->Node) return 0;
+
+        PipeBuffer* buf = (PipeBuffer*)(UPTR)file->Node->InodeID;
+        if(!buf) return 0;
+
+        short revents = 0;
+        buf->Lock.Acquire();
+
+        if (events & POLLIN) {
+            // Ada data buat dibaca ATAU writer udah tutup pipanya (EOF)
+            if (buf->BytesAvailable > 0 || buf->IsWriteClosed) {
+                revents |= POLLIN;
+            }
+        }
+
+        if (events & POLLOUT) {
+            // Masih ada sisa ruang buat nulis
+            if (buf->BytesAvailable < BUFFERSIZE) {
+                revents |= POLLOUT;
+            }
+        }
+
+        buf->Lock.Release();
+        return revents;
     }
 };
 
-// Global instance without using function-local static to avoid __cxa_guard issues
-// Use a pointer initialized at runtime to avoid any static object initialization
+// Global instance 
 inline PipeFileSystem* g_PipeFileSystemInstance = nullptr;
 
 inline PipeFileSystem* PipeFileSystem::GetInstance(){

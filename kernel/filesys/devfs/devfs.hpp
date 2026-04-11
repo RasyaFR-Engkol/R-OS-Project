@@ -59,7 +59,15 @@ class DevFS : public FileSystem{
         virtual BOOL Mount(Partition *Part) override;
         virtual BOOL Unmount() override;
 
-        virtual File* Open(const char* path, U32 Flags) override;
+        // 1. Cuma nyari path ini InodeID-nya berapa? (Return 0 kalo gak ketemu)
+        virtual U64 Lookup(const char* path) override;
+
+        // 2. Baca spek Inode dari disk (ukuran, tipe), terus masukin ke VFSNode
+        virtual BOOL PopulateInode(U64 InodeID, ::Inode* vfsNode) override;
+
+        // 3. Khusus buat bikin file baru (O_CREAT), return InodeID yang baru dibikin
+        virtual U64 CreateNode(const char* path, U32 Flags) override; // DevFS gak support bikin file baru via path
+
         virtual void Close(File* file) override;
         virtual U32 Read(File* file, U8* buffer, U32 size) override; 
         virtual U32 Write(File *File, U8 *Buffer, U32 Size) override;
@@ -82,6 +90,7 @@ class DevFS : public FileSystem{
     virtual BOOL Append(File* file, U8* buffer, U32 size) override;
     virtual INTN ReadDir(File* dirFile, void* buffer, U32 bufferSize) override;
     virtual BOOL Stat(const char* path, FileInfo* info) override;
+    virtual short Poll(File* file, short events) override; // Default return 0
     
     private:
         struct DevEntry {

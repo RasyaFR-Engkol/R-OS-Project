@@ -28,46 +28,14 @@ namespace ROOTFS{
 
 RootFS::RootFS(){
     m_BackendFS = nullptr;
-    m_BackendRootHandle = nullptr;
 }
 
 VOID RootFS::SetBackingFileSystem(FileSystem *fs){
     this->m_BackendFS = fs;
-    if(fs){
-        this->m_BackendRootHandle = fs->Open("/", O_RDWR);
+    // Gak perlu lagi manggil fs->Open() di sini
+    if(fs) {
         Printk::Write(Printk::Level::LOG_INFO, "RootFS: Set backing filesystem successfully.\n");
     }
-}
-
-File *RootFS::Open(const char* path, U32 Flags){
-    // [FIX] Handle variasi input path: kosong ("") atau slash ("/")
-    // Dua-duanya harus dianggap sebagai request buka ROOT directory virtual
-    if(path[0] == '\0' || (path[0] == '/' && path[1] == '\0')){
-        
-        File *froot = new File();
-        
-        // Setup Virtual File Handle
-        froot->CurrentPosition = 0;
-        froot->IsDirectory = TRUE;
-        froot->FileSize = 0;
-        String::Strcpy(froot->FileName, "/");
-        
-        // [PENTING] Ownernya harus THIS (RootFS), biar ReadDir manggil RootFS::ReadDir
-        froot->FSOwner = this; 
-        froot->RefCount = 1;
-        froot->type = FT_DIR;
-        
-        // Printk::Write(Printk::Level::LOG_DEBUG, "RootFS: Opened Virtual Root Handle\n");
-        return froot;
-    }
-
-    // Kalau bukan root (misal /etc/config), baru oper ke EXT2
-    if(m_BackendFS){
-        // Printk::Write(Printk::Level::LOG_DEBUG, "RootFS: Forwarding '%s' to Backend\n", path);
-        return m_BackendFS->Open(path, Flags);
-    }
-
-    return nullptr; 
 }
 
 RootFS::~RootFS(){
@@ -79,6 +47,36 @@ STATIC BOOL IsInHistory(char history[][32], int count, const char* name) {
         if (String::Strcmp(history[i], name) == 0) return true;
     }
     return false;
+}
+
+// Di RootFS.cpp
+U64 RootFS::Lookup(const char* path) {
+    // Kalau VFS nanya root folder (dirinya sendiri)
+    if (path[0] == '\0' || (path[0] == '/' && path[1] == '\0')) {
+        return 1; // Anggap Inode 1 itu ID khusus buat Virtual Root
+    }
+    
+    // Kalau bukan root, lempar ke backend (EXT2, dll)
+    if (m_BackendFS) {
+        return m_BackendFS->Lookup(path);
+    }
+    return 0;
+}
+
+BOOL RootFS::PopulateInode(U64 InodeID, ::Inode* vfsNode) {
+    if (InodeID == 1) { // Ini punya Virtual Root
+        vfsNode->InodeID = 1;
+        vfsNode->Type = FT_DIR;
+        vfsNode->FileSize = 0;
+        vfsNode->FSOwner = this;
+        return TRUE;
+    }
+    
+    // Kalau ID-nya bukan 1, berarti ini Inode milik Backend FS
+    if (m_BackendFS) {
+        return m_BackendFS->PopulateInode(InodeID, vfsNode);
+    }
+    return FALSE;
 }
 
 STATIC BOOL EmitEntry(char* name, char** outBuffer, U32* remainSize, U64* currentFilePos, U64 virtualOffset) {
@@ -186,7 +184,7 @@ INTN RootFS::ReadDir(File *dir, void *buf, U32 Size){
     }
 
     // --- 3. Backend Filesystem (EXT2) ---
-    if (m_BackendFS && m_BackendRootHandle) {
+    if (m_BackendFS) {
         
         if (dir->CurrentPosition >= currentIndex) {
             
@@ -197,11 +195,17 @@ INTN RootFS::ReadDir(File *dir, void *buf, U32 Size){
             //Printk::Write(Printk::Level::LOG_DEBUG, "RootFS: Switching to EXT2. UserPos=%d VirtualItems=%d Ext2Req=%d\n", 
             //    (int)dir->CurrentPosition, (int)currentIndex, (int)ext2RequestIndex);
 
-            m_BackendRootHandle->CurrentPosition = ext2RequestIndex;
+            ::Inode backendRootNode;
+            m_BackendFS->PopulateInode(2, &backendRootNode); // Inode 2 adalah ROOT-nya EXT2
+
+            File dummyBackendRoot;
+            dummyBackendRoot.Node = &backendRootNode;
+            dummyBackendRoot.CurrentPosition = ext2RequestIndex;
+            dummyBackendRoot.type = FT_DIR;
             
             char* ext2Buf = (char*)Kmalloc::Alloc(remain);
             if (ext2Buf) {
-                INTN bytesRead = m_BackendFS->ReadDir(m_BackendRootHandle, ext2Buf, remain);
+                INTN bytesRead = m_BackendFS->ReadDir(&dummyBackendRoot, ext2Buf, remain);
                 
                 if (bytesRead > 0) {
                     // Copy RAW bytes dulu
@@ -230,4 +234,34 @@ INTN RootFS::ReadDir(File *dir, void *buf, U32 Size){
 
 done:
     return (INTN)(Size - remain);
+}
+
+BOOL RootFS::Stat(const char* path, FileInfo* info) {
+    // Kalau VFS nanya stat-nya root dir "/"
+    if (path[0] == '\0' || (path[0] == '/' && path[1] == '\0')) {
+        info->Type = FT_DIR;
+        info->Size = 0;
+        return TRUE;
+    }
+
+    // Kalau bukan root, lempar ke EXT2!
+    if (m_BackendFS) {
+        return m_BackendFS->Stat(path, info);
+    }
+    
+    return FALSE;
+}
+
+U32 RootFS::Read(File* file, U8* buffer, U32 size) {
+    if (m_BackendFS) {
+        return m_BackendFS->Read(file, buffer, size);
+    }
+    return 0; // Kalo gak ada backend ya 0
+}
+
+U32 RootFS::Write(File *file, U8 *buffer, U32 size) {
+    if (m_BackendFS) {
+        return m_BackendFS->Write(file, buffer, size);
+    }
+    return 0;
 }

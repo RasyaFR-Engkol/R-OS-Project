@@ -142,7 +142,6 @@ namespace DMAAlloc {
         String::Memset(g_bitmap, 0, bytes);
 
         // Zero the pool for deterministic content
-        String::Memset((void*)g_poolVirt, 0, (unsigned long long)g_poolPages * PAGE_SIZE);
         mfence();
 
         g_stats.pool_pages = g_poolPages;

@@ -894,35 +894,46 @@ U32 FAT32FileSystem::AllocateCluster(U32 LastCluster){
 }
 
 BOOL FAT32FileSystem::UpdateDirectoryEntry(File* file){
-    if(!file) return FALSE;
+    // 1. Validasi standar VFS
+    if(!file || !file->Node) return FALSE;
 
-    if(file->Internal_DirEntryLBA == 0){
+    // 2. Tarik VNode dari InodeID
+    FAT32_VNode* node = (FAT32_VNode*)(UPTR)file->Node->InodeID;
+    
+    // Kalau ini Root Directory atau file virtual (EntryLBA == 0), abaikan
+    if(!node || node->EntryLBA == 0){
         return TRUE;
     }
 
     PageAlloc::DMAAlloc::DMABuffer *Buf = nullptr;
-    if(!m_Partition->ReadSectors(file->Internal_DirEntryLBA, 1, &Buf)){
+    if(!m_Partition->ReadSectors(node->EntryLBA, 1, &Buf)){
         Printk::Write(Printk::Level::LOG_ERR, "FAT32: Failed to read sector for updating directory entry.\n");
         return FALSE;
     }
 
     U8 *SectorData = (U8*)Buf->VirtAddr;
 
-    FAT32_DirectoryEntry *DirEntry = (FAT32_DirectoryEntry*)(SectorData + file->Internal_DirEntryOffset);
+    // 3. Tembak alamat Directory Entry pake Offset dari VNode
+    FAT32_DirectoryEntry *DirEntry = (FAT32_DirectoryEntry*)(SectorData + node->EntryOffset);
 
-    DirEntry->FileSize = file->FileSize;
-    DirEntry->ClusterLow = (U16)(file->Internal_StartCluster & 0xFFFF);
-    DirEntry->ClusterHigh = (U16)((file->Internal_StartCluster >> 16) & 0xFFFF);
+    // 4. Update FileSize dan Cluster pake data dari VNode
+    DirEntry->FileSize = node->FileSize;
+    DirEntry->ClusterLow = (U16)(node->StartCluster & 0xFFFF);
+    DirEntry->ClusterHigh = (U16)((node->StartCluster >> 16) & 0xFFFF);
 
+    // Update Timestamp (Sesuai kode lu yang keren ini)
     auto RTCTime = Arch::CMOS::ReadRTC();
 
     DirEntry->LastAccessDate = EncodeDateForFAT(RTCTime.year, RTCTime.month, RTCTime.day);
     DirEntry->LastWriteDate = EncodeDateForFAT(RTCTime.year, RTCTime.month, RTCTime.day);
     DirEntry->LastWriteTime = EncodeFATTime(RTCTime.hour, RTCTime.minute, RTCTime.second);
-    DirEntry->CreationDate = EncodeFATTime(RTCTime.year, RTCTime.month, RTCTime.day);
+    
+    // (Opsional) Tip: Biasanya CreationDate & Time cuma di-set pas CreateNode aja, 
+    // gak perlu di-update pas lagi nge-Write. Tapi gw biarin sesuai kode asli lu ya.
+    DirEntry->CreationDate = EncodeDateForFAT(RTCTime.year, RTCTime.month, RTCTime.day); 
     DirEntry->CreationTime = EncodeFATTime(RTCTime.hour, RTCTime.minute, RTCTime.second);
 
-    BOOL Success = m_Partition->WriteSectors(file->Internal_DirEntryLBA, 1, Buf);
+    BOOL Success = m_Partition->WriteSectors(node->EntryLBA, 1, Buf);
     if(!Success){
         Printk::Write(Printk::Level::LOG_ERR, "FAT32: Failed to write updated directory entry back to disk.\n");
     }
@@ -953,4 +964,117 @@ BOOL FAT32FileSystem::FreeClusterChain(U32 StartCluster){
 
     UpdateFSInfoHint(minFreed);
     return allOk;
+}
+
+BOOL FAT32FileSystem::RemoveDirectoryEntryAndLFNs(U32 dirStartCluster, U64 entryLBA, U32 entryOffset) {
+    // 1) Mark SFN entry as deleted (0xE5 as first byte)
+    PageAlloc::DMAAlloc::DMABuffer* sbuf = nullptr;
+    if(!m_Partition->ReadSectors(entryLBA, 1, &sbuf)){
+        return FALSE;
+    }
+    U8* sdata = (U8*)sbuf->VirtAddr;
+    sdata[entryOffset + 0] = 0xE5;
+    BOOL wrote = m_Partition->WriteSectors(entryLBA, 1, sbuf);
+    PageAlloc::DMAAlloc::FreeDMABuffer(sbuf);
+    if(!wrote) return FALSE;
+
+    // 2) Also mark any preceding LFN entries as deleted
+    U32 sectorsPerCluster = m_BPB.SectorsPerCluster;
+    U32 bps = m_BPB.BytesPerSector;
+
+    // First pass: count clusters and sectors
+    U32 clCount = 0;
+    U32 c = dirStartCluster;
+    U32 guard = 0;
+    while(c >= 2 && c < 0x0FFFFFF8){
+        clCount++;
+        c = GetNextCluster(c);
+        if(++guard > m_TotalClusters + 2) break; // avoid infinite loop on corrupt FAT
+    }
+    
+    U64 totalSectors = (U64)clCount * (U64)sectorsPerCluster;
+    if(totalSectors == 0) return TRUE;
+
+    U64* sectorLBAs = (U64*)Kmalloc::Alloc((U32)(totalSectors * sizeof(U64)));
+    if(!sectorLBAs) return TRUE;
+
+    // Second pass: fill LBAs
+    c = dirStartCluster; 
+    U64 idx = 0; 
+    guard = 0;
+    while(c >= 2 && c < 0x0FFFFFF8){
+        U64 base = ClusterToLBA(c);
+        for(U32 s = 0; s < sectorsPerCluster; ++s){ sectorLBAs[idx++] = base + s; }
+        c = GetNextCluster(c);
+        if(++guard > m_TotalClusters + 2) break;
+    }
+
+    // Locate the sector index of the SFN entry
+    long long sfnIdx = -1;
+    for(U64 i = 0; i < totalSectors; i++){ 
+        if(sectorLBAs[i] == entryLBA){ sfnIdx = (long long)i; break; } 
+    }
+
+    if(sfnIdx >= 0){
+        // Helper to load and optionally flush a sector buffer
+        PageAlloc::DMAAlloc::DMABuffer* curBuf = nullptr; 
+        U64 curLBA = (U64)-1; 
+        BOOL dirty = FALSE;
+
+        auto loadSector = [&](U64 lba)->BOOL{
+            if(curLBA == lba && curBuf) return TRUE;
+            if(curBuf){ 
+                if(dirty){ 
+                    if(!m_Partition->WriteSectors(curLBA, 1, curBuf)){ 
+                        PageAlloc::DMAAlloc::FreeDMABuffer(curBuf); curBuf = nullptr; dirty = FALSE; return FALSE; 
+                    } 
+                    dirty = FALSE; 
+                } 
+                PageAlloc::DMAAlloc::FreeDMABuffer(curBuf); curBuf = nullptr; 
+            }
+            if(!m_Partition->ReadSectors(lba, 1, &curBuf)) return FALSE;
+            curLBA = lba; dirty = FALSE; return TRUE;
+        };
+
+        auto flushSector = [&]()->BOOL{
+            if(curBuf && dirty){ 
+                if(!m_Partition->WriteSectors(curLBA, 1, curBuf)) return FALSE; 
+                dirty = FALSE; 
+            }
+            return TRUE;
+        };
+
+        long long secIdx = sfnIdx;
+        U32 offs = entryOffset;
+
+        if(loadSector(sectorLBAs[secIdx])){
+            // Walk backwards over 32-byte entries before SFN, deleting LFN entries
+            while(true){
+                if(offs >= 32){ offs -= 32; }
+                else {
+                    if(secIdx == 0) break; // reached start of directory
+                    if(!flushSector()) break;
+                    secIdx -= 1; 
+                    offs = bps - 32;
+                    if(!loadSector(sectorLBAs[secIdx])) break;
+                }
+
+                U8* d = (U8*)curBuf->VirtAddr;
+                U8 first = d[offs + 0];
+                U8 attr  = d[offs + 11];
+                
+                if(first == 0x00) break; // Unused entry; nothing more to delete backwards
+                if(attr != 0x0F) break;  // Not an LFN entry; we've finished deleting preceding LFNs
+                
+                // Mark this LFN entry deleted
+                d[offs + 0] = 0xE5; 
+                dirty = TRUE;
+            }
+            flushSector();
+        }
+        if(curBuf) PageAlloc::DMAAlloc::FreeDMABuffer(curBuf);
+    }
+
+    Kmalloc::Free(sectorLBAs);
+    return TRUE;
 }

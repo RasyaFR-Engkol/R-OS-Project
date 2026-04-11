@@ -137,6 +137,14 @@ public:
                 }
                 return 0;
             }
+
+            case FB_PRESENT_SOME_AREA_TO_SCREEN: {
+                FBRect *rect = (FBRect*)arg;
+                if(rect) {
+                    FB::FlushHW(rect->x, rect->y, rect->h, rect->w);
+                }
+                return 0;
+            }
         }
         return -ROS_UNSUPPORTED;        
     }

@@ -374,4 +374,11 @@ typedef wchar_t UNICODE_STRING;
 #define ARGOUT __MAYBE_UNUSED
 #define ARGINOUT
 
+struct FBRect {
+    U32 x;
+    U32 y;
+    U32 w;
+    U32 h;
+};
+
 #endif
