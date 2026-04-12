@@ -15,18 +15,39 @@ namespace xHCI{
     static BOOL TakeOwnershipFromBIOS(xHCIDriver &DRV, volatile xHCIExtCapUSBLegSup *USBLegSupCap){
         Write(Level::LOG_INFO, " Attempting to take ownership from BIOS...\n");
 
-        USBLegSupCap->leg_sup_sem |= (1 << 24); // Set OS Owned Semaphore
+        // Cek dulu, siapa tahu BIOS emang udah gak pegang kontrol
+        if ((USBLegSupCap->leg_sup_sem & (1 << 16)) == 0) {
+            Write(Level::LOG_NOTICE, " BIOS doesn't own it. Setting OS ownership.\n");
+            USBLegSupCap->leg_sup_sem |= (1 << 24);
+            return TRUE;
+        }
 
-        for(int i = 0 ; i < 5000; i++){
+        // Minta baik-baik ke BIOS (Set OS Owned Semaphore)
+        USBLegSupCap->leg_sup_sem |= (1 << 24); 
+
+        // Tunggu maksimal 1 detik (5000ms kelamaan sebenernya, spec minta 1 detik aja)
+        for(int i = 0 ; i < 1000; i++){
             if((USBLegSupCap->leg_sup_sem & (1 << 16)) == 0){
                 Write(Level::LOG_NOTICE, " Successfully took ownership from BIOS\n");
+                
+                // Extra aman: Matiin SMI Enable (Bit 29) biar BIOS gak ikut campur lagi nanti
+                USBLegSupCap->leg_sup_sem &= ~(1 << 29);
                 return TRUE;
             }
             Arch::Time::Sleep(1); // 1 ms
         }
 
-        Write(Level::LOG_ERR, " Failed to take ownership from BIOS (timeout)\n");
-        return FALSE;
+        // KALAU TIMEOUT: RAMPAS PAKSA! (Hostile Takeover)
+        Write(Level::LOG_WARNING, " BIOS refused to hand over xHCI. FORCING OWNERSHIP!\n");
+        
+        U32 val = USBLegSupCap->leg_sup_sem;
+        val &= ~(1 << 16); // Paksa clear BIOS Owned
+        val &= ~(1 << 29); // Paksa clear SMI Enable (PENTING biar BIOS gak interupsi diem-diem)
+        val |= (1 << 24);  // Pastikan OS Owned tetap nyala
+        
+        USBLegSupCap->leg_sup_sem = val;
+
+        return TRUE; // Anggap aja sukses berkat paksaan wkwk
     }
 
     VOID InitializeAllControllers(){
