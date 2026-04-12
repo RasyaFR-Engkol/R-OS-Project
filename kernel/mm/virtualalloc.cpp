@@ -1,7 +1,9 @@
+#include "bootinfo.h"
 #include "mm.hpp"
 #include <rossys.hpp>
 // Use project-provided basic types to avoid relying on host libc headers
 #include <rosval.h>
+#include <logging.hpp>
 
 // Simple bitmap-backed virtual page allocator.
 // This implementation is intentionally small and configurable via the
@@ -12,114 +14,168 @@
 extern "C" char __kernel_virt_end; // from linker script
 
 namespace {
-    // Number of pages managed by the bitmap (65536 pages = 256 MiB)
-    constexpr SIZE_T POOL_PAGES = 65536;
-    constexpr SIZE_T BITMAP_BYTES = (POOL_PAGES + 7) / 8;
+    struct VMARegion {
+        UPTR StartPage;
+        SIZE_T Count;
+        VMARegion *Next;
+    };
 
-    static U8 bitmap[BITMAP_BYTES];
-    static SIZE_T hint_index = 0; // next place to start searching
-    static UPTR g_pool_base = 0;
+    CONSTANTEXPR I32 MAX_VMA_NODES = 4096;
+    static VMARegion node_pool[MAX_VMA_NODES];
 
-    inline void bitmap_set(SIZE_T idx){ bitmap[idx >> 3] |= (U8)(1u << (idx & 7)); }
-    inline void bitmap_clear(SIZE_T idx){ bitmap[idx >> 3] &= (U8)~(1u << (idx & 7)); }
-    inline bool bitmap_test(SIZE_T idx){ return (bitmap[idx >> 3] >> (idx & 7)) & 1u; }
+    STATIC VMARegion *free_nodes_list = nullptr;
+    STATIC VMARegion *free_vma_list = nullptr;
+
+    UPTR g_pool_base = 0;
+
+    VMARegion* AllocNode() {
+        if (!free_nodes_list) return nullptr; // Pool habis (sangat jarang jika 4096)
+        VMARegion* node = free_nodes_list;
+        free_nodes_list = free_nodes_list->Next;
+        node->Next = nullptr;
+        return node;
+    }
+
+    void FreeNode(VMARegion* node) {
+        if (!node) return;
+        node->Next = free_nodes_list;
+        free_nodes_list = node;
+    }
 }
 
 
 namespace PageAlloc{
     void Virtual() {
-        // Initialize bitmap: mark all pages free
-        for (SIZE_T i = 0; i < BITMAP_BYTES; ++i) bitmap[i] = 0;
-        hint_index = 0;
+        for(int i = 0; i < MAX_VMA_NODES - 1; i++){
+            node_pool[i].Next = &node_pool[i + 1];
+        }
+        node_pool[MAX_VMA_NODES - 1].Next = nullptr;
+        free_nodes_list = &node_pool[0];
 
-        // Place the kernel heap after the kernel image, aligned to 2 MiB
         UPTR end = (UPTR)&__kernel_virt_end;
         const UPTR TWO_MB = 0x200000ULL;
         g_pool_base = (end + (TWO_MB - 1)) & ~(TWO_MB - 1);
-    }
-    
-    // Fast-ish scan for a run of 'count' free pages starting at 'startIdx'.
-    // Scans by bytes where possible to skip full/empty bytes quickly.
-    static SIZE_T find_free_run_from(SIZE_T startIdx, SIZE_T count) {
-        if (count == 0) return (SIZE_T)(-1);
-        if (startIdx >= POOL_PAGES) startIdx = 0;
 
-        SIZE_T idx = startIdx;
-        SIZE_T pagesLeft = POOL_PAGES - startIdx;
-        for (int pass = 0; pass < 2; ++pass) {
-            SIZE_T run = 0;
-            SIZE_T i = idx;
-            SIZE_T end = startIdx + pagesLeft;
-            // byte-based scan
-            SIZE_T byteStart = i >> 3;
-            SIZE_T bitOff = i & 7;
-            for (SIZE_T b = byteStart; (b << 3) < end; ++b) {
-                U8 byte = bitmap[b];
-                // mask out bits below starting bit in the first byte
-                if (b == byteStart && bitOff) {
-                    U8 mask = (U8)((1u << bitOff) - 1u);
-                    byte |= mask; // treat bits before start as used
-                }
-                if (byte == 0xFF) {
-                    run = 0;
-                    continue;
-                }
-                // fast path: entirely free byte and we still need >= 8
-                if (byte == 0x00 && count - run >= 8) {
-                    run += 8;
-                    if (run >= count) {
-                        SIZE_T lastPage = (b << 3) + 7;
-                        SIZE_T start = lastPage + 1 - count;
-                        return start;
-                    }
-                    continue;
-                }
-                // mixed byte; scan bit by bit
-                for (U8 bit = (b == byteStart) ? (U8)bitOff : (U8)0; bit < 8; ++bit) {
-                    SIZE_T pageIdx = (b << 3) + bit;
-                    if (pageIdx >= end) break;
-                    if (!bitmap_test(pageIdx)) {
-                        ++run;
-                        if (run == count) {
-                            SIZE_T start = pageIdx + 1 - count;
-                            return start;
-                        }
-                    } else {
-                        run = 0;
-                    }
+        SIZE_T total_virtual_pages = 65536;
+
+        const BootInfo *boot = BootInfoGet();
+        if(boot && boot->has_memmap){
+            U64 highest_physical_addr = 0;
+            
+            for (U32 i = 0; i < boot->memmap.count; i++) {
+                const BootMemRegion &r = boot->memmap.regions[i];
+                // Cek semua tipe memori buat cari batas paling atas
+                U64 region_end = r.base + r.length;
+                if (region_end > highest_physical_addr) {
+                    highest_physical_addr = region_end;
                 }
             }
-            // wrap around once
-            idx = 0;
-            pagesLeft = startIdx; // the remainder before startIdx
+
+            U64 virtual_bytes_needed = highest_physical_addr + 0x100000000ULL; 
+            total_virtual_pages = virtual_bytes_needed / PAGE_SIZE;
+            
+            Printk::Write(Printk::Level::LOG_INFO, 
+                "[VMM] Dynamic Virtual Pool Size: %llu GB\n", virtual_bytes_needed / (1024*1024*1024));
         }
-        return (SIZE_T)(-1);
+
+        free_vma_list = AllocNode();
+        free_vma_list->StartPage = g_pool_base / PAGE_SIZE;
+        free_vma_list->Count = total_virtual_pages;
     }
 
     void* VirtualAllocPages(SIZE_T count) {
-        if (count == 0 || count > POOL_PAGES) return nullptr;
-
+        if (count == 0) return nullptr;
         LOCKRFLAGS _irq = Arch::SaveAndDisableInterrupts();
-        SIZE_T start = find_free_run_from(hint_index, count);
-        if (start == (SIZE_T)(-1)) { Arch::RestoreInterrupts(_irq); return nullptr; }
 
-        SIZE_T end = start + count - 1;
-        for (SIZE_T j = start; j <= end; ++j) bitmap_set(j);
-        hint_index = (end + 1) % POOL_PAGES;
-        UPTR addr = g_pool_base + (UPTR)start * (UPTR)PAGE_SIZE;
+        VMARegion *curr = free_vma_list;
+        VMARegion *prev = nullptr;
+
+        while(curr){
+            if(curr->Count >= count){
+                UPTR alloc_start_page = curr->StartPage;
+
+                if(curr->Count == count){
+                    if(prev) prev->Next = curr->Next;
+                    else free_vma_list = curr->Next;
+                    FreeNode(curr);
+                } else {
+                    curr->StartPage += count;
+                    curr->Count -= count;
+                }
+
+                UPTR addr = alloc_start_page * PAGE_SIZE;
+                Arch::RestoreInterrupts(_irq);
+                return (VOID*)addr;
+            }
+            prev = curr;
+            curr = curr->Next;
+        }
+
         Arch::RestoreInterrupts(_irq);
-        return (void*)addr;
+        Printk::Write(Printk::Level::LOG_ERR, "[VMM] OUT OF VIRTUAL ADDRESS SPACE!\n");
+        return nullptr;
     }
 
     void VirtualFreePages(void* addr, SIZE_T count) {
         if (addr == nullptr || count == 0) return;
-        UPTR a = (UPTR)addr;
-        if (a < g_pool_base) return; // out of pool
-        SIZE_T idx = (SIZE_T)((a - g_pool_base) / PAGE_SIZE);
-        if (idx + count > POOL_PAGES) return; // out of range
+        UPTR start_page = (UPTR)addr / PAGE_SIZE;
+        
         LOCKRFLAGS _irq = Arch::SaveAndDisableInterrupts();
-        for (SIZE_T i = 0; i < count; ++i) bitmap_clear(idx + i);
-        if (idx < hint_index) hint_index = idx; // try to allocate from earlier free space next time
+
+        VMARegion* curr = free_vma_list;
+        VMARegion* prev = nullptr;
+
+        // 1. Cari posisi sisip yang pas (sorting ASCENDING berdasarkan StartPage)
+        while (curr && curr->StartPage < start_page) {
+            prev = curr;
+            curr = curr->Next;
+        }
+
+        // Sekarang kita tahu blok memori ini harus masuk di antara 'prev' dan 'curr'
+        UNUSED__ bool merged_with_prev = false;
+
+        // 2. Coba gabung (merge) dengan blok SEBELUMNYA (kiri)
+        if (prev && (prev->StartPage + prev->Count == start_page)) {
+            prev->Count += count; // Gabungin ukurannya ke blok prev
+            merged_with_prev = true;
+            
+            // 3. Cek apakah prev sekarang malah nempel ke blok SETELAHNYA (kanan)
+            if (curr && (prev->StartPage + prev->Count == curr->StartPage)) {
+                prev->Count += curr->Count; // Caplok ukuran blok kanan
+                prev->Next = curr->Next;    // Lompatin node curr
+                FreeNode(curr);             // Buang node curr kembali ke pool
+            }
+        } 
+        else {
+            // Kalau GA BISA gabung dengan blok sebelumnya, kita harus bikin node baru
+            VMARegion* new_free = AllocNode();
+            if (!new_free) {
+                // Sangat jarang terjadi jika MAX_VMA_NODES cukup
+                Printk::Write(Printk::Level::LOG_ERR, "[VMM] Failed to allocate VMA node on Free!\n");
+                Arch::RestoreInterrupts(_irq);
+                return;
+            }
+            
+            new_free->StartPage = start_page;
+            new_free->Count = count;
+            
+            // Sisipkan node baru ke dalam linked list
+            new_free->Next = curr;
+            if (prev) {
+                prev->Next = new_free;
+            } else {
+                // Kalau nggak ada prev, berarti dia jadi kepala list yang baru
+                free_vma_list = new_free;
+            }
+
+            // 4. Cek apakah node baru ini nempel dengan blok SETELAHNYA (kanan)
+            if (curr && (new_free->StartPage + new_free->Count == curr->StartPage)) {
+                new_free->Count += curr->Count; // Caplok ukuran blok kanan
+                new_free->Next = curr->Next;    // Lompatin node curr
+                FreeNode(curr);                 // Buang node curr kembali ke pool
+            }
+        }
+
         Arch::RestoreInterrupts(_irq);
     }
 }
