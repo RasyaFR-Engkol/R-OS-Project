@@ -57,6 +57,8 @@ ABI_C NORET void KernelMain()
     IDT::InitializeIDT();
     Arch::ASM::EnableSSE();
     Arch::ASM::FPU_Init();
+    FB::Init();
+    Printk::Init();
     Printk::Write(Printk::Level::LOG_INFO, "FPU Initalized.\n");
     // Initialize PIC and PIT early so we can use PIT as a calibration
     // source for APIC timer calibration when ACPI brings up LAPIC.
@@ -87,15 +89,13 @@ ABI_C NORET void KernelMain()
 
     // Now that LAPIC timer calibrated, PIT ticks flowing, interrupts enabled,
     // and IOAPIC/LAPIC initialized, start Application Processors.
-    ACPI::LAPIC::SMP::InitSMP();
+    //AACPI::LAPIC::SMP::InitSMP();
 
     BootInfoPrint();
 
     ROOTFS::InitROOTFS();
     DEVFS::Init();
     PipeFS::Init();
-    FB::Init();
-    Printk::Init();
 
     // Initialize PCI and its drivers
     PCI::IntializePCIDrivers();

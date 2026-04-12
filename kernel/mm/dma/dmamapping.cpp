@@ -106,21 +106,21 @@ namespace DMAAlloc {
             want /= 2; // fallback smaller
         }
         if (!phys) {
-            Serial::Write("[DMA] Failed to reserve physical pool\n");
+            Printk::Write(Printk::LOG_ERR, "[DMA] Failed to reserve physical pool\n");
             return;
         }
 
         void* vbase = PageAlloc::VirtualAllocPages(want);
         if (!vbase) {
             PageAlloc::PhysicalFreePages(phys, want);
-            Serial::Write("[DMA] Failed to reserve virtual range\n");
+            Printk::Write(Printk::LOG_ERR,"[DMA] Failed to reserve virtual range\n");
             return;
         }
 
         if (!PageAlloc::MapPages(KernelPML4, phys, (UPTR)vbase, want, PAGE_PRESENT | PAGE_RW | PAGE_PCD)) {
             PageAlloc::VirtualFreePages(vbase, want);
             PageAlloc::PhysicalFreePages(phys, want);
-            Serial::Write("[DMA] MapPages failed for pool\n");
+            Printk::Write(Printk::LOG_ERR, "[DMA] MapPages failed for pool\n");
             return;
         }
 
@@ -133,7 +133,7 @@ namespace DMAAlloc {
         SIZE_T bytes = (g_poolPages + 7) / 8;
         g_bitmap = (U8*)kmalloc(bytes);
         if (!g_bitmap) {
-            Serial::Write("[DMA] Failed to allocate bitmap, tearing down\n");
+            Printk::Write(Printk::LOG_ERR, "[DMA] Failed to allocate bitmap, tearing down\n");
             PageAlloc::VirtualFreePages(vbase, want);
             PageAlloc::PhysicalFreePages(phys, want);
             g_poolPhys = g_poolVirt = g_poolPages = 0;
@@ -145,7 +145,7 @@ namespace DMAAlloc {
         mfence();
 
         g_stats.pool_pages = g_poolPages;
-        Serial::Printf("[DMA] Pool ready: phys=%p virt=%p pages=%u (bitmap=%u bytes)\n",
+        Printk::Write(Printk::LOG_ERR, "[DMA] Pool ready: phys=%p virt=%p pages=%u (bitmap=%u bytes)\n",
             (void*)(uintptr_t)g_poolPhys, (void*)(uintptr_t)g_poolVirt, (unsigned)g_poolPages, (unsigned)bytes);
     }
 
