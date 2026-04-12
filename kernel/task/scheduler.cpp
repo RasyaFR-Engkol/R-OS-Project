@@ -68,6 +68,41 @@ namespace Tasking {
         PriorityBitmap |= (1 << t->Priority);
     }
 
+    VOID InternalEnqueue(Task *t){        
+        if(!t) {
+            Printk::Write(Printk::Level::LOG_DEBUG, "No Task to Enqueue.\n");
+            return;
+        }
+
+        if (t->NextRunQueue != nullptr || t->PrevRunQueue != nullptr) {
+            return;
+        }
+
+        if(t->Priority >= MLFQ_LEVELS) t->Priority = MLFQ_LEVELS - 1;
+
+        if (t->LastBoostEpoch < GlobalBoostEpoch) {
+            // MASA BOOST: Angkat SEMUA task ke Priority 0 biar kebagian CPU!
+            // Jangan khawatir, task biasa nanti otomatis turun kasta lagi di SchedulerTick.
+            t->Priority = 0; 
+            
+            t->TimeSlice = GetTimeSliceForPriority(t->Priority);
+            t->LastBoostEpoch = GlobalBoostEpoch;
+        }
+
+        RunQueue &Rq = PriorityQueues[t->Priority];
+
+        t->NextRunQueue = nullptr;
+        t->PrevRunQueue = Rq.Tail;
+
+        if(Rq.Tail) Rq.Tail->NextRunQueue = t;
+        else Rq.Head = t;
+
+        Rq.Tail = t;
+        Rq.Count++;
+
+        PriorityBitmap |= (1 << t->Priority);
+    }
+
     Task *Dequeue(){
          Arch::Spinlock::SpinlockGuard Guard(RunqueueLock);
 
@@ -294,8 +329,13 @@ namespace Tasking {
             if(Tasking::ForceReschedule || PrevTask->YieldRequested){
                 Tasking::ForceReschedule = FALSE;
                 PrevTask->YieldRequested = FALSE;
-                // Paksa jadi READY biar masuk if di bawah
-                PrevTask->State = TaskState::READY; 
+                
+                PrevTask->TimeUsedInPriority = 0;
+
+                if(PrevTask->IsCriticalProc || PrevTask->IsEssentialSystem){
+                    PrevTask->Priority = 0;
+                    PrevTask->TimeSlice = GetTimeSliceForPriority(0);
+                }
             } 
             else {
                 // Logic MLFQ TimeSlice (Pengurangan jatah waktu)
@@ -346,6 +386,32 @@ namespace Tasking {
         if(GlobalTickCounter >= PRIORITY_BOOST_INTERVAL){
             GlobalTickCounter = 0;
             GlobalBoostEpoch = GlobalBoostEpoch + 1;
+
+            Arch::Spinlock::SpinlockGuard Guard(RunqueueLock);
+
+            for(int i = 1; i < MLFQ_LEVELS; i++){
+                if((PriorityBitmap & (1 << i)) != 0) {
+
+                    Task *Current = PriorityQueues[i].Head; 
+                    while(Current != nullptr){
+                        Task *NextTask = Current->NextRunQueue;
+
+                        Current->Priority = 0;
+                        Current->TimeUsedInPriority = 0;
+                        Current->TimeSlice = GetTimeSliceForPriority(0);
+
+                        InternalEnqueue(Current);
+
+                        Current = NextTask;
+                    }
+
+                    PriorityQueues[i].Head = nullptr;
+                    PriorityQueues[i].Tail = nullptr;
+                    PriorityQueues[i].Count = 0;
+                    
+                    PriorityBitmap &= ~(1 << i);
+                }
+            }
         }
 
         // 6. Ambil Task Baru (Dequeue)

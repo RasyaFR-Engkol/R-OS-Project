@@ -14,7 +14,7 @@
 #include "rosval.h"
 #include <cpu_context.hpp>
 // Forward-declare File to avoid heavy include and circular dependencies
-class File;
+struct File;
 
 // VMA protection flags (used in `VMArea::Prot`)
 #define VMA_READ   (1ULL << 0)

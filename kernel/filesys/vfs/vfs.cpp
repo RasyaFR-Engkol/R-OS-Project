@@ -6,6 +6,7 @@
 #include "../../dev/devicemanager.hpp"
 #include <rwlock_simple.hpp>
 #include "../../mm/shm/shm.hpp"
+#include "../pipefs/pipe.hpp"
 
 #define MAX_FS_DRIVERS 10
 #define MAX_MOUNT_POINTS 20
@@ -14,7 +15,7 @@ namespace {
     #define MAX_VFS_CACHED_INODES 128
     ::Inode* g_InodeCache[MAX_VFS_CACHED_INODES] = {nullptr};
 
-    ::Inode* GetCachedInode(FileSystem* fs, U32 InodeNum) {
+    ::Inode* GetCachedInode(FileSystem* fs, U64 InodeNum) {
         for (int i = 0; i < MAX_VFS_CACHED_INODES; i++) {
             // Harus cek FS-nya juga! Siapa tau Inode 5 di EXT2 beda sama Inode 5 di FAT32
             if (g_InodeCache[i] != nullptr && 
@@ -36,7 +37,7 @@ namespace {
         Printk::Write(Printk::Level::LOG_WARNING, "VFS: Inode Cache Full!\n");
     }
 
-    VOID RemoveCachedInode(FileSystem *Fs, U32 InodeNum){
+    VOID RemoveCachedInode(FileSystem *Fs, U64 InodeNum){
         for(int i = 0; i < MAX_VFS_CACHED_INODES; i++){
             if(g_InodeCache[i] != nullptr && 
                g_InodeCache[i]->FSOwner == Fs && 
@@ -372,6 +373,8 @@ namespace VFSManager{
             return nullptr;
         }
 
+        Printk::Write(Printk::LOG_INFO, "VFS: Instance Memory Fs: %p.\n", Fs);
+
         U64 InodeNum = Fs->Lookup(Rel);
 
         if(InodeNum == 0 && (Flags & O_CREAT)) {
@@ -385,10 +388,12 @@ namespace VFSManager{
             return nullptr;
         }
 
+        g_VFSLock.AcquireWrite();
         ::Inode *VFSNode = GetCachedInode(Fs, InodeNum);
 
         if(VFSNode != nullptr) {
             VFSNode->RefCount++;
+            g_VFSLock.ReleaseWrite();
         } else {
             VFSNode = new ::Inode();
             if(!VFSNode) return nullptr;
@@ -400,6 +405,7 @@ namespace VFSManager{
             Fs->PopulateInode(InodeNum, VFSNode);
 
             AddCachedInode(VFSNode);
+            g_VFSLock.ReleaseWrite();
         }
 
         File *file = new File();
@@ -413,6 +419,7 @@ namespace VFSManager{
         file->CurrentPosition = 0;
         file->Flags = Flags;
         file->Node = VFSNode; // Hubungkan ke Inode
+        file->RefCount = 1;
         Serial::Printf("VFS NOTE: WE OPEN FILE '%s' WITH INODE ID %llu ON FS %p WITH NODE MEMORY %p\n", path, InodeNum, Fs, VFSNode);
 
         if (Flags & O_TRUNC) {
@@ -542,12 +549,16 @@ namespace VFSManager{
             if (file->Node->RefCount <= 0) {
                 // Kalau udah gak ada file yang nunjuk ke Inode ini, hapus dari cache & RAM
                 RemoveCachedInode(fs, file->Node->InodeID); 
+                Serial::Printf("CHECK1.\n");
                 delete file->Node; 
+                Serial::Printf("CHECK2.\n");
             }
         } 
 
         // Tersangka 2 lu juga aman, karena File RefCount udah 0 di cek nomor 1
+        Serial::Printf("CHECK3.\n");
         delete file; 
+        Serial::Printf("CHECK4.\n");
     }
 
     U32 Read(File* file, U8* buffer, U32 size){

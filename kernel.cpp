@@ -41,6 +41,7 @@
 #include <network/udp.hpp>
 #include <network/dhcp.hpp>
 #include "kernel/driver/e1000/e1000.hpp"
+#include "kernel/filesys/pipefs/pipe.hpp"
 
 // Debug stress test entry (implemented in tools/debug/ext2_stress.cpp)
 ABI_C int main_debug_ext2_stress(int argc, char** argv);
@@ -92,19 +93,12 @@ ABI_C NORET void KernelMain()
 
     ROOTFS::InitROOTFS();
     DEVFS::Init();
+    PipeFS::Init();
     FB::Init();
     Printk::Init();
 
     // Initialize PCI and its drivers
     PCI::IntializePCIDrivers();
-
-    // xHCI test: send multiple Enable Slot commands (no NOOP, no polling) to verify repeated MSIs.
-    //xHCI::InterruptBurstTest(5); Disable this for now to reduce noise.
-
-    // AHCI read test: try LBA0 from first available SATA port and hex dump
-    //AHCI::TestReadLBA0();
-
-    // Mount an in-kernel DevFS at /dev and register framebuffer device there
 
     GPTFS::InitFs();
 

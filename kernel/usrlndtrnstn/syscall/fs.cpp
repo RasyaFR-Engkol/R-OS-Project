@@ -7,6 +7,7 @@
 #include <filesystem/linux_dirent.hpp>
 #include <ros_linux/kernelstat.hpp>
 #include "syscall/sysarg.hpp"
+#include "../../filesys/pipefs/pipe.hpp"
 
 // forward declaration for CanonicalizePath defined later in this file
 VOID CanonicalizePath(const char* cwd, const char* input, char* output);
@@ -522,37 +523,63 @@ VOID Sys_Pipe(CpuContext_T *CPUContext){
         return;
     }
 
+    // 1. Buat Buffer Pipe-nya
     PipeBuffer *Buf = new PipeBuffer();
     Buf->ReadPos = 0;
     Buf->WritePos = 0;
     Buf->BytesAvailable = 0;
     Buf->IsWriteClosed = FALSE;
-    Buf->RefCount = 2; // untuk read dan write end
+    Buf->RefCount = 2; // Buat Read End dan Write End
 
-    PipeFile *FRead = new PipeFile(Buf, FALSE);
-    PipeFile *FWrite = new PipeFile(Buf, TRUE);
+    // 2. Buat Inode dummy sebagai 'Jembatan' buat VFS
+    Inode *pipeNode = new Inode(); 
+    pipeNode->Type = FT_PIPE;
+    pipeNode->FSOwner = PipeFileSystem::GetInstance();
+    pipeNode->InodeID = (U64)(UPTR)Buf; // Trik krusial: Simpan pointer buffer ke InodeID!
+    pipeNode->RefCount = 2; // Karena ada 2 file descriptor (Read & Write) yang nempel ke sini
 
-    FileSystem* pipeDriver = PipeFileSystem::GetInstance();
-    FRead->Node->FSOwner = pipeDriver;
-    FWrite->Node->FSOwner = pipeDriver;
+    // 3. Buat File Struct untuk Read End
+    File *FRead = new File();
+    FRead->Node = pipeNode;       // Pasang Inode-nya
+    FRead->Flags = O_RDONLY;      // Flag baca
+    FRead->type = FT_PIPE;
+    FRead->RefCount = 1;
+    FRead->IsDirectory = FALSE;
+    FRead->CurrentPosition = 0;
+    FRead->PrivateData = nullptr; // Kosongin aja karena PipeFS pake InodeID
+    String::Strcpy(FRead->FileName, "anon_pipe_r");
 
+    // 4. Buat File Struct untuk Write End
+    File *FWrite = new File();
+    FWrite->Node = pipeNode;      // Share Inode yang sama!
+    FWrite->Flags = O_WRONLY;     // Flag tulis
+    FWrite->type = FT_PIPE;
+    FWrite->RefCount = 1;
+    FWrite->IsDirectory = FALSE;
+    FWrite->CurrentPosition = 0;
+    FWrite->PrivateData = nullptr;
+    String::Strcpy(FWrite->FileName, "anon_pipe_w");
+
+    // 5. Masukkan ke FD Table milik Task
     Curtask->FDTable[FDRead] = FRead;
     Curtask->FDTable[FDWrite] = FWrite;
 
+    // 6. Copy File Descriptor Array ke Userspace
     INTN FDS[2] = {FDRead, FDWrite};
     U64 *user_pml4 = HHDM_PhysToVirt(Curtask->CR3);
     if (!PageAlloc::CopyToUser(user_pml4, (void*)Pipefd_Ptr, (void*)FDS, sizeof(FDS))) {
-        // Cleanup on failure
+        // Cleanup kalau gagal (Anti Memory Leak)
         Curtask->FDTable[FDRead] = nullptr;
         Curtask->FDTable[FDWrite] = nullptr;
         delete FRead;
         delete FWrite;
+        delete pipeNode;
         delete Buf;
         CPUContext->rax = -1;
         return;
     }
 
-    CPUContext->rax = 0; // Success
+    CPUContext->rax = 0; // Berhasil!
 }
 
 VOID Sys_Ioctl(CpuContext_T *CPUContext){

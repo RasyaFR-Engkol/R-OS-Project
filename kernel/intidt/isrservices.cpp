@@ -77,7 +77,6 @@ static BOOL HandleUserPageFault(Tasking::Task *Current, U64 FaultAddr, U64 Error
             ShmRegion *Region = (ShmRegion*)Vma->BackingFile->PrivateData;
             U64 OffsetInVMA = PageFaultAddrAligned - Vma->Start;
             TargetPhysPage = Region->PhysAddr + Vma->FileOffset + OffsetInVMA;
-            Serial::Printf("TARGETPHYSPAGE: %p, VIRTADDRALIGNED: %p.\n", TargetPhysPage, PageFaultAddrAligned);
             // Tidak perlu alloc, tidak perlu baca file (memori sudah shared)
         }
         else if (String::Strcmp((const CHAR8*)Vma->BackingFile->FileName, "/dev/fb0") == 0) {
@@ -85,8 +84,6 @@ static BOOL HandleUserPageFault(Tasking::Task *Current, U64 FaultAddr, U64 Error
             const BootInfo *Bi = BootInfoGet();
             U64 OffsetInVma = PageFaultAddrAligned - Vma->Start;
             TargetPhysPage = Bi->framebuffer.address + OffsetInVma;
-            // Framebuffer biasanya butuh Uncacheable (PCD) biar ga flickering
-            // MapFlags |= PAGE_PCD; 
         }
         else {
             // REGULAR FILE (Ex: text.txt, program.elf)

@@ -13,75 +13,14 @@
 namespace SerialDriver { BOOL RegisterSerialToDevFS(class DevFS* devfs); }
 namespace StdDvc { VOID RegisterSTD(class DevFS* devfs); }
 
-struct NamedPipeEntry{
-    CHAR8 Name[64];
-    PipeBuffer *Buffer;
-};
-NamedPipeEntry NamedPipe[10]; // limit 10 aja dulu
-
-void RemoveNamedPipeEntry(PipeBuffer* targetBuf) {
-    for(INTN i = 0; i < 10; i++){
-        if(NamedPipe[i].Buffer == targetBuf){
-            // Reset entry biar bisa dipake lagi & ga dangling pointer
-            NamedPipe[i].Buffer = nullptr;
-            NamedPipe[i].Name[0] = '\0';
-            return;
-        }
-    }
-}
-
-PipeBuffer *GetNamedPipeBuffer(const CHAR8* name){
-    for(INTN i = 0; i < 10;i++){
-        if(String::Strcmp(NamedPipe[i].Name, name) == 0){
-            return NamedPipe[i].Buffer;
-        }
-    }
-    return nullptr;
-}
-
-PipeBuffer *CreateNamedPipe(const CHAR8* Name){
-    PipeBuffer *buf = new PipeBuffer();
-    buf->RefCount = 0;
-
-    for(INTN i = 0; i < 10; i++){
-        if(!NamedPipe[i].Buffer){
-            String::Strcpy(NamedPipe[i].Name, Name);
-            buf->BytesAvailable = 0;
-            buf->IsWriteClosed = FALSE;
-            buf->WritePos = 0;
-            buf->ReadPos = 0;
-            buf->RefCount = 0;
-            buf->Lock.Init();
-            NamedPipe[i].Buffer = buf;
-            Printk::Write(Printk::Level::LOG_INFO, "DevFS: Created named pipe '%s'\n", Name);
-            return buf;
-        }
-    }
-    Printk::Write(Printk::Level::LOG_ERR, "DevFS: Failed to create named pipe '%s', limit reached\n", Name);
-    return nullptr; 
-}
-
 U64 DevFS::CreateNode(const char* path, U32 Flags) {
-    if(!path || path[0] == '\0') {
-        Printk::Write(Printk::Level::LOG_ERR, "DevFS: CreateNode called with invalid path\n");
-        return 0;
-    }
-
-    // --- TAMBAHAN BARU: STRIP SLASH DI SINI ---
-    const char* devName = (path[0] == '/') ? path + 1 : path;
-
-    // Passing devName yang udah bersih ke PipeFS
-    return PipeFileSystem::GetInstance()->CreateNode(devName, Flags);
+    (void)path; (void)Flags;
+    return 0;
 }
 
 U64 DevFS::Lookup(const char* path) {
     if (!path || path[0] == '\0') return 0;
     const char* devName = (path[0] == '/') ? path + 1 : path;
-
-    PipeBuffer* pipe = GetNamedPipeBuffer(devName);
-    if (pipe) {
-        return (U64)(UPTR)pipe; // Ketemu pipanya, return InodeID 64-bit
-    } 
 
     // Cari di registry
     for (int i = 0; i < MAX_ENTRIES; i++) {
@@ -95,16 +34,6 @@ U64 DevFS::Lookup(const char* path) {
 
 BOOL DevFS::PopulateInode(U64 InodeID, ::Inode* vfsNode) {
     if (!vfsNode) return FALSE;
-
-    for(INTN i = 0; i < 10; i++){
-        if(NamedPipe[i].Buffer != nullptr && (U64)(UPTR)NamedPipe[i].Buffer == InodeID){
-            vfsNode->Type = FT_PIPE;
-            vfsNode->FSOwner = this; // Tetep DevFS ownernya di mata VFS
-            vfsNode->FileSize = NamedPipe[i].Buffer->BytesAvailable;
-            vfsNode->InodeID = InodeID;
-            return TRUE;
-        }
-    }
 
     // Kita cari tahu ini InodeID punya siapa dengan scan registry lagi
     for (int i = 0; i < MAX_ENTRIES; i++) {
@@ -253,9 +182,7 @@ U32 DevFS::Read(File* file, U8* buffer, U32 size){
         // Update posisi
         file->CurrentPosition += toCopy;
         return toCopy;
-    } else if (file->Node->Type == FT_PIPE) {
-        return PipeFileSystem::GetInstance()->Read(file, buffer, size);
-    }
+    } 
     
     return 0;
 }
@@ -316,8 +243,6 @@ U32 DevFS::Write(File *File, U8 *Buffer, U32 Size){
         // Update posisi
         File->CurrentPosition += Size;
         return Size;
-    } else if (File->Node->Type == FT_PIPE) {
-        return PipeFileSystem::GetInstance()->Write(File, Buffer, Size);
     }
     
     return 0;
@@ -432,18 +357,6 @@ BOOL DevFS::Stat(const char *path, FileInfo *Info){
     const char* devName = path;
     if (devName[0] == '/') devName++;
 
-    // 2. Cek Named Pipes
-    // (Ini penting biar nggak dianggap file biasa)
-    PipeBuffer* pipe = GetNamedPipeBuffer(devName);
-    if (pipe) {
-        String::Memset(Info, 0, sizeof(FileInfo));
-        Info->Type = FileType::FT_PIPE;
-        Info->IsDirectory = FALSE;
-        Info->Size = pipe->BytesAvailable; // Opsional: kasih tau ada berapa byte
-        Info->InodeID = (U64)pipe; // Gunakan alamat memori sbg InodeID (biar unik)
-        return TRUE;
-    }
-
     // 3. Cek Internal Registry (m_Entries)
     // Ini buat device yang diregister manual kayak FB, Serial, Mouse
     for (int i = 0; i < MAX_ENTRIES; ++i) {
@@ -505,9 +418,7 @@ short DevFS::Poll(File* file, short events) {
         ICharDevice* cdev = (ICharDevice*)(UPTR)file->Node->InodeID;
         if(cdev) return cdev->Poll(file, events);
         return 0;
-    } else if (file->Node->Type == FT_PIPE) {
-        return PipeFileSystem::GetInstance()->Poll(file, events);
-    }
+    } 
     
     return 0;
 }

@@ -100,6 +100,7 @@ class FileSystem{
         virtual short Poll(File* file, short events) { return 0; } // Default return 0
 };
 
+
 struct File {
     virtual ~File() {}
     
