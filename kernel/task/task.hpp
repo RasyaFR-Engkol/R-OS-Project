@@ -165,7 +165,7 @@ namespace Tasking{
     extern VOLATILE BOOL ForceReschedule;
 
     VOID SchedulerStart();
-    VOID CreateKThread(VOID (*Entry)(VOID));
+    VOID CreateKThread(VOID (*Entry)(VOID), const char* taskname);
     VOID CreateUserTask(const CHAR8 *Name, VOID *ELFImage);
     VOID SchedulerTick(void *context);
     U64 GetTimeSliceForPriority(U8 Priority);
@@ -202,7 +202,7 @@ namespace Tasking{
     VOID SettingAppPerm(Task *t, U32 Perm);
 
 
-    Task *ConstructTask(VOID (*Entry)(VOID));
+    Task *ConstructTask(VOID (*Entry)(VOID), const char *taskname);
     VOID ReapDTask();
     VOID Sleep(U64 ms);
     VOID Debug_DumpProcessState();

@@ -145,7 +145,7 @@ namespace DMAAlloc {
         mfence();
 
         g_stats.pool_pages = g_poolPages;
-        Printk::Write(Printk::LOG_ERR, "[DMA] Pool ready: phys=%p virt=%p pages=%u (bitmap=%u bytes)\n",
+        Printk::Write(Printk::LOG_INFO, "[DMA] Pool ready: phys=%p virt=%p pages=%u (bitmap=%u bytes)\n",
             (void*)(uintptr_t)g_poolPhys, (void*)(uintptr_t)g_poolVirt, (unsigned)g_poolPages, (unsigned)bytes);
     }
 
