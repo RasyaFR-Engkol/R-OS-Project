@@ -46,7 +46,7 @@
 // Debug stress test entry (implemented in tools/debug/ext2_stress.cpp)
 ABI_C int main_debug_ext2_stress(int argc, char** argv);
 
-VOID IdleLoop(){
+ABI_C VOID IdleLoop(){
     while(TRUE){
         Arch::ASM::HaltCPU();
     }
@@ -54,7 +54,6 @@ VOID IdleLoop(){
 
 ABI_C NORET void KernelMain()
 { 
-    IDT::InitializeIDT();
     Arch::ASM::EnableSSE();
     Arch::ASM::FPU_Init();
     FB::Init();
@@ -62,30 +61,6 @@ ABI_C NORET void KernelMain()
     Printk::Write(Printk::Level::LOG_INFO, "FPU Initalized.\n");
     // Initialize PIC and PIT early so we can use PIT as a calibration
     // source for APIC timer calibration when ACPI brings up LAPIC.
-    PIC::InitializePIC();
-    PIC::Keyboard::InitializeKeyboardPIC();
-    PIT::InitializePIT(100); // set PIT to 100 Hz (calibration/reference)
-    // Enable IRQ-driven serial input (COM1 IRQ4)
-    Serial::EnableIRQInput();
-
-    // Initialize ACPI/MADT which will parse tables and initialize LAPIC/IOAPIC
-    // (but do not start the LAPIC timer yet; we need interrupts enabled to
-    // calibrate it against the PIT).
-    ACPI::Initialize();
-
-    // Enable interrupts so PIT IRQs will increment PIT::ticks for calibration
-    Arch::Sti();
-
-    // Calibrate and start LAPIC timer at 100 Hz (uses PIT ticks)
-    // Use a distinct vector for LAPIC timer (not IRQ0/PIT vector 0x20)
-    // to avoid conflicts with the PIT handler while calibration runs.
-    ACPI::Timer::InitializeLapicTimer(CONFIG_TIMER_HEXA_GLOBAL, 100, TRUE);
-
-    // Now mask and disable legacy PIC hardware while interrupts are briefly
-    // disabled inside the call. After that, re-enable interrupts so LAPIC
-    // delivered interrupts are accepted.
-    PIC::DisableIRQWhileAndMaskOldPIC();
-    Arch::Sti();
 
     // Now that LAPIC timer calibrated, PIT ticks flowing, interrupts enabled,
     // and IOAPIC/LAPIC initialized, start Application Processors.
@@ -126,8 +101,6 @@ ABI_C NORET void KernelMain()
         Printk::Write(Printk::LOG_ERR, "ERROR: NoInstanceFound.\n");
     }
 
-    Tasking::CreateIdleTask(IdleLoop);
-
     {
         File *F = VFSManager::Open("/init.elf", O_RDONLY);
         if(F){
@@ -146,6 +119,10 @@ ABI_C NORET void KernelMain()
                 goto halt;
             }
 
+            // HACK: bisa terjadi undefined behavior karena mengubah task struct saat scheduler berjalan. jadinya,
+            // kita cli lalu sti saat task sudah selesai di rubah.
+            Arch::ASM::Cli();
+
             Tasking::CreateUserTask("init", ELFImage);
 
             Tasking::Task *InitTask = Tasking::GetTaskPID(1);
@@ -158,12 +135,11 @@ ABI_C NORET void KernelMain()
             Printk::Write(Printk::Level::LOG_INFO, "KernelMain: init.elf loaded and task created successfully.\n");
             VFSManager::Close(F);
             Printk::Write(Printk::Level::LOG_INFO, "KernelMain: Closed /init.elf file handle.\n");
+            Arch::ASM::Sti();
         } else {
             Printk::Write(Printk::Level::LOG_ERR, "KernelMain: failed to open /mnt/part1/init.elf\n");
         }
     }
-    
-    Tasking::SchedulerStart();
 
     UNUSED__ halt:
     
@@ -171,13 +147,7 @@ ABI_C NORET void KernelMain()
     // producers are serviced. This keeps IRQ handlers minimal (they only
     // enqueue) while the main loop does I/O and console rendering.
     for (;;) {
-        FBConsole::UpdateCursor();
-        // Drain any incoming serial characters (mirrors to FB/serial)
-        Serial::PollToConsoles();
-        // Process queued keyboard scancodes and echo them to consoles
-        PIC::Keyboard::Poll();
-        // Halt until next interrupt to reduce CPU usage
-        Arch::ASM::HaltCPU();
+        Arch::Time::SleepTicks(1); // Sleep to reduce CPU usage; adjust as needed for responsiveness
     }
     
 }

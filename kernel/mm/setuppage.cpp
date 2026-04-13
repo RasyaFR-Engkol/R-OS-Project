@@ -75,10 +75,17 @@ namespace Paging{
         constexpr UPTR HHDM_BASE = 0xffff800000000000ULL;
         const SIZE_T HHDM_PML4_INDEX = (SIZE_T)((HHDM_BASE >> 39) & 0x1ff);
 
+        U64 total_usable_ram = 0;
+
         U64 max_phys = 0x40000000ULL; // default 1 GiB fallback
         if (const BootInfo* bi = BootInfoGet()) {
             if (bi->has_memmap) {
                 for (U32 i = 0; i < bi->memmap.count; ++i) {
+                    // Asumsi Tipe 1 adalah USABLE RAM (Standard E820 / Multiboot)
+                    if (bi->memmap.regions[i].type == 1) { 
+                        total_usable_ram += bi->memmap.regions[i].length;
+                    }
+                    
                     U64 end = bi->memmap.regions[i].base + bi->memmap.regions[i].length;
                     if (end > max_phys) max_phys = end;
                 }
@@ -149,7 +156,29 @@ namespace Paging{
         Serial::Printf("[ROS] CR3 phys: %p hhdm_virt: %p identity_virt: %p mapped=%u GiB\n",
             (void*)KernelPML4Phys, hhdm_virt, (void*)KernelPML4, (unsigned)mapped_pdpt);
 
-        Kmalloc::Init(10000);
+        // Initialize kmalloc after paging is active so it can use the new allocator and HHDM mappings.
+
+        // ==========================================
+        // DYNAMIC KMALLOC SIZING
+        // ==========================================
+        // We allocate
+        U64 kmalloc_bytes = total_usable_ram / 20; 
+
+        const U64 MIN_KMALLOC = 16ULL * 1024 * 1024;
+        const U64 MAX_KMALLOC = 256ULL * 1024 * 1024;
+
+        if (kmalloc_bytes < MIN_KMALLOC) kmalloc_bytes = MIN_KMALLOC;
+        if (kmalloc_bytes > MAX_KMALLOC) kmalloc_bytes = MAX_KMALLOC;
+
+        SIZE_T kmalloc_pages = (SIZE_T)(kmalloc_bytes / PAGE_SIZE);
+
+        Serial::Printf("[ROS] Dynamic Kmalloc: total RAM ~%llu MB, reserving %llu MB (%llu pages) for heap\n", 
+                    total_usable_ram / (1024*1024), 
+                    kmalloc_bytes / (1024*1024), 
+                    (unsigned long long)kmalloc_pages);
+
+        // Panggil init dengan jumlah pages yang udah dinamis!
+        Kmalloc::Init(kmalloc_pages);
 
         // Initialize DMA pool now that physical/virtual allocators and kmalloc
         // are available and HHDM mapping is active. This prepares the dedicated

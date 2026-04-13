@@ -221,13 +221,13 @@ Task* TaskUserConstructor(const CHAR8 *Name, VOID *ELFImage) {
     return newTask;
 }
 
-VOID CreateUserTask(const CHAR8 *Name, VOID *ELFImage) {
-    Task *task = TaskUserConstructor(Name, ELFImage);
-    if (!task) {
-        Printk::Write(Printk::Level::LOG_ERR, "CreateUserTask: failed to construct task\n");
-        return;
-    }
+    VOID CreateUserTask(const CHAR8 *Name, VOID *ELFImage) {
+        Task *task = TaskUserConstructor(Name, ELFImage);
+        if (!task) {
+            Printk::Write(Printk::Level::LOG_ERR, "CreateUserTask: failed to construct task\n");
+            return;
+        }
 
-    SchedulerAddTask(task);
-}
+        SchedulerAddTask(task);
+    }
 }

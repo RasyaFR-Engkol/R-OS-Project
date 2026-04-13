@@ -1,9 +1,14 @@
+#include "firmware/acpi/acpi.hpp"
 #include <rosval.h>
 #include <stddef.h>
 #include <stdint.h> // Untuk 'uint64_t'
 #include <bootinfo.h>
 #include <../firmware/chipset/chipset.hpp>
 #include <../kernel/dev/devicemanager.hpp>
+#include <../firmware/acpi/driver/timer/timer.hpp>
+#include "kernel/driver/pic/timer/pit.hpp"
+#include "kernel/intidt/idt.hpp"
+#include <task.hpp>
 
 #define MB_TAG_TYPE_END 0U
 #define MB_TAG_TYPE_FRAMEBUFFER 8U
@@ -209,6 +214,7 @@ ABI_C void (*__init_array_end[])();
 
 // 2. Deklarasi 'kernel_main' C++
 ABI_C void KernelMain();
+ABI_C VOID IdleLoop();
 
 // 3. Fungsi 'lem' 64-bit
 // Argumen 'mb_info_ptr' ini datang dari register 'rdi'
@@ -224,6 +230,8 @@ ABI_C void KernelEntryPoint(uint64_t mb_info_ptr) {
     Paging_Initialize_C();
     Paging_RelocateGDT_C();
     Paging_SwitchStack_C();
+
+    Arch::ASM::Cli(); // Disable interrupts during init
     
     // (Di sini kamu bisa menyimpan mb_info_ptr ke variabel global
     //  untuk dibaca nanti oleh kernel_main, misal untuk memory map)
@@ -242,8 +250,43 @@ ABI_C void KernelEntryPoint(uint64_t mb_info_ptr) {
     // Deteksi Chipset 
     Firmware::Chipset::DetectMotherboardChipset();
 
+    // INITIALIZE ACPI
+    IDT::InitializeIDT();
+    PIC::InitializePIC();
+    PIC::Keyboard::InitializeKeyboardPIC();
+    PIT::InitializePIT(100); // set PIT to 100 Hz (calibration/reference)
+    // Enable IRQ-driven serial input (COM1 IRQ4)
+    Serial::EnableIRQInput();
+
+    // Initialize ACPI/MADT which will parse tables and initialize LAPIC/IOAPIC
+    // (but do not start the LAPIC timer yet; we need interrupts enabled to
+    // calibrate it against the PIT).
+    ACPI::Initialize();
+
+    // Enable interrupts so PIT IRQs will increment PIT::ticks for calibration
+    Arch::Sti();
+
+    // Calibrate and start LAPIC timer at 100 Hz (uses PIT ticks)
+    // Use a distinct vector for LAPIC timer (not IRQ0/PIT vector 0x20)
+    // to avoid conflicts with the PIT handler while calibration runs.
+    ACPI::Timer::InitializeLapicTimer(CONFIG_TIMER_HEXA_GLOBAL, 100, TRUE);
+
+    // Now mask and disable legacy PIC hardware while interrupts are briefly
+    // disabled inside the call. After that, re-enable interrupts so LAPIC
+    // delivered interrupts are accepted.
+    PIC::DisableIRQWhileAndMaskOldPIC();
+    Arch::Sti();
+
     // Panggil Kernel C++ 64-bit
-    KernelMain();
+    //KernelMain();
+    // UPDATE: DO NOT CALL KERNELMAIN. kita akan buat kthread kernelmain.
+    Tasking::CreateIdleTask(IdleLoop);
+
+    Tasking::CreateKThread(KernelMain, "KernelMainThread");
+
+    // Timer sudah jalan disini, harusnya kita bisa start scheduler sekarang juga.
+    Printk::Write(Printk::Level::LOG_INFO, "Starting Task Scheduler...\n");
+    Tasking::SchedulerStart();
 
     // Hang
     for (;;) {

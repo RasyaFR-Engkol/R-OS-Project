@@ -99,7 +99,7 @@ namespace Tasking{
         return NewCR3;
     }
 
-    Task *ConstructTask(VOID (*Entry)(VOID)){
+    Task *ConstructTask(VOID (*Entry)(VOID), const char *taskname){
         Task *NewTask = new Task();
         if(NewTask == nullptr){
             Printk::Write(Printk::Level::LOG_ERR, "ConstructTask: failed to allocate Task struct\n");
@@ -115,7 +115,7 @@ namespace Tasking{
         }
 
         NewTask->pid = (U64)-1; // will be set by SchedulerAddTask
-        String::Strcpy(NewTask->Name, "KThread");
+        String::Strcpy(NewTask->Name, taskname);
         NewTask->NextTask = nullptr;
 
         NewTask->CR3 = KernelPML4Phys; // kernel thread uses kernel page tables
@@ -140,6 +140,9 @@ namespace Tasking{
         NewTask->Priority = 0;
         NewTask->TimeSlice = 5;
         NewTask->SleepUntil = 0;
+        NewTask->IsCriticalProc = FALSE;
+        NewTask->IsSudoOrAdmin = FALSE;
+        NewTask->IsEssentialSystem = FALSE;
 
         for(U32 i = 0; i < MAX_FILE_IN_PROCESS; i++){
             NewTask->FDTable[i] = nullptr;
@@ -212,8 +215,8 @@ namespace Tasking{
         Printk::Write(Printk::Level::LOG_ERR, "Scheduler: Process Table Full! Cannot spawn PID >= 100\n");
     }
 
-    VOID CreateKThread(VOID (*Entry)(VOID)){
-        Task *NewKThread = ConstructTask(Entry);
+    VOID CreateKThread(VOID (*Entry)(VOID), const char *taskname){
+        Task *NewKThread = ConstructTask(Entry, taskname);
         if(NewKThread == nullptr){
             Printk::Write(Printk::Level::LOG_ERR, "Failed to create Kernel Thread\n");
             return; 
@@ -223,7 +226,7 @@ namespace Tasking{
     }
 
     VOID CreateIdleTask(VOID (*Entry)(VOID)){
-        Task *Idle = ConstructTask(Entry);
+        Task *Idle = ConstructTask(Entry, "IdleTask");
         if(!Idle) return;
         
         // Paksa taruh di slot 0
