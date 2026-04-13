@@ -21,16 +21,16 @@ namespace xHCI{
         volatile U32* doorbell_regs;
 
         volatile xHCIRuntimeRegisters *rt_regs;
-    volatile xHCIPortRegs *port_regs; // Pointer to port registers array (OpRegs + 0x400)
-    U8 PortCount;                    // Number of root hub ports (from HCS1)
+        volatile xHCIPortRegs *port_regs; // Pointer to port registers array (OpRegs + 0x400)
+        U8 PortCount;                    // Number of root hub ports (from HCS1)
 
         PageAlloc::DMAAlloc::DMABuffer* DMA_DCBAAP;
         PageAlloc::DMAAlloc::DMABuffer* DMA_EventRing;
         PageAlloc::DMAAlloc::DMABuffer* DMA_CmdRing;
         PageAlloc::DMAAlloc::DMABuffer* DMA_ERSTable;
-    PageAlloc::DMAAlloc::DMABuffer* DMA_ScratchpadArray; // array of U64 phys ptrs
-    PageAlloc::DMAAlloc::DMABuffer* DMA_Scratchpads[64]; // cap to 64 for now
-    U32 ScratchpadCount;
+        PageAlloc::DMAAlloc::DMABuffer* DMA_ScratchpadArray; // array of U64 phys ptrs
+        PageAlloc::DMAAlloc::DMABuffer* DMA_Scratchpads[64]; // cap to 64 for now
+        U32 ScratchpadCount;
 
         volatile xHCITRB *VCmdRing;
         volatile xHCITRB *VEventRing;
@@ -42,8 +42,8 @@ namespace xHCI{
         U32 CmdRingEnqueueIndex;
         BOOL CmdRingCycleState;
         U32 EventRingDequeueIndex;
-    // Counter for spurious interrupts observed on this controller
-    U32 SpuriousInterruptCount;
+        // Counter for spurious interrupts observed on this controller
+        U32 SpuriousInterruptCount;
 
         // Per-slot device state array maintained by the xHCI driver.
         // This holds runtime info about allocated slots/devices such as
@@ -132,6 +132,7 @@ namespace xHCI{
         struct xHCIPortState {
             U8 State; // see enum below for symbolic names
             U8 SlotID; // Assigned Slot ID after Enable Slot completes
+            U8 ResetCount;
         };
         xHCIPortState PortStates[256]; // Array state buat tiap port
         // Port state symbolic values
@@ -143,7 +144,11 @@ namespace xHCI{
             PORT_STATE_ADDRESSING = 4,
             PORT_STATE_ENABLE_SENT = 5 // per-port: Enable Slot command already sent
         };
-    } ;
+
+        U8 EnableSlotQueue[256];
+        VOLATILE U8 EnableSlotQueueHead = 0;
+        VOLATILE U8 EnableSlotQueueTail = 0;
+    };
 
     // TODO: Define global xHCI controller array
 

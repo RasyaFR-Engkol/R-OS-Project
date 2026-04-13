@@ -311,6 +311,18 @@ namespace xHCI{
             Write(Level::LOG_NOTICE, " Controller %d running! usb_cmd=0x%08x usb_sts=0x%08x\n",
                 (unsigned)i, (unsigned)DRV.op_regs->usb_cmd, (unsigned)DRV.op_regs->usb_sts);
 
+            Write(Level::LOG_DEBUG, " [XHCIInit] Powering on all ports...\n");
+            for (U32 io = 0; io < DRV.PortCount; io++) {
+                U32 port_sc = DRV.port_regs[io].port_sc;
+                // Cek apakah Port Power (Bit 9) masih mati
+                if ((port_sc & (1 << 9)) == 0) {
+                    U32 set_power = port_sc;
+                    set_power &= ~0x00FE0000; // Masking aman (jangan clear bit change)
+                    set_power |= (1 << 9);    // Set PP (Port Power) ke 1
+                    DRV.port_regs[io].port_sc = set_power;
+                }
+            }
+            
             Arch::Time::Sleep(600); // 600 ms delay to allow ports to power up
 
             //Printk::Write(Printk::Level::LOG_DEBUG, " [XHCIInit] Powering on all ports...\n");
@@ -319,41 +331,29 @@ namespace xHCI{
                 // 1. Baca Langsung (Tanpa Pointer Pointeran)
                 U32 raw = DRV.port_regs[io].port_sc;
                 
-                bool hasChange = (raw & (1 << 17)); // CSC
+                bool isEnabled = (raw & (1 << 1)); // PED
                 bool isConnected = (raw & 1);       // CCS
-                
-                // Debug print biar tau status sebelum diapa-apain
-                if (isConnected || hasChange) {
-                    //Printk::Write(Printk::Level::LOG_NOTICE, "  >>> Port %d Detected! (Raw: 0x%08x) -> Kickstarting...\n", io+1, raw);
 
-                    // 2. Clear Status Change Bit (Jika ada)
-                    if (hasChange) {
-                        U32 clear_val = raw;
-                        clear_val &= ~0x00FE0000; // Mask bit status lain biar gak ikut ke-clear
-                        clear_val |= (1 << 17);   // Tulis 1 ke bit 17 buat nge-clear
+                if(isConnected) {
+                    if(isEnabled) {
+                        Printk::Write(Printk::Level::LOG_INFO, "  [XHCI] Port %d is SuperSpeed (Already Enabled). Pushing to Queue...\n", io+1);
+
+                        U8 CurrentTail = DRV.EnableSlotQueueTail;
+                        DRV.EnableSlotQueue[CurrentTail] = io + 1; // io+1 karena Port ID mulai dari 1
+                        DRV.EnableSlotQueueTail = CurrentTail + 1;
+
+                        DRV.PortStates[io].State = xHCIDriver::PORT_STATE_ENABLE_SENT;
+                        SendEnableSlotCommand(DRV);
+                    } else  { // PLS=7 itu Polling, indikasi port USB 3.0 yang belum siap nangkep device USB 2.0 (misal mouse)
+                        // Skema USB 2.0: Butuh Reset Manual OS
+                        Printk::Write(Printk::Level::LOG_INFO, "  [XHCI] Port %d is Legacy/USB 2.0. Issuing Reset...\n", io+1);
                         
-                        // TULIS LANGSUNG ke struct
-                        DRV.port_regs[io].port_sc = clear_val;
-                        
-                        // Baca ulang biar variabel 'raw' update (optional, tapi good practice)
-                        raw = DRV.port_regs[io].port_sc;
+                        U32 reset_val = raw;
+                        reset_val &= ~0x00FE0000; // Jangan clear status change (Write 0 aman)
+                        reset_val |= (1 << 4);    // Set PR (Port Reset, Bit 4)
+                        DRV.port_regs[io].port_sc = reset_val;
+                        // Biarkan hardware nge-reset, nanti ISR akan menangani Port Reset Change (PRC)
                     }
-
-                    // 3. Lakukan PORT RESET (Ini pemicu utamanya)
-                    // Kita butuh reset biar port masuk ke state Enabled dan device siap
-                    //Printk::Write(Printk::Level::LOG_INFO, "  [XHCI] Resetting Port %d...\n", io+1);
-                    
-                    U32 reset_val = raw;
-                    reset_val &= ~0x00FE0000; // Jangan clear status change lain (tulis 0 aman)
-                    reset_val |= (1 << 4);    // Set Bit 4 (Port Reset)
-                    reset_val &= ~(1 << 1);   // Pastikan Bit 1 (Port Enable) ditulis 0 (biar gak disable)
-                    
-                    // TULIS LANGSUNG ke struct
-                    DRV.port_regs[io].port_sc = reset_val;
-
-                    // Selesai.
-                    // Nanti hardware akan reset port, lalu kirim Interrupt "Port Reset Change" (PRC).
-                    // Handler MSI-X kamu akan nangkep itu dan lanjut ke Enable Slot.
                 }
             }
 

@@ -10,6 +10,20 @@
 #include "../massusb/usb_defs.hpp"
 #include "../massusb/usbmsc.hpp"
 #include "../../dev/devicemanager.hpp"
+#include <../firmware/acpi/acpi.hpp>
+#include <../firmware/acpi/driver/timer/timer.hpp>
+
+// Taruh di atas sebelum SetupAddressDevice dipanggil
+static void SpinDelayMs(U64 ms) {
+    // Asumsi lu udah nyimpen Freq TSC pas kalibrasi LAPIC kemarin
+    U64 start = Arch::ASM::RdTSC();
+    U64 ticks_to_wait = (ACPI::Timer::TSCFrequencyHz * ms) / 1000;
+    U64 target = start + ticks_to_wait;
+    
+    while (Arch::ASM::RdTSC() < target) {
+        Arch::ASM::PauseCPU(); // Biar CPU nggak kepanasan pas nunggu
+    }
+}
 
 namespace xHCI{
     using namespace Printk;
@@ -57,48 +71,52 @@ namespace xHCI{
         VOLATILE xHCIPortRegs *PortReg = &DRV.port_regs[PortID - 1];
         U32 PortSC = PortReg->port_sc;
 
-        //Write(Level::LOG_INFO, " Port %u Event - PortSC=0x%08x\n", (unsigned)PortID, (unsigned)PortSC);
+        // Ekstrak bit-bit penting biar gampang dibaca
+        bool isConnected = (PortSC & 1);           // CCS: Current Connect Status
+        bool isEnabled   = (PortSC & (1 << 1));    // PED: Port Enabled/Disabled
+        bool csc         = (PortSC & (1 << 17));   // CSC: Connect Status Change
+        bool prc         = (PortSC & (1 << 21));   // PRC: Port Reset Change
 
         // ====================================================
-        // 1. EVENT: CONNECT STATUS CHANGE (Baru Dicolok)
+        // 1. EVENT: CONNECT STATUS CHANGE (Dicolok / Dicabut)
         // ====================================================
-        if(PortSC & (1 << 17)) { // CSC
-            // Clear CSC (Write-1-to-Clear)
+        if(csc) {
             PortReg->port_sc = (PortSC & ~0x00FE0000) | (1 << 17);
-            
-            // Kalau Connected tapi belum Enabled, berarti butuh RESET
-            if(PortSC & 1){
-                // Kasus A: Connected tapi belom enabled
-                if((PortSC & 2) == 0){
-                    Write(Level::LOG_NOTICE, " xHCI: Port %u Connected (USB 2.0 style). Initiating Reset...\n", (unsigned)PortID);
+
+            if(isConnected) {
+                if(isEnabled) {
+                    Write(Level::LOG_NOTICE, " xHCI: Port %u Connected & Enabled (USB 3.0). Queueing Enable Slot...\n", (unsigned)PortID);
+                    
+                    DRV.PortStates[PortID - 1].State = xHCIDriver::PORT_STATE_ENABLE_SENT;
+                    
+                    U8 currentTail = DRV.EnableSlotQueueTail;
+                    DRV.EnableSlotQueue[currentTail] = PortID;
+                    DRV.EnableSlotQueueTail = currentTail + 1;
+
+                    SendEnableSlotCommand(DRV);
+                } else {
+                    // KASUS B: MURNI USB 2.0 (Butuh Reset)
+                    Write(Level::LOG_INFO, " xHCI: Port %u Connected (USB 2.0). Issuing Reset...\n", (unsigned)PortID);
+
+                    DRV.PortStates[PortID - 1].ResetCount = 0;
+
+                    SpinDelayMs(100);
                     
                     U32 ResetCMD = PortSC;
-                    ResetCMD &= ~0x00FE0000; 
+                    ResetCMD &= ~0x00FE0000; // Jangan clear status change lain
                     ResetCMD |= (1 << 4);    // Set PR (Port Reset)
-                    ResetCMD &= ~(1 << 1);   // Clear PED
+                    ResetCMD &= ~(1 << 1);   // Pastikan PED tidak ketulis 1
                     PortReg->port_sc = ResetCMD;
-                    return; // Tunggu interrupt PRC (Port Reset Change) nanti
-                }
-
-                // KASUS B: Connected DAN sudah Enabled (Biasanya USB 3.0)
-                // Langsung gas ke Enable Slot!
-                
-                else {
-                    Write(Level::LOG_NOTICE, " xHCI: Port %u Connected & Enabled (USB 3.0 style). Skip Reset.\n", (unsigned)PortID);
                     
-                    // Kita bisa langsung anggap ini setara dengan Reset Complete
-                    // Lanjut ke alokasi slot
-                     DRV.PortStates[PortID - 1].State = xHCIDriver::PORT_STATE_ENABLE_SENT;
-                     SendEnableSlotCommand(DRV);
+                    // Selesai. Nanti Controller akan nembak interrupt PRC.
                 }
             } else {
-                // kasus C: Disconnected Devices
-
                 Write(Level::LOG_NOTICE, " xHCI: Port %u Disconnected. Cleaning up device...\n", (unsigned)PortID);
 
                 U8 SlotID = DRV.PortStates[PortID - 1].SlotID;
                 if(SlotID != 0){
-                    Write(Level::LOG_INFO, " xHCI: Port %u - Removing device at Slot %u due to disconnect.\n", (unsigned)PortID, (unsigned)SlotID);
+                    Write(Level::LOG_INFO, " xHCI: Port %u - Removing device at Slot %u.\n", (unsigned)PortID, (unsigned)SlotID);
+                    
                     U32 CMDIDX = DRV.CmdRingEnqueueIndex;
                     VOLATILE xHCITRB *CmdTRB = &DRV.VCmdRing[CMDIDX];
 
@@ -108,11 +126,10 @@ namespace xHCI{
                                       (SlotID << 24) |
                                       (DRV.CmdRingCycleState ? 1u : 0u);
 
-                    DRV.doorbell_regs[0] = 0; // Ring doorbell for command ring
+                    DRV.doorbell_regs[0] = 0; // Ring doorbell
 
                     DRV.CmdRingEnqueueIndex++;
                     if(DRV.CmdRingEnqueueIndex == DRV.CmdRingSize - 1){
-                        // Handle Link TRB Wrap (sama kayak logic kamu biasanya)
                         volatile xHCITRB *LinkTRB = &DRV.VCmdRing[DRV.CmdRingEnqueueIndex];
                         LinkTRB->control = (6U << 10) | (1U << 1) | (DRV.CmdRingCycleState ? 1u : 0u);
                         DRV.CmdRingEnqueueIndex = 0;
@@ -120,7 +137,6 @@ namespace xHCI{
                     }
 
                     FreeDeviceResources(DRV, SlotID);
-
                     ResetDevState(DRV, SlotID);
 
                     DRV.PortStates[PortID - 1].State = xHCIDriver::PORT_STATE_EMPTY;
@@ -128,25 +144,63 @@ namespace xHCI{
                 }
             }
         }
-
         // ====================================================
-        // 2. EVENT: PORT RESET CHANGE (Reset Selesai)
+        // 2. EVENT: PORT RESET CHANGE (Selesai Reset)
         // ====================================================
-        if(PortSC & (1 << 21)) { // PRC (Port Reset Change)
-            // Clear PRC (Write-1-to-Clear)
+        // ====================================================
+        // 2. EVENT: PORT RESET CHANGE (Selesai Reset)
+        // ====================================================
+        else if(prc){
+            // Clear PRC
             PortReg->port_sc = (PortSC & ~0x00FE0000) | (1 << 21);
             
-            //Write(Level::LOG_NOTICE, " xHCI: Port %u Reset Complete (PRC). Sending Enable Slot...\n", (unsigned)PortID);
+            U32 PostResetSC = PortReg->port_sc;
+            int timeout = 100; // Maksimal nunggu 1 detik (100 * 10ms)
 
-            // Tandai state port
-            DRV.PortStates[PortID - 1].State = xHCIDriver::PORT_STATE_ENABLE_SENT;
+            // --- THE MAGIC REALTEK FIX ---
+            // Cek bit 5-8 (Port Link State). Angka 7 artinya POLLING.
+            while (((PostResetSC >> 5) & 0xF) == 7 && timeout > 0) {
+                SpinDelayMs(200);
+                
+                PostResetSC = PortReg->port_sc; // Baca ulang status terbaru
+                timeout--;
+            }
+            
+            // Setelah lolos dari Polling, kasih napas dikit (Debounce tambahan)
+            SpinDelayMs(200);
+            PostResetSC = PortReg->port_sc;
 
-            // Kirim Command Enable Slot
-            SendEnableSlotCommand(DRV);
+            // BARU KITA CEK PED-NYA!
+            bool nowConnected = (PostResetSC & 1);
+            bool nowEnabled   = (PostResetSC & (1 << 1));
+
+            if(nowConnected && nowEnabled) {
+                Write(Level::LOG_NOTICE, " xHCI: Port %u Reset Complete (PRC). Queueing Enable Slot...\n", (unsigned)PortID);
+
+                DRV.PortStates[PortID - 1].State = xHCIDriver::PORT_STATE_ENABLE_SENT;
+
+                U8 currentTail = DRV.EnableSlotQueueTail;
+                DRV.EnableSlotQueue[currentTail] = PortID;
+                DRV.EnableSlotQueueTail = (currentTail + 1) % 256; 
+
+                SendEnableSlotCommand(DRV);
+            } else {
+                if (DRV.PortStates[PortID - 1].ResetCount < 3) {
+                    DRV.PortStates[PortID - 1].ResetCount++;
+                    Write(Level::LOG_WARNING, " xHCI: Port %u PRC triggered but Link State stuck/failed! (SC=0x%08x). Retrying (%d/3)...\n", 
+                          (unsigned)PortID, (unsigned)PostResetSC, DRV.PortStates[PortID - 1].ResetCount);
+
+                    U32 ResetCMD = PortReg->port_sc;
+                    ResetCMD &= ~0x00FE0000; 
+                    ResetCMD |= (1 << 4);    
+                    ResetCMD &= ~(1 << 1);   
+                    PortReg->port_sc = ResetCMD;
+                } else {
+                    Write(Level::LOG_ERR, " xHCI: Port %u failed to enable after 3 retries. SC=0x%08x\n", (unsigned)PortID, (unsigned)PostResetSC);
+                    DRV.PortStates[PortID - 1].State = xHCIDriver::PORT_STATE_EMPTY;
+                }
+            }
         }
-
-        // sampe sini? biasanya kita nggak tau ada apaan
-        //Printk::Write(Printk::Level::LOG_DEBUG, " xHCI: Port %u - No recognized status change handled.\n", (unsigned)PortID);
     }
 
     static VOID ProcessPendingEvents(xHCIDriver &DRV, U32 Controller_ID){
@@ -193,32 +247,45 @@ namespace xHCI{
                     switch(CmdType) {
                         case 23: // TRB_TYPE_NOOP
                             Write(Level::LOG_DEBUG, " xHCI: NOOP Command Completed.\n");
-                            break;
+                        break;
 
                         case 9: // TRB_TYPE_ENABLE_SLOT
                             {
-                                // Cari port mana yang request enable slot ini
-                                // (Logic loop portWaitingEnable kamu pindah kesini)
                                 U32 targetPort = 0;
-                                for(U32 p=0; p<DRV.PortCount; p++){
-                                    if(DRV.PortStates[p].State == xHCIDriver::PORT_STATE_ENABLE_SENT){
-                                        targetPort = p + 1;
-                                        DRV.PortStates[p].State = xHCIDriver::PORT_STATE_ADDRESSING; 
-                                        break;
-                                    }
-                                }
+
+                                // --- AMBIL DARI QUEUE (POP) ---
+                                U8 currentHead = DRV.EnableSlotQueueHead;
                                 
-                                if(targetPort) {
-                                    //Write(Level::LOG_INFO, " xHCI: Slot ID %u assigned to Port %u. Sending Address Device...\n", slotId, targetPort);
-                                    // PENTING: Simpan SlotID ini ke struktur Port atau Device array kamu
-                                    DRV.PortStates[targetPort-1].SlotID = slotId; 
+                                // Cek apakah Queue tidak kosong (Head belum menyusul Tail)
+                                if (currentHead != DRV.EnableSlotQueueTail) {
+                                    targetPort = DRV.EnableSlotQueue[currentHead]; // Ambil data
+                                    DRV.EnableSlotQueueHead = currentHead + 1;     // Geser Head
+                                }
+                                // ------------------------------
+                                
+                                if(targetPort != 0) {
+                                    U32 portSC = DRV.port_regs[targetPort - 1].port_sc;
+                                    bool isConnected = (portSC & 1);
+                                    bool isEnabled = (portSC & 2);
                                     
+                                    if (!isConnected || !isEnabled) {
+                                        Write(Level::LOG_WARNING, " xHCI: Slot %u assigned, but Port %u is already dead/disabled! Aborting.\n", slotId, targetPort);
+                                        
+                                        // TODO: Kirim Command "Disable Slot" buat ngebuang Slot ID ini biar gak mubazir
+                                        
+                                        DRV.PortStates[targetPort - 1].State = xHCIDriver::PORT_STATE_EMPTY;
+                                        DRV.PortStates[targetPort - 1].SlotID = 0;
+                                        break; // Jangan lanjut Address Device!
+                                    }
+
+                                    SpinDelayMs(50);
+                                    DRV.PortStates[targetPort-1].SlotID = slotId; 
                                     SetupAddressDevice(DRV, slotId, targetPort);
                                 } else {
-                                    Write(Level::LOG_WARNING, " xHCI: Enable Slot completed but no port was waiting?\n");
+                                    Write(Level::LOG_WARNING, " xHCI: Enable Slot completed but Queue is empty!\n");
                                 }
                             }
-                            break;
+                        break;
 
                         case 11: // TRB_TYPE_ADDRESS_DEVICE
                             //Write(Level::LOG_INFO, " xHCI: Address Device Command Completed for Slot %u.\n", slotId);
