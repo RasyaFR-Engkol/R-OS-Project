@@ -181,3 +181,92 @@ namespace xHCI{
     VOID FindClassAndEndpoint(U32 &offset, U16 &totalLen, U8 *buffer, xHCI::xHCIDriver &DRV, U8 SlotID, BOOL &found, U8 &currentInterfaceClass);
     VOID ResetDevState(xHCI::xHCIDriver &DRV, U32 SlotID);
     VOID FreeDeviceResources(xHCI::xHCIDriver &DRV, U32 SlotID);
+
+// ==========================================
+// USB CONSTANTS & MACROS
+// ==========================================
+
+// USB Descriptor Types
+#define USB_DESC_TYPE_DEVICE        0x01 // Wajib ada buat parsing awal
+#define USB_DESC_TYPE_CONFIG        0x02 // Buat parsing Configuration
+#define USB_DESC_TYPE_INTERFACE     0x04
+#define USB_DESC_TYPE_ENDPOINT      0x05
+#define USB_DESC_TYPE_HID           0x21 // Descriptor khusus HID
+#define USB_DESC_TYPE_HID_REPORT    0x22 // Wajib buat baca input Controller/Tablet
+
+// USB Device Classes
+#define USB_CLASS_AUDIO             0x01 // Headset/Soundcard USB
+#define USB_CLASS_CDC               0x02 // Communications (Ethernet USB / Serial)
+#define USB_CLASS_HID               0x03 // Mouse, Keyboard, Controller, Tablet
+#define USB_CLASS_IMAGE_MTP         0x06 // PTP / MTP (Kamera Sony, HP Android)
+#define USB_CLASS_MASS_STORAGE      0x08 // Flashdisk, HDD Eksternal
+#define USB_CLASS_HUB               0x09 // USB Hub
+#define USB_CLASS_VIDEO             0x0E // Webcam
+#define USB_CLASS_VENDOR_SPECIFIC   0xFF // Device custom (Kadang HP pake ini)
+
+// USB Endpoint Transfer Types (Attributes)
+#define USB_EP_ATTR_TYPE_CONTROL    0x00
+#define USB_EP_ATTR_TYPE_ISO        0x01 // Isochronous (Sering dipake Audio/Webcam)
+#define USB_EP_ATTR_TYPE_BULK       0x02 // Flashdisk & MTP
+#define USB_EP_ATTR_TYPE_INTERRUPT  0x03 // HID (Mouse/KB/Controller/Tablet)
+
+// HID Subclass & Protocols
+#define HID_SUBCLASS_BOOT           0x01 // Boot Device (Bisa jalan tanpa driver kompleks)
+#define HID_PROTOCOL_NONE           0x00 // Controller, Gamepad, Pen Tablet
+#define HID_PROTOCOL_KEYBOARD       0x01
+#define HID_PROTOCOL_MOUSE          0x02
+
+// Mass Storage Subclass & Protocol
+#define MSC_SUBCLASS_SCSI           0x06
+#define MSC_PROTOCOL_BULK_ONLY      0x50
+
+// Image / MTP / PTP Subclass & Protocol
+#define IMAGE_SUBCLASS_STILL        0x01 // Still Image Capture
+#define IMAGE_PROTOCOL_PTP_MTP      0x01 // PTP atau MTP (Media Transfer)
+
+// ========================
+// EVENT COMPLETION CODES (CCode)
+// ========================
+
+#define CC_SUCCESS                  1
+#define CC_SHORT_PACKET             13
+#define CC_TRANSFER_ERROR           14
+#define CC_BABBLE_DETECTED          3
+#define CC_STALL_ERROR              5
+#define CC_RESOURCE_ERROR           11
+#define CC_BANDWIDTH_ERROR          12
+#define CC_NO_SLOTS_AVAILABLE       15
+#define CC_INVALID_STREAM_TYPE      16
+#define CC_SLOT_NOT_ENABLED         17
+#define CC_ENDPOINT_NOT_ENABLED     18
+#define CC_SHORT_TRANSFER            19
+#define CC_RING_UNDERRUN             20
+#define CC_RING_OVERRUN              21
+#define CC_VF_EVENT_RING_FULL        22
+#define CC_PARAMETER_ERROR           23
+#define CC_BANDWIDTH_OVERRUN         24
+#define CC_CONTEXT_STATE_ERROR       25
+#define CC_NO_PING_RESPONSE          26
+#define CC_EVENT_LOST                27
+#define CC_UNDEFINED_ERROR           28
+
+// ========================
+
+// ==============================
+// TRB CMD TYPE
+// ==============================
+
+#define TRB_TYPE_NOOP                 23
+#define TRB_TYPE_ENABLE_SLOT          9
+#define TRB_TYPE_ADDRESS_DEVICE             11
+#define TRB_TYPE_CONFIGURE_ENDPOINT        12
+#define TRB_TYPE_EVALUATE_CONTEXT             13
+#define TRB_TYPE_DISABLE_SLOT             10
+#define TRB_TYPE_TRANSFER_EVENT         32
+
+// ==============================
+// EVENT TYPE
+// ==============================
+#define EVENT_TYPE_COMMAND_COMPLETION   33
+#define EVENT_TYPE_PORT_STATUS_CHANGE   34
+#define EVENT_TYPE_TRANSFER_EVENT       32  

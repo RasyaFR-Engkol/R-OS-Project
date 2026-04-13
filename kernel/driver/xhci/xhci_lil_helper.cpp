@@ -187,7 +187,7 @@ VOID FindClassAndEndpoint(U32 &offset, U16 &totalLen, U8 *buffer, xHCI::xHCIDriv
         // ==========================================
         // TYPE 5: ENDPOINT DESCRIPTOR
         // ==========================================
-        if (type == 5) { 
+        if (type == USB_DESC_TYPE_ENDPOINT) { 
             U8 addr = buffer[offset + 2];
             U8 attr = buffer[offset + 3];
             U16 pkt = buffer[offset + 4] | (buffer[offset + 5] << 8);
@@ -199,8 +199,8 @@ VOID FindClassAndEndpoint(U32 &offset, U16 &totalLen, U8 *buffer, xHCI::xHCIDriv
 
             switch (currentInterfaceClass) {
                 // --- HID (Mouse/Keyboard) ---
-                case 0x03: {
-                    if (TransferType == 3 && DirIn) {
+                case USB_CLASS_HID: {
+                    if (TransferType == USB_EP_ATTR_TYPE_INTERRUPT && DirIn) {
                         if (pkt < 8) pkt = 8;
 
                         //Write(Printk::Level::LOG_NOTICE, "   >>> FOUND INPUT ENDPOINT! DCI=%u (Addr=0x%x) MPS=%u\n", ((addr & 0xF) * 2) + 1, addr, pkt);
@@ -218,8 +218,8 @@ VOID FindClassAndEndpoint(U32 &offset, U16 &totalLen, U8 *buffer, xHCI::xHCIDriv
                 }
 
                 // --- Mass Storage (Flashdisk) ---
-                case 0x08: {
-                    if (TransferType == 2) { // Bulk
+                case USB_CLASS_MASS_STORAGE: {
+                    if (TransferType == USB_EP_ATTR_TYPE_BULK) { // Bulk
                         U8 DCI = (EpNum * 2) + DirIn;
 
                         if (DirIn) {
@@ -236,8 +236,8 @@ VOID FindClassAndEndpoint(U32 &offset, U16 &totalLen, U8 *buffer, xHCI::xHCIDriv
                 }
 
                 // --- USB HUB (Status Change) ---
-                case 0x09: {
-                    if (TransferType == 3 && DirIn) { // Interrupt IN
+                case USB_CLASS_HUB: {
+                    if (TransferType == USB_EP_ATTR_TYPE_INTERRUPT && DirIn) { // Interrupt IN
                         //Write(Printk::Level::LOG_NOTICE, "   >>> FOUND HUB STATUS ENDPOINT! DCI=%u MPS=%u Interval=%u\n",
                         //      ((addr & 0xF) * 2) + 1, pkt, interval);
 
@@ -256,7 +256,7 @@ VOID FindClassAndEndpoint(U32 &offset, U16 &totalLen, U8 *buffer, xHCI::xHCIDriv
         // ==========================================
         // TYPE 4: INTERFACE DESCRIPTOR
         // ==========================================
-        else if (type == 4) {
+        else if (type == USB_DESC_TYPE_INTERFACE) {
             U8 interfaceClass = buffer[offset + 5];
             U8 interfaceSubClass = buffer[offset + 6];
             U8 interfaceProtocol = buffer[offset + 7];
@@ -265,13 +265,13 @@ VOID FindClassAndEndpoint(U32 &offset, U16 &totalLen, U8 *buffer, xHCI::xHCIDriv
             currentInterfaceClass = interfaceClass;
 
             switch (interfaceClass) {
-                case 0x03: {
+                case USB_CLASS_HID: {
                     //Write(Printk::Level::LOG_NOTICE, "   [DETECT] Found HID Device (Mouse/Keyboard)!\n");
-                    if (interfaceProtocol == 1) {
+                    if (interfaceProtocol == HID_PROTOCOL_KEYBOARD) {
                        // Write(Printk::Level::LOG_NOTICE, "   [DETECT] Found HID Keyboard!\n");
                         DRV.Devs[SlotID].IsKeyboard = TRUE;
                         DRV.Devs[SlotID].IsMouse = FALSE;
-                    } else if (interfaceProtocol == 2) {
+                    } else if (interfaceProtocol == HID_PROTOCOL_MOUSE) {
                        // Write(Printk::Level::LOG_NOTICE, "   [DETECT] Found HID Mouse!\n");
                         DRV.Devs[SlotID].IsMouse = TRUE;
                         DRV.Devs[SlotID].IsKeyboard = FALSE;
@@ -281,7 +281,7 @@ VOID FindClassAndEndpoint(U32 &offset, U16 &totalLen, U8 *buffer, xHCI::xHCIDriv
                     break;
                 }
 
-                case 0x08: {
+                case USB_CLASS_MASS_STORAGE: {
                     if (interfaceSubClass == 0x06 && interfaceProtocol == 0x50) {
                         Write(Printk::Level::LOG_NOTICE, "   [DETECT] Found Mass Storage Device (SCSI/Bulk-Only)!\n");
                         DRV.Devs[SlotID].IsMassStorage = TRUE;
@@ -289,7 +289,7 @@ VOID FindClassAndEndpoint(U32 &offset, U16 &totalLen, U8 *buffer, xHCI::xHCIDriv
                     break;
                 }
 
-                case 0x09: {
+                case USB_CLASS_HUB: {
                     Write(Printk::Level::LOG_NOTICE, "   [DETECT] Found HUB Device!\n");
                     DRV.Devs[SlotID].IsHub = TRUE;
                     break;

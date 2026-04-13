@@ -55,6 +55,9 @@ ABI_C VOID IrqDispatch(U64 irq) {
 ABI_C VOID IrqDispatchWithRawStack(U64 irq, void* raw_sp) {
     U8 vector = 0x20 + (U8)irq;
 
+        // Invoke registered handler for this vector (same as old path)
+    IDT::InvokeInterruptHandler(vector, raw_sp);
+
     // Send EOIs like the original IrqDispatch
     if (ACPI::LAPIC::g_LapicVirtualBase != nullptr) {
         LAPIC_SendEOI((U8)irq);
@@ -62,10 +65,6 @@ ABI_C VOID IrqDispatchWithRawStack(U64 irq, void* raw_sp) {
     if (PIC::G_StillLegacyINTx && irq < 16) {
         PIC::SendEOI((U8)irq);
     }
-
-
-    // Invoke registered handler for this vector (same as old path)
-    IDT::InvokeInterruptHandler(vector, raw_sp);
 
     // NOTE: scheduling from inside the IRQ handler is temporarily disabled
     // to avoid stability issues while the scheduler implementation matures.

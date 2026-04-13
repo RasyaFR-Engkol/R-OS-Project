@@ -231,7 +231,7 @@ namespace xHCI{
                 (unsigned)Event->control);*/
 
             // 33 = Command Completion Event, 34 = Port Status Change Event
-            if(EventType == 33){
+            if(EventType == EVENT_TYPE_COMMAND_COMPLETION){
                 U8  ccode   = (U8)(Event->status >> 24);
                 U8  slotId  = (U8)(Event->control >> 24);
                 U64 cmdTrbPhys = Event->parameter; // Pointer ke Command TRB asli
@@ -242,14 +242,14 @@ namespace xHCI{
                 volatile xHCITRB *OriginalCmd = (volatile xHCITRB*)HHDM_PhysToVirt((UPTR)cleanPhys);
                 U32 CmdType = (OriginalCmd->control >> 10) & 0x3F; // Ambil TRB Type dari Command aslinya
 
-                if(ccode == 1){ // Success
+                if(ccode == CC_SUCCESS){ // Success
                     
                     switch(CmdType) {
-                        case 23: // TRB_TYPE_NOOP
+                        case TRB_TYPE_NOOP: // TRB_TYPE_NOOP
                             Write(Level::LOG_DEBUG, " xHCI: NOOP Command Completed.\n");
                         break;
 
-                        case 9: // TRB_TYPE_ENABLE_SLOT
+                        case TRB_TYPE_ENABLE_SLOT: // TRB_TYPE_ENABLE_SLOT
                             {
                                 U32 targetPort = 0;
 
@@ -287,13 +287,13 @@ namespace xHCI{
                             }
                         break;
 
-                        case 11: // TRB_TYPE_ADDRESS_DEVICE
+                        case TRB_TYPE_ADDRESS_DEVICE: // TRB_TYPE_ADDRESS_DEVICE
                             //Write(Level::LOG_INFO, " xHCI: Address Device Command Completed for Slot %u.\n", slotId);
                             // Baru disini aman panggil GetDescriptor
                             GetDeviceDescriptor(DRV, slotId);
                             break;
 
-                        case 12: // TRB_TYPE_CONFIGURE_ENDPOINT
+                        case TRB_TYPE_CONFIGURE_ENDPOINT: // TRB_TYPE_CONFIGURE_ENDPOINT
                         {
                             //Write(Level::LOG_INFO, " xHCI: Configure Endpoint Completed for Slot %u. Endpoint READY!\n", slotId);
 
@@ -340,49 +340,19 @@ namespace xHCI{
                             }
                         }
                         break;
-                        case 13: //TRB_TYPE_CONFIGURE_ENDPOINT
+                        case TRB_TYPE_EVALUATE_CONTEXT: //TRB_TYPE_EVALUATE_CONTEXT
                             {
-                                Write(Level::LOG_INFO, " xHCI: Configure Endpoint Completed for Slot %u. Endpoint READY!\n", slotId);
-
-                                // 1. Siapkan Buffer untuk terima data Mouse (misal 8 byte cukup untuk Boot Protocol)
-                                // Simpan pointer ini di struct supaya nanti pas interrupt (STAGE_RUNNING) bisa dibaca datanya
-                                PageAlloc::DMAAlloc::DMABuffer* intBuf = PageAlloc::DMAAlloc::AllocateDMABytes(8);
-                                DRV.Devs[slotId].IntBufferPhys = intBuf->PhysAddr;
-                                DRV.Devs[slotId].IntBufferVirt = (U8*)intBuf->VirtAddr; // Pastikan member ini ada
-
-                                // 2. Ambil DCI yang tadi kita simpan pas parsing
-                                U8 targetDCI = DRV.Devs[slotId].ActiveIntDCI;
-                                if(targetDCI == 0) targetDCI = 3; // Fallback kalau lupa simpan (EP 1 IN)
-
-                                // 3. Masukkan Transfer TRB ke Ring Endpoint (bukan Command Ring!)
-                                // "Tolong isi buffer ini kalau ada data dari mouse"
-                                if(DRV.Devs[slotId].IsMouse) {
-                                    Write(Level::LOG_DEBUG, " xHCI: Queueing first Interrupt Transfer for Mouse Slot %u DCI %u\n", slotId, targetDCI);
-                                    QueueInterruptTransfer(DRV, slotId, targetDCI, intBuf->PhysAddr, 8);
-                                } else if(DRV.Devs[slotId].IsKeyboard) {
-                                    Write(Level::LOG_DEBUG, " xHCI: Queueing first Interrupt Transfer for Keyboard Slot %u DCI %u\n", slotId, targetDCI);
-                                    QueueInterruptTransfer(DRV, slotId, targetDCI, intBuf->PhysAddr, 8);
-                                } else {
-                                    Write(Level::LOG_DEBUG, " xHCI: Queueing first Interrupt Transfer for HID Slot %u DCI %u\n", slotId, targetDCI);
-                                }
-
-                                // 4. Update Doorbell! (PENTING)
-                                // Tanpa ini, xHCI gak akan sadar ada TRB baru di Endpoint Ring
-                                DRV.doorbell_regs[slotId] = targetDCI; 
-
-                                // 5. Update State
-                                DRV.Devs[slotId].Stage = xHCIDriver::XHCIDeviceState::STAGE_RUNNING;
-                                
-                                Write(Level::LOG_NOTICE, " xHCI: Slot %u is now RUNNING! Waiting for mouse input...\n", slotId);
+                                //Write(Level::LOG_INFO, " xHCI: Evaluate Context Command Completed for Slot %u.\n", slotId);
+                                // Biasanya ini cuma langkah validasi, kita gak perlu ngapa-ngapain di sini.
                             }
                             break;
 
-                            case 10: // TRB_TYPE_DISABLE_SLOT
-                                Write(Level::LOG_INFO, " xHCI: Disable Slot Command Completed for Slot %u.\n", slotId);
-                                // Slot sudah disabled di hardware. 
-                                // Resource software (memori) udah kita free di event disconnect sebelumnya.
-                                // Jadi di sini sebenernya nothing to do, cuma acknowledge aja.
-                                break;
+                        case TRB_TYPE_DISABLE_SLOT: // TRB_TYPE_DISABLE_SLOT
+                            Write(Level::LOG_INFO, " xHCI: Disable Slot Command Completed for Slot %u.\n", slotId);
+                            // Slot sudah disabled di hardware. 
+                            // Resource software (memori) udah kita free di event disconnect sebelumnya.
+                            // Jadi di sini sebenernya nothing to do, cuma acknowledge aja.
+                            break;
 
                         default:
                             Write(Level::LOG_DEBUG, " xHCI: Unknown Command %u Completed for Slot %u.\n", CmdType, slotId);
@@ -393,7 +363,7 @@ namespace xHCI{
                     // Handle Error (ccode != 1)
                     Write(Level::LOG_ERR, " xHCI: Command Type %u Failed! Code: %u Slot: %u\n", CmdType, ccode, slotId);
                 }
-            } else if (EventType == 32){ // Transfer Event
+            } else if (EventType == TRB_TYPE_TRANSFER_EVENT){ // Transfer Event
                 U8 CCode = (U8)(Event->status >> 24);
                 U8 SlotID = (U8)(Event->control >> 24);
                 U8 dciSource = CalcDCISource(Event);
@@ -402,7 +372,7 @@ namespace xHCI{
                 /*Serial::Printf( " [DEBUG] ISR Read Stage %d for Slot %u (Addr: 0x%016llx)\n", 
                     (int)devState.Stage, (unsigned)SlotID, (unsigned long long)&devState.Stage);*/
 
-                if(CCode == 1 || CCode == 13){ // Success
+                if(CCode == CC_SUCCESS || CCode == CC_SHORT_PACKET){ // Success
                     if(devState.IsMassStorage){
                          if(HandleIfBulkStorage(devState, Event, CCode, dciSource)){
                              // Event sudah dihandle MSC, jangan lanjut ke switch stage/HID
@@ -522,14 +492,14 @@ namespace xHCI{
                             break;
                     }
                 } 
-                else if (CCode == 3) { // BABBLE ERROR
+                else if (CCode == CC_BABBLE_DETECTED) { // BABBLE ERROR
                     U32 Residual = (Event->status & 0x00FFFFFF);
                     Write(Level::LOG_ERR, " [BABBLE DEBUG] Slot %u. Residual: %u\n", SlotID, Residual);
                     
                     // --- TAMBAHAN DEBUGGING: DUMP ISI BUFFER ---
                     if(devState.IntBufferVirt) {
                         U8* b = devState.IntBufferVirt;
-                        Write(Level::LOG_ERR, " [BABBLE DUMP] Data yang sempat masuk buffer (Hex):\n");
+                        Write(Level::LOG_ERR, " [BABBLE DUMP] The data that actually arrived (Hex):\n");
                         // Print 16 byte pertama aja buat intip
                         Serial::Printf("   RAW: %02X %02X %02X %02X %02X %02X %02X %02X | %02X %02X %02X %02X ...\n",
                             b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
@@ -537,7 +507,7 @@ namespace xHCI{
                             
                         // Analisis Singkat
                         if(devState.IsMouse) {
-                            Serial::Printf("   [ANALISIS MOUSE] Buttons: 0x%02X, X: %d, Y: %d, Wheel?: %d\n",
+                            Serial::Printf("   [MOUSE ANALYSIS] Buttons: 0x%02X, X: %d, Y: %d, Wheel?: %d\n",
                                 b[0], (I8)b[1], (I8)b[2], (I8)b[3]);
                         }
                     }
@@ -551,13 +521,12 @@ namespace xHCI{
                     Write(Level::LOG_WARNING, " [RECOVERY] Force Re-Queueing with 64 bytes...\n");
                     QueueInterruptTransfer(DRV, SlotID, dci, devState.IntBufferPhys, 64);
                 }
-            } else if (EventType == 34) {
+            } else if (EventType == EVENT_TYPE_PORT_STATUS_CHANGE) {
                 U8 PortID = (U8)((Event->parameter >> 24) & 0xFF);
-
-                //Write(Level::LOG_NOTICE, " xHCI: Port Status Change detected on Port %d\n", PortID);
 
                 HandlePortStatusChange(DRV, PortID);
             } else {
+                // Event lain yang belum kita handle khusus, cukup print aja dulu
                 Write(Level::LOG_INFO, " Controller %u - Event Type %u (param=0x%016llx status=0x%08x ctl=0x%08x)\n",
                     (unsigned)Controller_ID, (unsigned)EventType,
                     (unsigned long long)Event->parameter,
@@ -577,9 +546,9 @@ namespace xHCI{
         }
 
         if (!didWork) {
-             DRV.SpuriousInterruptCount++;
-             // Print cuma kalo sering banget (biar gak nyampah) atau buat debug awal
-             Printk::Write(Printk::Level::LOG_DEBUG, " xHCI: Spurious Interrupt (No events found)\n");
+            DRV.SpuriousInterruptCount++;
+            // Print cuma kalo sering banget (biar gak nyampah) atau buat debug awal
+            Printk::Write(Printk::Level::LOG_DEBUG, " xHCI: Spurious Interrupt (No events found)\n");
         } else {
              // Kalau didWork = true, berarti Interrupt Valid. Jangan print "Spurious".
         }
@@ -606,93 +575,6 @@ namespace xHCI{
         //Serial::Printf( " Interrupt received from controller %u \n", (unsigned)Controller_ID);
         xHCIDriver &DRV = g_xhci_controllers[Controller_ID];
 
-
-        /** 
-        U32 Status = DRV.op_regs->usb_sts;
-        if(!(Status & (1u << 3))){
-            // Spurious interrupt: provide extra debug info to help diagnose IRQ races
-            volatile xHCIInterrupterRegs *IR0 = &DRV.rt_regs->interrupter_regs[0];
-            U32 iman = IR0->iman;
-            Write(Level::LOG_INFO, " Spurious interrupt on controller %u\n", (unsigned)Controller_ID);
-            Write(Level::LOG_INFO, " usb_sts=0x%08x IMAN=0x%08x ERDP=0x%016llx dequeue_idx=%u ring_size=%u\n",
-                  (unsigned)Status,
-                  (unsigned)iman,
-                  (unsigned long long)IR0->erdp,
-                  (unsigned)DRV.EventRingDequeueIndex,
-                  (unsigned)DRV.EventRingSize);
-
-            // If there are event TRBs present, dump the next couple for inspection
-            if (DRV.VEventRing && DRV.EventRingSize) {
-                U32 idx = DRV.EventRingDequeueIndex;
-                for (int i = 0; i < 2; ++i) {
-                    volatile xHCITRB *e = &DRV.VEventRing[idx];
-                    Write(Level::LOG_INFO, " EventTRB[%u] param=0x%016llx status=0x%08x ctl=0x%08x\n",
-                          (unsigned)idx,
-                          (unsigned long long)e->parameter,
-                          (unsigned)e->status,
-                          (unsigned)e->control);
-                    idx++;
-                    if (idx == DRV.EventRingSize) idx = 0;
-                }
-            }
-
-            // Increment spurious counter and, if no events are pending, attempt to clear
-            // the interrupter pending bit to avoid IRQ storms.
-            DRV.SpuriousInterruptCount++;
-
-            // If IMAN.IP is set but Event Ring appears empty (next TRBs are zero), clear IP.
-            // This is low-risk: it's an ack of an empty interrupt.
-            if ( (iman & (1u << 1)) ) {
-                bool ring_empty = true;
-                if (DRV.VEventRing && DRV.EventRingSize) {
-                    U32 idx2 = DRV.EventRingDequeueIndex;
-                    // Check a few TRBs to see if non-zero
-                    for (int i = 0; i < 4; ++i) {
-                        volatile xHCITRB *et = &DRV.VEventRing[idx2];
-                        if (et->control || et->status || et->parameter) { ring_empty = false; break; }
-                        idx2++;
-                        if (idx2 == DRV.EventRingSize) idx2 = 0;
-                    }
-                }
-
-                if (ring_empty) {
-                    // Re-arm the Event Ring Dequeue Pointer (ERDP) like the normal path does.
-                    U64 newDequeuePhys = DRV.DMA_EventRing->PhysAddr + ((U64)DRV.EventRingDequeueIndex * sizeof(xHCITRB));
-                    IR0->erdp = newDequeuePhys | (1u << 3);
-                    asm volatile ("mfence" ::: "memory");
-
-                    // Clear IP and ensure IE stays enabled (write 1 to IP, 1 to IE)
-                    IR0->iman = (1u << 0) | (1u << 1);
-                    U32 iman_after = IR0->iman;
-                    Write(Level::LOG_INFO, " Re-armed ERDP and attempted clear IMAN.IP (before=0x%08x after=0x%08x)\n", (unsigned)iman, (unsigned)iman_after);
-
-                    // If IMAN did not clear, try toggle IE fallback: disable IE then re-enable.
-                    if (iman_after == iman) {
-                        Write(Level::LOG_WARNING, " Controller %u - IMAN.IP did not clear, attempting IE toggle fallback (bus %u:%u:%u vector=0x%02x)\n",
-                              (unsigned)Controller_ID, (unsigned)DRV.bus, (unsigned)DRV.dev, (unsigned)DRV.func, (unsigned)DRV.IntVector);
-                        // Clear IE (write IMAN with IE=0, IP left alone)
-                        IR0->iman = (0u << 0) | (0u << 1);
-                        asm volatile ("mfence" ::: "memory");
-                        // Re-enable IE and IP clear bit in case controller accepted it now
-                        IR0->iman = (1u << 0) | (1u << 1);
-                        asm volatile ("mfence" ::: "memory");
-                        U32 iman_after2 = IR0->iman;
-                        Write(Level::LOG_INFO, " IE toggle result IMAN before=0x%08x after_toggle=0x%08x\n", (unsigned)iman, (unsigned)iman_after2);
-                    }
-                }
-            }
-
-            // Warn if spurious interrupts accumulate
-            const U32 SPURIOUS_WARN_THRESHOLD = 50;
-            if (DRV.SpuriousInterruptCount && (DRV.SpuriousInterruptCount % SPURIOUS_WARN_THRESHOLD) == 0) {
-                Write(Level::LOG_WARNING, " Controller %u - Spurious interrupts seen: %u\n", (unsigned)Controller_ID, (unsigned)DRV.SpuriousInterruptCount);
-            }
-
-            return;
-        }
-        ProcessPendingEvents(DRV, Controller_ID);
-    } */
-
         ProcessPendingEvents(DRV, Controller_ID);
     }
 
@@ -700,5 +582,45 @@ namespace xHCI{
     void xHCI_InterruptHandler_C0(void *context) {
         (void)context;
         xHCI_HandleInterrupt(0);
+    }
+
+    void xHCI_InterruptHandler_C0_TopHalf(void *context) {
+        xHCIDriver &DRV = g_xhci_controllers[0];
+        volatile xHCIInterrupterRegs *IR0 = &DRV.rt_regs->interrupter_regs[0];
+
+        // 1. Cek apakah interrupt ini beneran dari xHCI? (EINT bit)
+        if (!(DRV.op_regs->usb_sts & (1u << 3))) {
+            return; // Spurious, abaikan.
+        }
+
+        // 2. ACK interupsi di hardware xHCI agar sinyal IRQ turun
+        DRV.op_regs->usb_sts = (1u << 3); // Clear EINT
+        IR0->iman = (1u << 0);            // Clear IP (Interrupt Pending)
+
+        // 3. MASK (Matikan sementara) interupsi xHCI ini supaya nggak nembak lagi 
+        // sebelum Bottom Half kita selesai mikir.
+        IR0->iman &= ~(1u << 1);          // Disable IE (Interrupt Enable)
+
+        // 4. JADWALKAN BOTTOM HALF!
+        Scheduler::Signal(&g_xhci_controllers[0].InterruptSignal);
+    }
+
+    void xHCI_Worker_Thread(void* arg) {
+        U32 Controller_ID = (U32)(UPTR)arg;
+        xHCIDriver &DRV = g_xhci_controllers[Controller_ID];
+        volatile xHCIInterrupterRegs *IR0 = &DRV.rt_regs->interrupter_regs[0];
+
+        while (true) {
+            // 1. Tidur sampai Top Half membangunkan kita
+            Scheduler::WaitForSignal(&DRV.InterruptSignal);
+
+            // 2. Oke kita bangun! Sekarang proses event ring xHCI dengan tenang.
+            // Di sini kamu BEBAS pakai SpinDelayMs, AllocateDMABytes, Printk, dll!
+            ProcessPendingEvents(DRV, Controller_ID);
+
+            // 3. Kerjaan selesai. NYALAKAN LAGI interupsi xHCI agar hardware 
+            // bisa ngasih tahu kalau ada event baru.
+            IR0->iman |= (1u << 1); // Enable IE
+        }
     }
 }
