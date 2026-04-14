@@ -602,7 +602,7 @@ namespace xHCI{
         IR0->iman &= ~(1u << 1);          // Disable IE (Interrupt Enable)
 
         // 4. JADWALKAN BOTTOM HALF!
-        Scheduler::Signal(&g_xhci_controllers[0].InterruptSignal);
+        //Scheduler::Signal(&g_xhci_controllers[0].InterruptSignal);
     }
 
     void xHCI_Worker_Thread(void* arg) {
@@ -612,7 +612,7 @@ namespace xHCI{
 
         while (true) {
             // 1. Tidur sampai Top Half membangunkan kita
-            Scheduler::WaitForSignal(&DRV.InterruptSignal);
+            //Scheduler::WaitForSignal(&DRV.InterruptSignal);
 
             // 2. Oke kita bangun! Sekarang proses event ring xHCI dengan tenang.
             // Di sini kamu BEBAS pakai SpinDelayMs, AllocateDMABytes, Printk, dll!

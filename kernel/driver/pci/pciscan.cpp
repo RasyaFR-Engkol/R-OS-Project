@@ -108,7 +108,6 @@ namespace PCI{
                 if (ClassCode == 0x04 && SubClass == 0x03) {
                     Printk::Write(Printk::Level::LOG_INFO, "Intel HDA Controller Found in %d:%d:%d!\n",
                         (int)bus, (int)device, (int)function);
-                    IntelHDA::GlobalController.Initialize(bus, device, function);
                 }
 
                 if (VendorID == 0x1AF4 && DeviceID == 0x1050) {

@@ -486,7 +486,7 @@ namespace Tasking {
         Arch::ASM::Sti(); // Pastikan interrupt nyala
         
         // Panggil Scheduler
-        Arch::ASM::Interrupt(CONFIG_TIMER_HEXA_GLOBAL); 
+        ACPI::Timer::Arm(1);
     }
     
     // Return a copy of the currently running Task struct.

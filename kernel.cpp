@@ -125,7 +125,7 @@ ABI_C NORET void KernelMain()
 
             Tasking::CreateUserTask("init", ELFImage);
 
-            Tasking::Task *InitTask = Tasking::GetTaskPID(1);
+            Tasking::Task *InitTask = Tasking::GetTaskPID(2);
             if(InitTask){
                 InitTask->IsCriticalProc = TRUE; // Tandai init sebagai critical process
                 InitTask->IsEssentialSystem = TRUE; // Tandai init sebagai essential system
@@ -147,7 +147,7 @@ ABI_C NORET void KernelMain()
     // producers are serviced. This keeps IRQ handlers minimal (they only
     // enqueue) while the main loop does I/O and console rendering.
     for (;;) {
-        Arch::Time::SleepTicks(1); // Sleep to reduce CPU usage; adjust as needed for responsiveness
+        Tasking::SchedulerYield(); // Yield to scheduler to run other tasks (like init)
     }
     
 }
