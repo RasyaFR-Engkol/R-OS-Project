@@ -373,8 +373,6 @@ namespace VFSManager{
             return nullptr;
         }
 
-        Printk::Write(Printk::LOG_INFO, "VFS: Instance Memory Fs: %p.\n", Fs);
-
         U64 InodeNum = Fs->Lookup(Rel);
 
         if(InodeNum == 0 && (Flags & O_CREAT)) {
@@ -420,7 +418,6 @@ namespace VFSManager{
         file->Flags = Flags;
         file->Node = VFSNode; // Hubungkan ke Inode
         file->RefCount = 1;
-        Serial::Printf("VFS NOTE: WE OPEN FILE '%s' WITH INODE ID %llu ON FS %p WITH NODE MEMORY %p\n", path, InodeNum, Fs, VFSNode);
 
         if (Flags & O_TRUNC) {
             Fs->Truncate(file, 0); // O_TRUNC dikerjain kuli
@@ -549,16 +546,12 @@ namespace VFSManager{
             if (file->Node->RefCount <= 0) {
                 // Kalau udah gak ada file yang nunjuk ke Inode ini, hapus dari cache & RAM
                 RemoveCachedInode(fs, file->Node->InodeID); 
-                Serial::Printf("CHECK1.\n");
                 delete file->Node; 
-                Serial::Printf("CHECK2.\n");
             }
         } 
 
         // Tersangka 2 lu juga aman, karena File RefCount udah 0 di cek nomor 1
-        Serial::Printf("CHECK3.\n");
         delete file; 
-        Serial::Printf("CHECK4.\n");
     }
 
     U32 Read(File* file, U8* buffer, U32 size){

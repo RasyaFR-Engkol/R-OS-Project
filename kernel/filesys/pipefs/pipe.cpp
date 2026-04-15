@@ -217,11 +217,8 @@ VOID PipeFileSystem::Close(File *file){
 
     // Hapus memory-nya! (Sesuai keinginan lu, auto-delete pas tutup total)
     if (shouldDelete) {
-        Serial::Printf("WILL DELETING PIPE: %s.\n", file->FileName);
-        Serial::Printf("CHECKPIPE1.\n");
         RemoveNamedPipeEntry(buf);
         delete buf; 
-        Serial::Printf("CHECKPIPE2.\n");
     }
 }
 

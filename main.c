@@ -213,8 +213,8 @@ ABI_C void (*__init_array_start[])();
 ABI_C void (*__init_array_end[])();
 
 // 2. Deklarasi 'kernel_main' C++
-ABI_C void KernelMain();
-ABI_C VOID IdleLoop();
+ABI_C void KernelMain(VOID*);
+ABI_C VOID IdleLoop(VOID*);
 
 // 3. Fungsi 'lem' 64-bit
 // Argumen 'mb_info_ptr' ini datang dari register 'rdi'
@@ -282,7 +282,7 @@ ABI_C void KernelEntryPoint(uint64_t mb_info_ptr) {
     // UPDATE: DO NOT CALL KERNELMAIN. kita akan buat kthread kernelmain.
     Tasking::CreateIdleTask(IdleLoop);
 
-    Tasking::CreateKThread(KernelMain, "KernelMainThread");
+    Tasking::CreateKThread(KernelMain, 0, "KernelMainThread");
 
     // Timer sudah jalan disini, harusnya kita bisa start scheduler sekarang juga.
     Printk::Write(Printk::Level::LOG_INFO, "Starting Task Scheduler...\n");

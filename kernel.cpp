@@ -46,13 +46,14 @@
 // Debug stress test entry (implemented in tools/debug/ext2_stress.cpp)
 ABI_C int main_debug_ext2_stress(int argc, char** argv);
 
-ABI_C VOID IdleLoop(){
+ABI_C VOID IdleLoop(VOID*){
     while(TRUE){
+        Printk::Write(Printk::Level::LOG_DEBUG, "IdleLoop: CPU is idle, halting until next interrupt...\n");
         Arch::ASM::HaltCPU();
     }
 }
 
-ABI_C NORET void KernelMain()
+ABI_C NORET void KernelMain(VOID*)
 { 
     Arch::ASM::EnableSSE();
     Arch::ASM::FPU_Init();

@@ -12,6 +12,7 @@
 #include "../../dev/devicemanager.hpp"
 #include <../firmware/acpi/acpi.hpp>
 #include <../firmware/acpi/driver/timer/timer.hpp>
+#include <../kernel/irq/threaded_irq.hpp>
 
 // Taruh di atas sebelum SetupAddressDevice dipanggil
 static void SpinDelayMs(U64 ms) {
@@ -584,43 +585,34 @@ namespace xHCI{
         xHCI_HandleInterrupt(0);
     }
 
-    void xHCI_InterruptHandler_C0_TopHalf(void *context) {
+    VOID xHCI_InterruptHandler_C0_TopHalf(void *context) {
         xHCIDriver &DRV = g_xhci_controllers[0];
         volatile xHCIInterrupterRegs *IR0 = &DRV.rt_regs->interrupter_regs[0];
 
-        // 1. Cek apakah interrupt ini beneran dari xHCI? (EINT bit)
         if (!(DRV.op_regs->usb_sts & (1u << 3))) {
-            return; // Spurious, abaikan.
+            return;
         }
 
-        // 2. ACK interupsi di hardware xHCI agar sinyal IRQ turun
-        DRV.op_regs->usb_sts = (1u << 3); // Clear EINT
-        IR0->iman = (1u << 0);            // Clear IP (Interrupt Pending)
+        // ACK & MASK
+        DRV.op_regs->usb_sts = (1u << 3); 
+        IR0->iman = (1u << 0);            
+        IR0->iman &= ~(1u << 1);          
 
-        // 3. MASK (Matikan sementara) interupsi xHCI ini supaya nggak nembak lagi 
-        // sebelum Bottom Half kita selesai mikir.
-        IR0->iman &= ~(1u << 1);          // Disable IE (Interrupt Enable)
-
-        // 4. JADWALKAN BOTTOM HALF!
-        //Scheduler::Signal(&g_xhci_controllers[0].InterruptSignal);
+        // JADWALKAN BOTTOM HALF!
+        // Panggil API maut dari layer abstraksi lu:
+        WakeUpThreadedIrq(DRV.IntVector); 
     }
 
     void xHCI_Worker_Thread(void* arg) {
         U32 Controller_ID = (U32)(UPTR)arg;
         xHCIDriver &DRV = g_xhci_controllers[Controller_ID];
         volatile xHCIInterrupterRegs *IR0 = &DRV.rt_regs->interrupter_regs[0];
+        // One-shot bottom-half: called by the threaded-IRQ worker wrapper.
+        // Process any pending events once, re-enable IE, then return so the
+        // wrapper can sleep again and be re-awoken on the next interrupt.
+        ProcessPendingEvents(DRV, Controller_ID);
 
-        while (true) {
-            // 1. Tidur sampai Top Half membangunkan kita
-            //Scheduler::WaitForSignal(&DRV.InterruptSignal);
-
-            // 2. Oke kita bangun! Sekarang proses event ring xHCI dengan tenang.
-            // Di sini kamu BEBAS pakai SpinDelayMs, AllocateDMABytes, Printk, dll!
-            ProcessPendingEvents(DRV, Controller_ID);
-
-            // 3. Kerjaan selesai. NYALAKAN LAGI interupsi xHCI agar hardware 
-            // bisa ngasih tahu kalau ada event baru.
-            IR0->iman |= (1u << 1); // Enable IE
-        }
+        // Re-enable interrupt delivery for future events.
+        IR0->iman |= (1u << 1); // Enable IE
     }
 }

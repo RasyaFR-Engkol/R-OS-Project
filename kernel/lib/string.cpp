@@ -598,5 +598,34 @@ void SplitPath(const char* fullPath, char* outParent, char* outName) {
     }
 }
 
+// Extract only the filename portion from a full path. Writes at most
+// outSize-1 bytes and NUL-terminates `outName` if outSize>0.
+void Basename(const char* fullPath, char* outName, unsigned long long outSize) {
+    if (!outName || outSize == 0) return;
+    if (!fullPath) {
+        outName[0] = '\0';
+        return;
+    }
+
+    // Find last '/'
+    const char* last = nullptr;
+    const char* p = fullPath;
+    while (*p) {
+        if (*p == '/') last = p;
+        ++p;
+    }
+
+    const char* name = last ? (last + 1) : fullPath;
+
+    // Copy up to outSize-1 bytes
+    unsigned long long maxcpy = (outSize > 0) ? (outSize - 1) : 0;
+    unsigned long long i = 0;
+    while (i < maxcpy && name[i] != '\0') {
+        outName[i] = name[i];
+        ++i;
+    }
+    outName[i] = '\0';
+}
+
 } // namespace String
 

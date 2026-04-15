@@ -216,6 +216,17 @@ VOID Sys_Execve(CpuContext_T *CPUContext) {
     }
     // Ensure null termination
     KernelPath[255] = '\0';
+    // Set process task name to basename of the executable (e.g. "compositor.elf")
+    {
+        char base[64];
+        String::Memset(base, 0, sizeof(base));
+        String::Basename(KernelPath, base, sizeof(base));
+        // Truncate and copy into Task name (leave room for NUL)
+        if (Current) {
+            String::Strncpy(Current->Name, base, sizeof(Current->Name) - 1);
+            Current->Name[sizeof(Current->Name) - 1] = '\0';
+        }
+    }
     
     // 1. Open File
     File* F = VFS_Open(KernelPath, O_RDONLY);

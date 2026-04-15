@@ -10,6 +10,7 @@
 #include "../../dev/devicemanager.hpp"
 #include "../../filesys/devfs/devfs.hpp"
 #include "../../filesys/vfs/vfs.hpp"
+#include <../kernel/irq/threaded_irq.hpp>
 
 namespace xHCI {
     using namespace Printk;
@@ -61,7 +62,7 @@ namespace xHCI {
             U8 msix_offset = PCI::FindCapability(Bus, Device, Function, 0x11); 
             if (msix_offset != 0) {
                 //Write(Level::LOG_INFO, " xHCI: MSI-X Capability found at 0x%x. Attempting Enable...\n", msix_offset);
-                U8 vec = MSI::EnableMSIX(Bus, Device, Function, msix_offset, xHCI_InterruptHandler_C0);
+                U8 vec = MSI::EnableMSIX(Bus, Device, Function, msix_offset, xHCI_InterruptHandler_C0_TopHalf);
                 
                 if (vec != 0) {
                     DRV.IntVector = vec;
@@ -80,7 +81,7 @@ namespace xHCI {
             U8 msi_offset = PCI::FindCapability(Bus, Device, Function, 0x05); 
             if (msi_offset != 0) {
                 //Write(Level::LOG_INFO, " xHCI: MSI Capability found at 0x%x. Attempting Enable...\n", msi_offset);
-                U8 vec = MSI::EnableMSI(Bus, Device, Function, msi_offset, xHCI_InterruptHandler_C0);
+                U8 vec = MSI::EnableMSI(Bus, Device, Function, msi_offset, xHCI_InterruptHandler_C0_TopHalf);
                 
                 if (vec != 0) {
                     DRV.IntVector = vec;
@@ -102,6 +103,14 @@ namespace xHCI {
         }
 
         interrupt_done:
+
+        // Kita udah set interrupt. saatnya daftarin threaded IRQ handler-nya
+        if (DRV.IntVector != 0) {
+            RequestThreadedIrq(DRV.IntVector, xHCI_InterruptHandler_C0_TopHalf, xHCI_Worker_Thread, (VOID*)(UPTR)g_xhci_controller_count);
+            Write(Level::LOG_INFO, " Registered threaded IRQ handler for vector 0x%x\n", DRV.IntVector);
+        } else {
+            Write(Level::LOG_ERR, " Failed to register any interrupt handler for this controller!\n");
+        }
 
         g_xhci_controller_count++;
 

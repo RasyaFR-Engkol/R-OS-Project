@@ -49,5 +49,8 @@ namespace String{
 	// Convenience variadic wrapper around VSPrint (like sprintf but bounded).
 	int SPrint(char* buffer, unsigned long long bufsize, const char* fmt, ...);
 	void SplitPath(const char* fullPath, char* outParent, char* outName);
+	// Extract the basename (filename portion) from a path into outName.
+	// outSize is the size of outName buffer in bytes (including null).
+	void Basename(const char* fullPath, char* outName, unsigned long long outSize);
 	inline U32 Min(U32 a, U32 b) { return (a < b) ? a : b; }
 }

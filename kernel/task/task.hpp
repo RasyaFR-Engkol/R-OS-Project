@@ -142,6 +142,8 @@ namespace Tasking{
 
         U64 CountMinorFault = 0;
         U64 CountMajorFault = 0;
+
+        bool IsQueued = false; // Apakah task ini sedang berada di run queue atau sleep queue?
     };
 
     struct RunQueue{
@@ -165,7 +167,7 @@ namespace Tasking{
     extern VOLATILE BOOL ForceReschedule;
 
     VOID SchedulerStart();
-    VOID CreateKThread(VOID (*Entry)(VOID), const char* taskname);
+    Task* CreateKThread(VOID (*Entry)(VOID *Context), VOID *ContextArg, const char* taskname);
     VOID CreateUserTask(const CHAR8 *Name, VOID *ELFImage);
     VOID SchedulerTick(void *context);
     U64 GetTimeSliceForPriority(U8 Priority);
@@ -192,7 +194,7 @@ namespace Tasking{
     VOID SetTaskSignal(U64 id, U32 signal, BOOL isGroup);
     VOID UnlinkFromProcGrp(Task *T);
     VOID UnblockTaskWithIOBoost(Task *T);
-    VOID CreateIdleTask(VOID (*Entry)(VOID));
+    VOID CreateIdleTask(VOID (*Entry)(VOID* ctx));
     VOID SleepOn(WaitQueue &queue);
     VOID WakeUp(WaitQueue &queue);
     VOID WakeUpAll(WaitQueue &queue);
@@ -201,8 +203,6 @@ namespace Tasking{
     VOID AddToSleepList(Task *t);
     VOID SettingAppPerm(Task *t, U32 Perm);
 
-
-    Task *ConstructTask(VOID (*Entry)(VOID), const char *taskname);
     VOID ReapDTask();
     VOID Sleep(U64 ms);
     VOID Debug_DumpProcessState();

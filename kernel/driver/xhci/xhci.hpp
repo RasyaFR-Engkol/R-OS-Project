@@ -5,6 +5,7 @@
 #include "xhci_regs.hpp" // Uncomment this when we need it
 #include <mm.hpp>
 #include "../hid/usb_hid_key.hpp"
+#include <task.hpp>
 
 namespace xHCI{
     #define XHCI_MAX_CONTROLLERS 4
@@ -148,6 +149,8 @@ namespace xHCI{
         U8 EnableSlotQueue[256];
         VOLATILE U8 EnableSlotQueueHead = 0;
         VOLATILE U8 EnableSlotQueueTail = 0;
+
+        Tasking::WaitQueue InterruptSignal = {};
     };
 
     // TODO: Define global xHCI controller array
@@ -172,6 +175,9 @@ namespace xHCI{
     VOID QueueBulkTransfer(xHCIDriver &DRV, U8 SlotID, U8 DCI, U64 BufferPhys, U32 Length);
     VOID CheckPendingMSC(xHCIDriver &DRV);
     VOID SetBootProtocol(xHCIDriver &DRV, U8 SlotID);
+
+    VOID xHCI_InterruptHandler_C0_TopHalf(void *context);
+    void xHCI_Worker_Thread(void* arg);
 }
 
 // non namespace such as helper. no need namespace caus it only used internally

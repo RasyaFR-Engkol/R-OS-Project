@@ -26,16 +26,7 @@ static inline void LAPIC_SendEOI(U8 irq) {
 
 ABI_C VOID IrqDispatch(U64 irq) {
     U8 vector = 0x20 + (U8)irq; // hardware IRQ vectors base at 0x20
-    
-    // Panggil handler yang terdaftar
-    IDT::InvokeInterruptHandler(vector);
-    
-    // ATURAN: send EOI to LAPIC when LAPIC is initialized. If the system
-    // is still routing legacy INTx through the 8259 PIC, also send EOI to
-    // the PIC for IRQs that originate from it (IRQ 0..15). This avoids the
-    // problem where a LAPIC-delivered interrupt (e.g. LAPIC timer) arrives
-    // while PIC is still marked active and would otherwise only get a
-    // PIC EOI instead of a LAPIC EOI.
+
     if (ACPI::LAPIC::g_LapicVirtualBase != nullptr) {
         //erial::Printf("Notice: Sending EOI to LAPIC for IRQ %u .\n", irq);
         LAPIC_SendEOI((U8)irq);
@@ -48,6 +39,16 @@ ABI_C VOID IrqDispatch(U64 irq) {
         //erial::Printf("Notice: Sending EOI to PIC for IRQ %u .\n", irq);
         PIC::SendEOI((U8)irq);
     }
+    
+    // Panggil handler yang terdaftar
+    IDT::InvokeInterruptHandler(vector);
+    
+    // ATURAN: send EOI to LAPIC when LAPIC is initialized. If the system
+    // is still routing legacy INTx through the 8259 PIC, also send EOI to
+    // the PIC for IRQs that originate from it (IRQ 0..15). This avoids the
+    // problem where a LAPIC-delivered interrupt (e.g. LAPIC timer) arrives
+    // while PIC is still marked active and would otherwise only get a
+    // PIC EOI instead of a LAPIC EOI.
 }
 
 // New wrapper called from irq stub: receives raw stack pointer where the
@@ -57,6 +58,7 @@ ABI_C VOID IrqDispatchWithRawStack(U64 irq, void* raw_sp) {
 
     // Send EOIs like the original IrqDispatch
     if (ACPI::LAPIC::g_LapicVirtualBase != nullptr) {
+        //Serial::Printf("Notice: Sending EOI to LAPIC for IRQ %u .\n", irq);
         LAPIC_SendEOI((U8)irq);
     }
     if (PIC::G_StillLegacyINTx && irq < 16) {
@@ -65,14 +67,6 @@ ABI_C VOID IrqDispatchWithRawStack(U64 irq, void* raw_sp) {
 
     // Invoke registered handler for this vector (same as old path)
     IDT::InvokeInterruptHandler(vector, raw_sp);
-
-    // NOTE: scheduling from inside the IRQ handler is temporarily disabled
-    // to avoid stability issues while the scheduler implementation matures.
-    // We preserved the context to allow an external scheduler to run later.
-    // Increment a simple tick counter for diagnostics.
-    static volatile U64 irq_ticks = 0;
-    (void)__atomic_fetch_add(&irq_ticks, 1ULL, __ATOMIC_RELAXED);
-    (void)irq_ticks;
 
     return;
 }

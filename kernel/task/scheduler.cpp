@@ -39,9 +39,11 @@ namespace Tasking {
             return;
         }
 
-        if (t->NextRunQueue != nullptr || t->PrevRunQueue != nullptr) {
+        if(t->IsQueued){
             return;
         }
+
+        t->IsQueued = true; 
 
         if(t->Priority >= MLFQ_LEVELS) t->Priority = MLFQ_LEVELS - 1;
 
@@ -74,9 +76,11 @@ namespace Tasking {
             return;
         }
 
-        if (t->NextRunQueue != nullptr || t->PrevRunQueue != nullptr) {
+        if(t->IsQueued){
             return;
         }
+
+        t->IsQueued = true;
 
         if(t->Priority >= MLFQ_LEVELS) t->Priority = MLFQ_LEVELS - 1;
 
@@ -128,21 +132,43 @@ namespace Tasking {
         Rq.Count--;
         t->NextRunQueue = nullptr;
         t->PrevRunQueue = nullptr;
+        t->IsQueued = false;
 
         return t;
     }
 
     VOID AddToSleepList(Task *t) {
+        if (!t) return;
+
         LOCKRFLAGS rflags = Arch::SaveAndDisableInterrupts();
-        
+
+        // Sanity: if SleepTick is not set, nothing to add.
+        if (t->SleepTick == 0) {
+            Arch::RestoreInterrupts(rflags);
+            return;
+        }
+
+        // Defensive: prevent duplicate insertion. Scan wheel buckets
+        // under interrupt-disabled to ensure we don't create cycles.
+        for (U64 i = 0; i < TIMER_WHEEL_SIZE; ++i) {
+            Task *it = SleepWheel[i];
+            while (it) {
+                if (it == t) {
+                    Arch::RestoreInterrupts(rflags);
+                    return; // already in sleep wheel
+                }
+                it = it->NextSleepQueue;
+            }
+        }
+
         // Hitung index bucket (Hashing sederhana)
         U64 index = t->SleepTick % TIMER_WHEEL_SIZE;
-        
+
         // Insert di Head (O(1))
         t->NextSleepQueue = SleepWheel[index];
         SleepWheel[index] = t;
         TotalSleepingTasks = TotalSleepingTasks + 1;
-        
+
         Arch::RestoreInterrupts(rflags);
     }
 
@@ -292,7 +318,7 @@ namespace Tasking {
     }
 
     // Variable Global untuk tracking booster
-    static U64 GlobalTickCounter = 0;
+    UNUSED__ static U64 GlobalTickCounter = 0;
     VOID DestroyTask(Task *task);
 
     VOID SchedulerTick(void *context){
@@ -382,6 +408,7 @@ namespace Tasking {
         CheckSleepingTasks();
 
         // 5. Global Boost (Anti Starvation)
+        
         GlobalTickCounter += DeltaTicks;
         if(GlobalTickCounter >= PRIORITY_BOOST_INTERVAL){
             GlobalTickCounter = 0;
@@ -400,7 +427,7 @@ namespace Tasking {
                         Current->TimeUsedInPriority = 0;
                         Current->TimeSlice = GetTimeSliceForPriority(0);
 
-                        InternalEnqueue(Current);
+                        InternalEnqueue(Current); // Sekarang pasti berhasil masuk Prio 0!
 
                         Current = NextTask;
                     }
@@ -412,7 +439,7 @@ namespace Tasking {
                     PriorityBitmap &= ~(1 << i);
                 }
             }
-        }
+        } 
 
         // 6. Ambil Task Baru (Dequeue)
         Task *NextTask = Dequeue();
@@ -518,12 +545,6 @@ namespace Tasking {
             return;
         }
 
-        if (Current->pid == 101 || Current->pid == 102) { 
-            Printk::Write(Printk::Level::LOG_DEBUG, 
-                "SNIPER: PID %d BLOCKED (SleepOn) at Queue Addr %p\n", 
-                Current->pid, &Queue);
-        }
-
         Current->State = TaskState::BLOCKED;
 
         Current->NextWaitTask = nullptr;
@@ -595,6 +616,8 @@ namespace Tasking {
                 case TaskState::ZOMBIE:  stateStr = "ZOMBIE"; break;
                 case TaskState::TERMINATED: stateStr = "TERMINATED"; break;
             }
+
+            Printk::Write(Printk::LOG_INFO, "TASK NAME: %s.\n", t->Name);
 
             Printk::Write(Printk::Level::LOG_INFO, 
                 "PID: %d | State: %s | Prio: %d | Slice: %d\n",
