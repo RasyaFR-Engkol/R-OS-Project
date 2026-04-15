@@ -140,8 +140,6 @@ namespace Tasking {
 		t->LastBoostEpoch = GlobalBoostEpoch;
 
 		Enqueue(t);
-
-		SchedulerYield(); // Optional: langsung preempt ke task ini kalau lebih penting dari yang sekarang
     }
 
 	short CheckFileDesc(int fd, short events){

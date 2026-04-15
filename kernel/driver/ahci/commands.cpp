@@ -64,56 +64,17 @@ namespace AHCI {
 
     static BOOL IssueCommand(AHCIDriver &Drv, U32 PortNum, VAL32 Slot){
         volatile HBA_PORT *Port = &Drv.regs->ports[PortNum];
-        /** 
+
         Tasking::Task *CurrentTask = Tasking::GetCurrentTaskPtr();
-
-        // 1. Setup Data untuk ISR
-        // Kita set ini SEBELUM start command untuk menghindari Race Condition
-        // dimana interrupt muncul sebelum kita sempat set WaitingTask.
-        if(CurrentTask != nullptr){
+        if(CurrentTask){
             Drv.WaitingTask[PortNum] = CurrentTask;
-            // Jangan set BLOCKED disini dulu, karena kita belum mau yield
         }
-
-        LOCKRFLAGS issue_flags = Arch::SaveAndDisableInterrupts();
-    
-        Port->is = 0xFFFFFFFF;    // Clear status lama
-
-        // simpen task saat ini
-        Tasking::Task *CurTask = Tasking::GetCurrentTaskPtr();
-        if(CurTask){
-            Drv.WaitingTask[PortNum] = CurTask;
-            //Printk::Write(Printk::Level::LOG_DEBUG, "CMD CTX: WaitingTask Addr: 0x%p\n", (void*)&Drv.WaitingTask[PortNum]);
-            CurTask->State = Tasking::TaskState::BLOCKED; 
-            //Printk::Write(Printk::Level::LOG_DEBUG, " AHCI Port %u: Blocking task PID %llu for command slot %u\n",
-              //  (unsigned)PortNum, CurTask->pid, (unsigned)Slot);
-        } */
 
         Port->ci = (1u << Slot);  // START COMMAND
-        /** 
-        if(CurTask)
-            Tasking::SchedulerYield(); // Yield ke task lain
         
-        Arch::RestoreInterrupts(issue_flags);
-        */
-        // habis ini disini bakal ada interrupt masuk dari MSI
+        CurrentTask->State = Tasking::TaskState::BLOCKED;
+        Tasking::SchedulerYield(); // Yield ke scheduler, nanti bakal dibangunin di interrupt handler
 
-        // 2. Loop Waiting (Sleep Loop Pattern)
-        // Kita loop sampai CI clear ATAU Timeout.
-        // Ini menangani spurious wakeup dan delay hardware.
-        
-        const U64 start = PIT::ticks;
-        const U64 TIMEOUT_TICKS = 500; // 5 detik
-
-        while(Port->ci & (1u << Slot)) {
-            // Cek Timeout
-            if ((PIT::ticks - start) > TIMEOUT_TICKS) {
-                break;
-            }
-        }
-
-        // 3. Bersihkan Pointer (Housekeeping)
-        // Penting! Biar ISR berikutnya gak coba bangunin task yang udah jalan/mati
         Drv.WaitingTask[PortNum] = nullptr;
 
         // 4. Validasi Hasil (Sama seperti kodemu)

@@ -39,6 +39,8 @@ namespace AHCI {
 
         //Printk::Write(Printk::Level::LOG_INFO, " Controller %u - Ports with IRQ: 0x%08x\n",
         //    (unsigned)Controller_ID, (unsigned)PortsWithIRQ);
+        U32 interetsting_global = 0;
+        U32 actv_port_num = 0;
 
         U32 handled_ports_mask = 0;
         for(U32 PortNum = 0; PortNum < 32; PortNum++){
@@ -61,30 +63,26 @@ namespace AHCI {
             }
 
             port->is = interesting;
-
-            //Printk::Write(Printk::Level::LOG_DEBUG, "IRQ CTX: WaitingTask Addr: 0x%p\n", (void*)&Driver.WaitingTask[PortNum]);
-            Tasking::Task *waiting_task = Driver.WaitingTask[PortNum];
-
-            //Printk::Write(Printk::Level::LOG_INFO, " AHCI IRQ: Controller %u Port %u - Interesting IS=0x%08x\n",
-            //    (unsigned)Controller_ID, (unsigned)PortNum, (unsigned)interesting);
-
-            if (waiting_task != nullptr) {
-                //Serial::Printf("AHCI IRQ: waking task PID %llu for controller %u port %u\n",
-                //    waiting_task->pid, (unsigned)Controller_ID, (unsigned)PortNum);
-                Tasking::UnblockTaskWithIOBoost(waiting_task);
-                Driver.WaitingTask[PortNum] = nullptr;
-
-                Tasking::ForceReschedule = TRUE;
-            } else {
-                //Printk::Write(Printk::Level::LOG_INFO, " AHCI IRQ: No waiting task for controller %u port %u\n",
-                //    (unsigned)Controller_ID, (unsigned)PortNum);
-            }
+            interetsting_global |= interesting;
+            actv_port_num = PortNum;
 
             //Printk::Write(Printk::Level::LOG_INFO, " Controller %u Port %u - Port Status: 0x%08x\n",
             //    (unsigned)Controller_ID, (unsigned)PortNum, (unsigned)interesting);
         }
 
         if (handled_ports_mask) regs->is = handled_ports_mask;
+
+        if(interetsting_global & (1 << 0)){
+            Tasking::Task* waiting = Driver.WaitingTask[actv_port_num];
+    
+            if (waiting) {
+                // BANGUNIN! Masukkan lagi ke daftar READY di scheduler
+                Tasking::UnblockTaskWithIOBoost(waiting);
+                
+                // Bersihkan biar nggak dibangunin dua kali
+                Driver.WaitingTask[actv_port_num] = nullptr;
+            }
+        }
     }
 
 }

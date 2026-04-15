@@ -298,47 +298,10 @@ namespace FB {
     }
 
     void PutPixel(U32 x, U32 y, U32 rgb){
-        Arch::Spinlock::SpinlockGuard GuardMePLSS(g_fb_lock);
         PutPixel_NoLock(x, y, rgb);
     }
 
-    // Faster rectangle fill using per-scanline stores.
-    void Rect(U32 x, U32 y, U32 w, U32 h, U32 rgb){
-        if (!state.initialized) return;
-        if (x >= state.width || y >= state.height) return;
-        if (x + w > state.width) w = state.width - x;
-        if (y + h > state.height) h = state.height - y;
-
-        // Write into backbuffer/frontbuffer via PutPixel to centralize color packing.
-        for (U32 yy = 0; yy < h; ++yy) {
-            for (U32 xx = 0; xx < w; ++xx) {
-                PutPixel(x + xx, y + yy, rgb);
-            }
-        }
-
-        // After drawing into backbuffer, flush the region to frontbuffer
-        Flush(x, y, w, h);
-    }
-
-    // No-flush rectangle fill; writes only to the current drawing surface (backbuffer if present)
-    void RectNoFlush(U32 x, U32 y, U32 w, U32 h, U32 rgb){
-        if (!state.initialized) return;
-        if (x >= state.width || y >= state.height) return;
-        if (x + w > state.width) w = state.width - x;
-        if (y + h > state.height) h = state.height - y;
-
-        for (U32 yy = 0; yy < h; ++yy) {
-            for (U32 xx = 0; xx < w; ++xx) {
-                // PutPixel already prefers backbuffer when present, and writes
-                // directly to frontbuffer if not. We simply skip flushing here.
-                U32 px = x + xx;
-                U32 py = y + yy;
-                PutPixel(px, py, rgb);
-            }
-        }
-    }
-
-    // Copy a rectangle from backbuffer to framebuffer (frontbuffer).
+        // Copy a rectangle from backbuffer to framebuffer (frontbuffer).
     static void Flush_NoLock(U32 x, U32 y, U32 w, U32 h) {
         if (!state.initialized) return;
         if (!state.backbuffer) return; // nothing to flush
@@ -355,6 +318,46 @@ namespace FB {
 
         if (g_hw_flush_cb) {
             g_hw_flush_cb(x, y, w, h);
+        }
+    }
+
+    // Faster rectangle fill using per-scanline stores.
+    void Rect(U32 x, U32 y, U32 w, U32 h, U32 rgb){
+        if (!state.initialized) return;
+        if (x >= state.width || y >= state.height) return;
+        if (x + w > state.width) w = state.width - x;
+        if (y + h > state.height) h = state.height - y;
+
+        Arch::Spinlock::SpinlockGuard GuardMePLSS(g_fb_lock);
+
+        // Write into backbuffer/frontbuffer via PutPixel to centralize color packing.
+        for (U32 yy = 0; yy < h; ++yy) {
+            for (U32 xx = 0; xx < w; ++xx) {
+                PutPixel(x + xx, y + yy, rgb);
+            }
+        }
+
+        // After drawing into backbuffer, flush the region to frontbuffer
+        Flush_NoLock(x, y, w, h);
+    }
+
+    // No-flush rectangle fill; writes only to the current drawing surface (backbuffer if present)
+    void RectNoFlush(U32 x, U32 y, U32 w, U32 h, U32 rgb){
+        if (!state.initialized) return;
+        if (x >= state.width || y >= state.height) return;
+        if (x + w > state.width) w = state.width - x;
+        if (y + h > state.height) h = state.height - y;
+
+        Arch::Spinlock::SpinlockGuard GuardMePLSS(g_fb_lock);
+
+        for (U32 yy = 0; yy < h; ++yy) {
+            for (U32 xx = 0; xx < w; ++xx) {
+                // PutPixel already prefers backbuffer when present, and writes
+                // directly to frontbuffer if not. We simply skip flushing here.
+                U32 px = x + xx;
+                U32 py = y + yy;
+                PutPixel(px, py, rgb);
+            }
         }
     }
 
