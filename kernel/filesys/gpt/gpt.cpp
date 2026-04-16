@@ -127,34 +127,6 @@ namespace GPTFS{
                 // Buat wrapper IBlockDevice kecil untuk mewakili partisi ini
                 // sehingga bisa didaftarkan ke DeviceManager dan DevFS sebagai
                 // node /dev/<parent><n> (contoh: sda1, sda2).
-                class PartitionBlockDevice : public IBlockDevice {
-                    public:
-                        Partition *m_Part;
-                        CHAR8 m_Name[32];
-                        PartitionBlockDevice(Partition *p, const CHAR8* parentName, U32 partIndex){
-                            m_Part = p;
-                            // Build name: parentName + decimal(partIndex)
-                            String::Strcpy(m_Name, (const char*)parentName);
-
-                            int len = String::Strlen(m_Name);
-                            if(len > 0 && m_Name[len-1] >= '0' && m_Name[len-1] <= '9') {
-                                String::Strcat(m_Name, "p");
-                            }
-                            
-                            CHAR8 numbuf[16];
-                            // partIndex is 1-based here
-                            String::Utoa((unsigned long long)partIndex, (char*)numbuf, 10);
-                            String::Strcat(m_Name, (const char*)numbuf);
-                        }
-                        virtual ~PartitionBlockDevice() {}
-                        virtual BOOL ReadSectors(U64 LBA, U32 Count, PageAlloc::DMAAlloc::DMABuffer **BufferOut) override {
-                            return m_Part->ReadSectors(LBA, Count, BufferOut);
-                        }
-                        virtual BOOL WriteSectors(U64 LBA, U32 Count, PageAlloc::DMAAlloc::DMABuffer *Buffer) override {
-                            return m_Part->WriteSectors(LBA, Count, Buffer);
-                        }
-                        virtual const CHAR8* GetDeviceName() override { return m_Name; }
-                };
 
                 // PartitionCount is the sequential index for non-empty partitions
                 // (1-based). Use it as the partition number suffix.
