@@ -187,10 +187,8 @@ namespace GPTFS{
     BOOL InitFs(){
         PartitionManager::InitializePM();
 
-        // TODO: More ideal design harusnya gini
-        // Filesystem::InitializeKnownFS();
         EXT2::InitializeEXT2Driver();
-            // Register filesystem drivers BEFORE initializing GPT/partitions
+        // Register filesystem drivers BEFORE initializing GPT/partitions
         VFSManager::RegisterFileSystem("FAT32", []()->FileSystem* { return new FAT32FileSystem(); });
 
         //Printk::Write(Printk::Level::LOG_NOTICE, " GPT: Starting initialization...\n");

@@ -68,11 +68,11 @@ namespace AHCI {
         Tasking::Task *CurrentTask = Tasking::GetCurrentTaskPtr();
         if(CurrentTask){
             Drv.WaitingTask[PortNum] = CurrentTask;
+            CurrentTask->State = Tasking::TaskState::BLOCKED;
         }
 
         Port->ci = (1u << Slot);  // START COMMAND
-        
-        CurrentTask->State = Tasking::TaskState::BLOCKED;
+
         Tasking::SchedulerYield(); // Yield ke scheduler, nanti bakal dibangunin di interrupt handler
 
         Drv.WaitingTask[PortNum] = nullptr;

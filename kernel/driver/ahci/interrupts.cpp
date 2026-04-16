@@ -24,65 +24,33 @@ namespace AHCI {
         AHCI_InterruptHandler_C3
     };
 
-    VOID HandleInterrupt(VAL32 Controller_ID){
-        //Printk::Write(Printk::Level::LOG_CRIT, " Interrupt received from controller %u\n", (unsigned)Controller_ID);
-
+    VOID HandleInterrupt(VAL32 Controller_ID) {
         AHCIDriver &Driver = g_ahci_controllers[Controller_ID];
         volatile HBA_MEM* regs = Driver.regs;
+        U32 PortsWithIRQ = regs->is;
 
-        U32 PortsWithIRQ = regs->is; // Interrupt Status Register
+        if (PortsWithIRQ == 0) return;
 
-        if(PortsWithIRQ == 0){
-            Printk::Write(Printk::Level::LOG_DEBUG, " Spurious interrupt on controller %u\n", (unsigned)Controller_ID);
-            return;
-        }
-
-        //Printk::Write(Printk::Level::LOG_INFO, " Controller %u - Ports with IRQ: 0x%08x\n",
-        //    (unsigned)Controller_ID, (unsigned)PortsWithIRQ);
-        U32 interetsting_global = 0;
-        U32 actv_port_num = 0;
-
-        U32 handled_ports_mask = 0;
-        for(U32 PortNum = 0; PortNum < 32; PortNum++){
-            if(!(PortsWithIRQ & (1 << PortNum))) continue;
+        for (U32 PortNum = 0; PortNum < 32; PortNum++) {
+            if (!(PortsWithIRQ & (1 << PortNum))) continue;
+            
             volatile HBA_PORT *port = &regs->ports[PortNum];
+            U32 interesting = port->is & port->ie;
 
-            U32 PortStatus = port->is;
-            handled_ports_mask |= (1u << PortNum);
-
-            if (Driver.port_device[PortNum] == DeviceType::NONE) {
-                if (PortStatus) port->is = PortStatus; // acknowledge
-                continue;
-            }
-
-            U32 enabled_mask = port->ie;
-            U32 interesting = PortStatus & enabled_mask;
-            if (!interesting) {
-                if (PortStatus) port->is = PortStatus;
-                continue;
-            }
-
+            // Acknowledge interrupt UNTUK PORT INI
             port->is = interesting;
-            interetsting_global |= interesting;
-            actv_port_num = PortNum;
 
-            //Printk::Write(Printk::Level::LOG_INFO, " Controller %u Port %u - Port Status: 0x%08x\n",
-            //    (unsigned)Controller_ID, (unsigned)PortNum, (unsigned)interesting);
-        }
-
-        if (handled_ports_mask) regs->is = handled_ports_mask;
-
-        if(interetsting_global & (1 << 0)){
-            Tasking::Task* waiting = Driver.WaitingTask[actv_port_num];
-    
-            if (waiting) {
-                // BANGUNIN! Masukkan lagi ke daftar READY di scheduler
-                Tasking::UnblockTaskWithIOBoost(waiting);
-                
-                // Bersihkan biar nggak dibangunin dua kali
-                Driver.WaitingTask[actv_port_num] = nullptr;
+            // Cek apakah transfer selesai (D2H FIS atau PIO Setup)
+            if (interesting & ((1 << 0) | (1 << 1))) {
+                Tasking::Task* waiting = Driver.WaitingTask[PortNum];
+                if (waiting) {
+                    Tasking::UnblockTaskWithIOBoost(waiting);
+                    Driver.WaitingTask[PortNum] = nullptr; 
+                }
             }
         }
-    }
 
+        // Acknowledge global status
+        regs->is = PortsWithIRQ;
+    }
 }

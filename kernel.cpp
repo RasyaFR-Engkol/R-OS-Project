@@ -48,8 +48,7 @@ ABI_C int main_debug_ext2_stress(int argc, char** argv);
 
 ABI_C VOID IdleLoop(VOID*){
     while(TRUE){
-        Printk::Write(Printk::Level::LOG_DEBUG, "IdleLoop: CPU is idle, halting until next interrupt...\n");
-        Arch::ASM::HaltCPU();
+        Tasking::SchedulerYield(); // Yield to scheduler to run other tasks (like init) while idle
     }
 }
 
