@@ -45,9 +45,20 @@
 #include "kernel/driver/e1000/e1000.hpp"
 #include "kernel/filesys/pipefs/pipe.hpp"
 #include <../kernel/mod/module_manager.hpp>
+#include <export_sym.hpp>
 
-// Debug stress test entry (implemented in tools/debug/ext2_stress.cpp)
-ABI_C int main_debug_ext2_stress(int argc, char** argv);
+VOID DumpExportedSymbol(){
+    Printk::Write(Printk::Level::LOG_INFO, "Dumping exported symbols:\n");
+
+    KernelSymbol *current = __ksymtab_start;
+    while (current < __ksymtab_end){
+        // Tampilkan nama dan alamatnya
+        // Contoh Output: Printk is at 0xffffffff80205abc
+        Printk::Write(Printk::Level::LOG_INFO, "Symbol: %s is at 0x%x\n", current->Name, current->Value);
+        current++;
+    }
+    Printk::Write(Printk::Level::LOG_INFO, "Finished dumping exported symbols.\n");
+}
 
 ABI_C VOID IdleLoop(VOID*){
     while(TRUE){
@@ -99,6 +110,8 @@ ABI_C NORET void KernelMain(VOID*)
         Printk::Write(Printk::Level::LOG_ERR, "KernelMain: Failed to mount partition sda2.\n"); 
     }
 
+    DumpExportedSymbol();
+
     // TES DriverExported
     File *f = VFSManager::Open("/driver/mm.ko", O_RDONLY);
     if(f){
@@ -108,7 +121,7 @@ ABI_C NORET void KernelMain(VOID*)
             U64 ReadBytes = VFSManager::Read(f, (U8*)FileBuffer, FileSize);
             if(ReadBytes == FileSize){
                 Printk::Write(Printk::Level::LOG_INFO, "KernelMain: Successfully read mm.ko into memory, size %llu bytes.\n", (unsigned long long)ReadBytes);
-                int status = ModuleManager::LoadModuleAndRun(FileBuffer);
+                int status = ModuleManager::LoadModuleAndRun(FileBuffer, 0);
                 if(status == 0){
                     Printk::Write(Printk::Level::LOG_INFO, "KernelMain: mm.ko loaded and initialized successfully.\n");
                 } else {

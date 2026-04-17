@@ -6,6 +6,7 @@
 #include <stdint.h>
 #define PRINTK_MODULE_NAME "KMOD"
 #include <logging.hpp>
+#include <../kernel/mod/module_manager.hpp>
 
 namespace {
 // Pindahkan base ke area Higher Half khusus Kernel Modules (contoh: -1GB dari top)
@@ -118,72 +119,130 @@ static bool WriteModule64(U64 virtAddr, U64 value) {
     return true;
 }
 
+static bool ReadModuleString(U64 VirtAddr, CHAR8* outBuf, SIZE_T maxLen){
+    if (!G_TargetPML4 || !outBuf || maxLen == 0) return false;
+
+    for (SIZE_T i = 0; i < maxLen; i++) {
+        if (!EnsureCachedPage(VirtAddr + i, G_ReadCache)) return false;
+        SIZE_T offset = (SIZE_T)((VirtAddr + i) - G_ReadCache.pageBase);
+        outBuf[i] = reinterpret_cast<char*>(G_ReadCache.pagePtr)[offset];
+        
+        // Berhenti kalau ketemu null-terminator
+        if (outBuf[i] == '\0') return true;
+    }
+    outBuf[maxLen - 1] = '\0'; // Safety ujungnya
+    return true;
+}
+
 static bool ProcessDynamicSection(const ELF::ELF64_PHDR *phDynamic,
                                   U64 targetBase,
                                   U64 elfBase) {
-    if (!phDynamic) return true;
+    if (!phDynamic){
+        Printk::Write(Printk::Level::LOG_WARNING, "KMOD: No PT_DYNAMIC segment found, skipping relocation\n");
+        return true; 
+    }
 
     U64 dynBase = RelocateAddress(phDynamic->P_Vaddr, targetBase, elfBase);
     U64 dynSize = phDynamic->P_Filesz;
     U64 offset = 0;
-    U64 relaAddr = 0;
-    U64 relaSize = 0;
-    U64 relaEnt = sizeof(Elf64Rela);
+    
+    // Variabel buat dua jenis relokasi
+    U64 relaAddr = 0, relaSize = 0, relaEnt = sizeof(Elf64Rela);
+    U64 jmpRelAddr = 0, jmpRelSize = 0; // Tambahan buat PLT (Function Relocations)
+    U64 symtabAddr = 0, strtabAddr = 0;
 
+    // 1. Parsing PT_DYNAMIC buat narik semua alamat penting
     while (offset + sizeof(Elf64Dyn) <= dynSize) {
         U64 entryVA = dynBase + offset;
         U64 tagRaw, valRaw;
-        if (!ReadModule64(entryVA, &tagRaw) || !ReadModule64(entryVA + 8, &valRaw)) {
-            Printk::Write(Printk::Level::LOG_ERR,
-                          "KMOD: Failed to read PT_DYNAMIC entry at 0x%016llx\n", entryVA);
-            return false;
-        }
+        if (!ReadModule64(entryVA, &tagRaw) || !ReadModule64(entryVA + 8, &valRaw)) return false;
 
         int64_t tag = (int64_t)tagRaw;
         if (tag == DT_NULL) break;
+        
         if (tag == DT_RELA) {
             relaAddr = RelocateAddress(valRaw, targetBase, elfBase);
         } else if (tag == DT_RELASZ) {
             relaSize = valRaw;
         } else if (tag == DT_RELAENT) {
             relaEnt = valRaw ? valRaw : sizeof(Elf64Rela);
+        } else if (tag == DT_JMPREL) {
+            jmpRelAddr = RelocateAddress(valRaw, targetBase, elfBase); // Tabel Relokasi Fungsi
+        } else if (tag == DT_PLTRELSZ) {
+            jmpRelSize = valRaw; // Ukuran Tabel Relokasi Fungsi
+        } else if (tag == DT_SYMTAB) {
+            symtabAddr = RelocateAddress(valRaw, targetBase, elfBase);
+        } else if (tag == DT_STRTAB) {
+            strtabAddr = RelocateAddress(valRaw, targetBase, elfBase);
         }
 
         offset += sizeof(Elf64Dyn);
     }
 
-    if (!relaAddr || !relaSize || !relaEnt) return true;
+    // 2. Bikin Helper/Lambda buat nge-apply relokasi biar kodenya nggak ngulang
+    auto ApplyRelocations = [&](U64 rAddr, U64 rSize, const char* tableName) -> bool {
+        if (!rAddr || !rSize) return true; // Skip kalau tabelnya kosong
+        
+        U64 count = rSize / relaEnt;
+        Printk::Write(Printk::Level::LOG_INFO, "KMOD: Applying %llu %s entries\n", count, tableName);
 
-    U64 count = relaSize / relaEnt;
-    Printk::Write(Printk::Level::LOG_INFO, "KMOD: Applying %llu RELA entries\n", count);
+        for (U64 i = 0; i < count; ++i) {
+            U64 entryVA = rAddr + i * relaEnt;
+            U64 rOffset, rInfo, rAddendRaw;
+            if (!ReadModule64(entryVA + 0, &rOffset) ||
+                !ReadModule64(entryVA + 8, &rInfo) ||
+                !ReadModule64(entryVA + 16, &rAddendRaw)) {
+                return false;
+            }
 
-    for (U64 i = 0; i < count; ++i) {
-        U64 entryVA = relaAddr + i * relaEnt;
-        U64 rOffset, rInfo, rAddendRaw;
-        if (!ReadModule64(entryVA + 0, &rOffset) ||
-            !ReadModule64(entryVA + 8, &rInfo) ||
-            !ReadModule64(entryVA + 16, &rAddendRaw)) {
-            Printk::Write(Printk::Level::LOG_ERR, "KMOD: Failed to read RELA at 0x%016llx\n", entryVA);
-            return false;
+            U32 type = ELF64_R_TYPE(rInfo);
+            U32 symIdx = ELF64_R_SYM(rInfo); 
+            U64 targetVA = RelocateAddress(rOffset, targetBase, elfBase);
+            int64_t addend = (int64_t)rAddendRaw;
+            
+            U64 symValue = 0;
+
+            // Resolve External Symbol dari Kernel
+            if (symIdx != 0 && symtabAddr != 0 && strtabAddr != 0) {
+                U64 symEntryVA = symtabAddr + (symIdx * sizeof(ELF::Elf64_Sym));
+                U64 st_name_info;
+                ReadModule64(symEntryVA, &st_name_info); 
+                U32 st_name = (U32)(st_name_info & 0xFFFFFFFF);
+                
+                char symName[128];
+                if (ReadModuleString(strtabAddr + st_name, symName, sizeof(symName))) {
+                    symValue = ModuleManager::FindKernelSymbol(symName);
+                    
+                    if (symValue == 0) {
+                        Printk::Write(Printk::Level::LOG_ERR, "KMOD: UNDEFINED SYMBOL: %s\n", symName);
+                        return false; 
+                    } else {
+                        Printk::Write(Printk::Level::LOG_INFO, "KMOD: Resolved '%s' to 0x%016llx\n", symName, symValue);
+                    }
+                }
+            }
+
+            U64 newValue = 0;
+
+            if (type == R_X86_64_RELATIVE) {
+                newValue = targetBase + (U64)addend;
+            } 
+            else if (type == R_X86_64_64 || type == R_X86_64_GLOB_DAT || type == R_X86_64_JUMP_SLOT) {
+                newValue = symValue + (U64)addend; 
+            } 
+            else {
+                Printk::Write(Printk::Level::LOG_WARNING, "KMOD: Unhandled RELA type %u\n", type);
+                continue;
+            }
+
+            if (!WriteModule64(targetVA, newValue)) return false;
         }
+        return true;
+    };
 
-        U32 type = ELF64_R_TYPE(rInfo);
-        U64 targetVA = RelocateAddress(rOffset, targetBase, elfBase);
-        int64_t addend = (int64_t)rAddendRaw;
-        U64 newValue = 0;
-
-        if (type == R_X86_64_RELATIVE || type == R_X86_64_64) {
-            newValue = targetBase + (U64)addend;
-        } else {
-            Printk::Write(Printk::Level::LOG_WARNING, "KMOD: Unhandled RELA type %u\n", type);
-            continue;
-        }
-
-        if (!WriteModule64(targetVA, newValue)) {
-            Printk::Write(Printk::Level::LOG_ERR, "KMOD: Failed to write reloc target 0x%016llx\n", targetVA);
-            return false;
-        }
-    }
+    // 3. Eksekusi Relokasinya! (Data dulu, baru Fungsi)
+    if (!ApplyRelocations(relaAddr, relaSize, "RELA (Data)")) return false;
+    if (!ApplyRelocations(jmpRelAddr, jmpRelSize, "JMPREL (PLT)")) return false;
 
     return true;
 }

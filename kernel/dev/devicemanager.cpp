@@ -1,3 +1,4 @@
+#include "export_sym.hpp"
 #include "string.hpp"
 #include <rosval.h>
 #define PRINTK_MODULE_NAME "DevMGR"
@@ -85,7 +86,14 @@ namespace DeviceManager{
     }
 }
 
-// buat namespace baru khusus untuk Device Object Manager
-namespace DeviceManager{
-    
+ABI_C {
+    BOOL DMRegisterBlockDevice(IBlockDevice *Device){
+        return DeviceManager::RegisterBlockDevice(Device);
+    }
+    EXPORT_SYMBOL(DMRegisterBlockDevice)
+
+    BOOL DMRegisterCharDevice(ICharDevice *Device){
+        return DeviceManager::RegisterCharDevice(Device);
+    }
+    EXPORT_SYMBOL(DMRegisterCharDevice)
 }

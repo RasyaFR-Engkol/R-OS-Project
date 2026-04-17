@@ -2,5 +2,6 @@
 #include <rosval.h>
 
 namespace ModuleManager {
-    int LoadModuleAndRun(VOID* FileBuffer);
+    int LoadModuleAndRun(VOID* FileBuffer, VOID *PrivateData);
+    UPTR FindKernelSymbol(const char* name);
 }

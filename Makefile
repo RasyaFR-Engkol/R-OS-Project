@@ -82,41 +82,59 @@ ASM_OBJS := $(patsubst ./%, $(BUILD_DIR)/%, $(ASM_SRCS:.asm=.o))
 # FOR KO MODULES (MULTI-FILE FOLDER STRUCTURE)
 # ================================================
 
-# Kita definisikan manual supaya bersih dari -fno-pic kernel
-KMOD_CXXFLAGS_BASE := -g -std=gnu++20 -ffreestanding -fno-exceptions -fno-rtti -m64 -Os \
-				 -Wall -Wextra -IInclude -mno-red-zone -mgeneral-regs-only \
-				 -D__ROS_KERNEL__ -fPIC -mcmodel=large
+# Bikin sesimpel mungkin untuk kernel module
+KMOD_CXXFLAGS_BASE := -g -std=gnu++20 -ffreestanding -fno-exceptions -fno-rtti -m64 -Os	 \
+                      -Wall -Wextra -IInclude -mno-red-zone -fPIC -mcmodel=small
 
-# LDFLAGS: Tambahkan -pie atau -shared secara eksplisit ke linker
-KMOD_LDFLAGS := -Wl,-shared -Wl,-pie -nostdlib -z max-page-size=0x1000 \
-				-Wl,-e,module_init -Wl,--fatal-warnings
+# PAKSA JADI SHARED OBJECT
+# PAKSA JADI SHARED OBJECT (VERSI LD LANGSUNG)
+KMOD_LDFLAGS := -shared -z max-page-size=0x1000 \
+                --unresolved-symbols=ignore-all \
+                -e module_init --fatal-warnings
 
-# 1. Cari semua sub-folder di dalam exported_driver/ (misal: exported_driver/xhci/)
+# --- 2. DETEKSI MODULE FOLDER (Banyak File = 1 Modul) ---
 KMOD_DIRS := $(wildcard exported_driver/*/)
-# Ekstrak nama foldernya saja (misal: xhci)
 KMOD_NAMES := $(patsubst exported_driver/%/,%,$(KMOD_DIRS))
 
-# 2. Tentukan target akhir: build/exported_driver/xhci.ko, build/exported_driver/e1000.ko
-KMOD_TARGETS := $(patsubst %, $(BUILD_DIR)/exported_driver/%.ko, $(KMOD_NAMES))
+# HAPUS KMOD_FOLDER_TARGETS di sini, karena namanya sekarang dinamis!
+# Kita akan inject namanya langsung dari dalam Macro.
+KMOD_FOLDER_TARGETS := 
 
-# 3. MACRO: Bikin aturan kompilasi dinamis untuk setiap folder driver
+# --- 3. MACRO UNTUK LINKING MODULE FOLDER (DENGAN AUTO-RENAME) ---
 define MAKE_DRIVER_RULE
-# Ambil semua file .cpp dan .c di folder driver ini (misal di exported_driver/$1/)
-$1_SRCS := $$(shell find exported_driver/$1 -type f -name "*.cpp" -o -name "*.c")
 
-# Bikin list target .o yang akan ditaruh di build/exported_driver/$1/
+# A. Ambil semua file .cpp di folder ini untuk di-scan
+$1_SRCS := $$(shell find exported_driver/$1 -type f -name "*.cpp" -o -type f -name "*.c")
+
+# B. SCANNER: Ekstrak nilai define dari file .cpp di dalam foldernya
+#    grep nyari baris "#define PCI_CLASS", awk ngambil kolom ke-3 (nilainya)
+$1_CLASS    := $$(shell grep -sh "^\s*\#define PCI_CLASS" $$($1_SRCS) | awk '{print $$$$3}' | head -n 1 | tr -d '\r')
+$1_SUBCLASS := $$(shell grep -sh "^\s*\#define PCI_SUBCLASS" $$($1_SRCS) | awk '{print $$$$3}' | head -n 1 | tr -d '\r')
+$1_PROGIF   := $$(shell grep -sh "^\s*\#define PCI_PROGIF" $$($1_SRCS) | awk '{print $$$$3}' | head -n 1 | tr -d '\r')
+
+# C. LOGIKA PENAMAAN: Kalau ketiga define ketemu, gabungkan. Kalau nggak, pakai nama foldernya.
+$1_TARGET_NAME := $$(if $$(and $$($1_CLASS),$$($1_SUBCLASS),$$($1_PROGIF)),pci_$$($1_CLASS)_$$($1_SUBCLASS)_$$($1_PROGIF),$1)
+
+# D. Bikin target .o
 $1_OBJS := $$(patsubst exported_driver/%.cpp, $$(BUILD_DIR)/exported_driver/%.o, $$(filter %.cpp, $$($1_SRCS))) \
-		   $$(patsubst exported_driver/%.c, $$(BUILD_DIR)/exported_driver/%.o, $$(filter %.c, $$($1_SRCS)))
+           $$(patsubst exported_driver/%.c, $$(BUILD_DIR)/exported_driver/%.o, $$(filter %.c, $$($1_SRCS)))
 
-# Rule Linker: Gabungkan SEMUA .o di folder ini jadi SATU .ko (misal: $1.ko)
-$$(BUILD_DIR)/exported_driver/$1.ko: $$($1_OBJS)
+# E. Rule Linker pakai NAMA DINAMIS ($1_TARGET_NAME)
+$$(BUILD_DIR)/exported_driver/$$($1_TARGET_NAME).ko: $$($1_OBJS)
 	@mkdir -p $$(dir $$@)
 	@echo "  [KMOD-LD]  $$@ (Linked from $1/)"
-	@$$(CXX) $$(KMOD_CXXFLAGS_BASE) -shared $$^ -o $$@ $$(KMOD_LDFLAGS)
+	@$$(LD) $$(KMOD_LDFLAGS) $$^ -o $$@
+
+# F. Masukkan nama hasil akhir ke list target supaya di-build oleh 'all'
+KMOD_FOLDER_TARGETS += $$(BUILD_DIR)/exported_driver/$$($1_TARGET_NAME).ko
+
 endef
 
-# 4. Eksekusi Macro di atas untuk semua nama driver yang terdeteksi
+# Eksekusi Macro di atas untuk semua folder driver
 $(foreach drv, $(KMOD_NAMES), $(eval $(call MAKE_DRIVER_RULE,$(drv))))
+
+# Gabungkan target standalone (kalau ada) dan target folder dinamis
+KMOD_TARGETS := $(KMOD_STANDALONE_TARGETS) $(KMOD_FOLDER_TARGETS)
 
 # AP Trampoline (flat binary at 0x8000). We assemble both a flat binary and an
 # embedded object so the kernel can memcpy it into low memory automatically.

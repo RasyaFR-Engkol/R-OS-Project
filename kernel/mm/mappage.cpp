@@ -1,4 +1,5 @@
 #include <rosval.h>
+#include "export_sym.hpp"
 #include "mm.hpp"
 #include "serial.hpp"
 #include <string.hpp>
@@ -309,4 +310,17 @@ namespace PageAlloc {
         Arch::RestoreInterrupts(_irq);
         return TRUE;
     }
+}
+
+ABI_C {
+    // FOR MODULES
+    BOOL MmMapPages(U64 *PML4Virt, UPTR PhysAddr, UPTR VirtAddr, SIZE_T Count, U64 Flags) {
+        return PageAlloc::MapPages(PML4Virt, PhysAddr, VirtAddr, Count, Flags);
+    }
+    EXPORT_SYMBOL(MmMapPages);
+
+    BOOL MmUnMapPages(U64 *PML4Virt, UPTR VirtAddr) {
+        return PageAlloc::UnMapPages(PML4Virt, VirtAddr);
+    }
+    EXPORT_SYMBOL(MmUnMapPages);
 }

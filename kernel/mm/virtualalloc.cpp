@@ -4,6 +4,7 @@
 // Use project-provided basic types to avoid relying on host libc headers
 #include <rosval.h>
 #include <logging.hpp>
+#include <export_sym.hpp>
 
 // Simple bitmap-backed virtual page allocator.
 // This implementation is intentionally small and configurable via the
@@ -178,4 +179,17 @@ namespace PageAlloc{
 
         Arch::RestoreInterrupts(_irq);
     }
+}
+
+ABI_C {
+    // FOR MODULES
+    VOID* MmVirtualAllocPages(SIZE_T count) {
+        return PageAlloc::VirtualAllocPages(count);
+    }
+    EXPORT_SYMBOL(MmVirtualAllocPages);
+
+    VOID MmVirtualFreePages(VOID* addr, SIZE_T count) {
+        PageAlloc::VirtualFreePages(addr, count);
+    }
+    EXPORT_SYMBOL(MmVirtualFreePages);
 }

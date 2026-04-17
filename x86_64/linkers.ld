@@ -48,6 +48,14 @@ SECTIONS {
 
     .rodata : AT (KERNEL_LMA + (ADDR(.rodata) - KERNEL_VMA)) {
         *(.rodata .rodata.*)
+
+        . = ALIGN(8); /* Pointer 64-bit butuh align 8 byte */
+        PROVIDE(__ksymtab_start = .);
+        KEEP(*(__ksymtab))       /* Array of KernelSymbol structs */
+        PROVIDE(__ksymtab_end = .);
+
+        . = ALIGN(1);
+        KEEP(*(__ksymtab_strings)) /* String names dari symbolnya */
     } :rodata
 
     .data : AT (KERNEL_LMA + (ADDR(.data) - KERNEL_VMA)) {

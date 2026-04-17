@@ -756,3 +756,21 @@ namespace VFSManager{
         return TRUE;
     }
 }
+
+// FOR MODULE
+ABI_C BOOL VFSResolvePath(const char *path, FileSystem **outFS, char *OutRelativePath, BOOL FollowLastSymlink){
+    return VFSManager::ResolvePath(path, outFS, OutRelativePath, FollowLastSymlink);
+}
+
+ABI_C BOOL VFSCreateBlockNode(IBlockDevice *dev){
+    DeviceManager::RegisterBlockDevice(dev); // Register with DeviceManager
+
+    // Also try to register with DevFS mounted at /dev
+    FileSystem* fs = nullptr; char rel[256];
+    __MAYBE_UNUSED BOOL ok2 = FALSE;
+    if (VFSManager::ResolvePath((const char*)"/dev", &fs, rel) && fs) {
+        DevFS* devfs = (DevFS*)fs;
+        ok2 = devfs->RegisterBlockDevice(dev, dev->GetDeviceName());
+    }
+    return ok2;
+}

@@ -22,5 +22,7 @@ struct IrqAction{
     VOLATILE BOOL PendingWorkRn;
 };
 
-VOID RequestThreadedIrq(U8 Vector, VOID (*TopHalf)(VOID* Ctx1), VOID (*BottomHalf)(VOID*), VOID *DevID);
-VOID WakeUpThreadedIrq(U8 Vector);
+ABI_C {
+    VOID RequestThreadedIrq(U8 Vector, VOID (*TopHalf)(VOID* Ctx1), VOID (*BottomHalf)(VOID*), VOID *DevID);
+    VOID WakeUpThreadedIrq(U8 Vector);
+}

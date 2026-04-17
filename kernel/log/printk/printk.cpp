@@ -11,6 +11,7 @@
 #include "../../filesys/vfs/vfs.hpp"
 #include "rosval.h"
 #include <../firmware/acpi/driver/timer/timer.hpp>
+#include <export_sym.hpp>
 
 // Module-name is provided per-translation-unit via `ExportSymbol()` macro in
 // the header (static inline helper). No global weak symbol is needed.
@@ -354,3 +355,9 @@ namespace Printk {
     // Prefer the variadic API `Write(Level, const char *fmt, ...)` for formatted output.
     
 }
+
+ABI_C BOOL PrintkWrite(Printk::Level level, const char *fmt, ...){
+    return Printk::Write(level, fmt);
+}
+
+EXPORT_SYMBOL(PrintkWrite);

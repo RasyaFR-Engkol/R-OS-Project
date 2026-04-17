@@ -1,0 +1,374 @@
+#include "rostime.hpp"
+#define PRINTK_MODULE_NAME "XHCIInit"
+#include <rosval.h>
+#include <rossys.hpp>
+#include <logging.hpp>
+#include <mm.hpp>
+#include "string.hpp"
+#include "xhci.hpp"
+#include "xhci_regs.hpp"
+#include "xhci_internal.hpp"
+
+namespace xHCI{
+    using namespace Printk;
+
+    static BOOL TakeOwnershipFromBIOS(xHCIDriver &DRV, volatile xHCIExtCapUSBLegSup *USBLegSupCap){
+        Write(Level::LOG_INFO, " Attempting to take ownership from BIOS...\n");
+
+        // Cek dulu, siapa tahu BIOS emang udah gak pegang kontrol
+        if ((USBLegSupCap->leg_sup_sem & (1 << 16)) == 0) {
+            Write(Level::LOG_NOTICE, " BIOS doesn't own it. Setting OS ownership.\n");
+            USBLegSupCap->leg_sup_sem |= (1 << 24);
+            return TRUE;
+        }
+
+        // Minta baik-baik ke BIOS (Set OS Owned Semaphore)
+        USBLegSupCap->leg_sup_sem |= (1 << 24); 
+
+        // Tunggu maksimal 1 detik (5000ms kelamaan sebenernya, spec minta 1 detik aja)
+        for(int i = 0 ; i < 1000; i++){
+            if((USBLegSupCap->leg_sup_sem & (1 << 16)) == 0){
+                Write(Level::LOG_NOTICE, " Successfully took ownership from BIOS\n");
+                
+                // Extra aman: Matiin SMI Enable (Bit 29) biar BIOS gak ikut campur lagi nanti
+                USBLegSupCap->leg_sup_sem &= ~(1 << 29);
+                return TRUE;
+            }
+            Arch::Time::Sleep(1); // 1 ms
+        }
+
+        // KALAU TIMEOUT: RAMPAS PAKSA! (Hostile Takeover)
+        Write(Level::LOG_WARNING, " BIOS refused to hand over xHCI. FORCING OWNERSHIP!\n");
+        
+        U32 val = USBLegSupCap->leg_sup_sem;
+        val &= ~(1 << 16); // Paksa clear BIOS Owned
+        val &= ~(1 << 29); // Paksa clear SMI Enable (PENTING biar BIOS gak interupsi diem-diem)
+        val |= (1 << 24);  // Pastikan OS Owned tetap nyala
+        
+        USBLegSupCap->leg_sup_sem = val;
+
+        return TRUE; // Anggap aja sukses berkat paksaan wkwk
+    }
+
+    VOID InitializeAllControllers(){
+        for(VAL32 i = 0; i < g_xhci_controller_count; i++){
+            xHCIDriver &DRV = g_xhci_controllers[i];
+
+            // Parse alamat register
+            DRV.cap_regs = (volatile xHCICapRegisters*)DRV.regs_base;
+
+            DRV.op_regs = (volatile xHCIOpRegisters*)(DRV.regs_base + DRV.cap_regs->cap_len);
+
+            DRV.doorbell_regs = (volatile U32*)((UPTR)DRV.regs_base + DRV.cap_regs->dboff);
+
+                /*Write(Level::LOG_DEBUG, " Controller %d - Version: %04x\n", (unsigned)i, (unsigned)DRV.cap_regs->hci_version);
+                Write(Level::LOG_DEBUG, " Controller %d - HCS1=0x%08x HCS2=0x%08x\n",
+                    (unsigned)i, (unsigned)DRV.cap_regs->hcs_params1, (unsigned)DRV.cap_regs->hcs_params2);
+                Write(Level::LOG_DEBUG, " Controller %d - Number of Slots: %u\n", (unsigned)i, (unsigned)(DRV.cap_regs->hcs_params1 & 0xFF));
+                Write(Level::LOG_DEBUG, " OpRegs at %p, Doorbells at %p\n",
+                    (void*)DRV.op_regs, (void*)DRV.doorbell_regs);*/
+
+            DRV.PortCount = (U8)((DRV.cap_regs->hcs_params1 >> 24) & 0xFF);
+            DRV.port_regs = (volatile xHCIPortRegs*)((UPTR)DRV.op_regs + 0x400);
+            // Initialize per-port state array
+            for (U32 __p = 0; __p < 256; ++__p) {
+                DRV.PortStates[__p].State = xHCIDriver::PORT_STATE_EMPTY;
+                DRV.PortStates[__p].SlotID = 0;
+            }
+            //Write(Level::LOG_DEBUG, " Controller %d - PortCount: %u\n", (unsigned)i, (unsigned)DRV.PortCount);
+
+            U32 xECP = (DRV.cap_regs->hcc_params1 >> 16);
+            volatile U8 *PTR = DRV.regs_base + (xECP * 4);
+
+            while(PTR != nullptr){
+                U8 CapID = *PTR;
+                if(CapID == 1){
+                    if (TakeOwnershipFromBIOS(DRV, (volatile xHCIExtCapUSBLegSup*)PTR)) {
+                        break; // Sukses!
+                    }
+                }
+
+                U8 NextPTR = *(PTR + 1);
+                if(NextPTR == 0) break;
+                PTR += (NextPTR * 4);
+            }
+
+            //Write(Level::LOG_DEBUG, " Resetting XHCI Controller %d...\n", (unsigned)i);
+
+            volatile xHCIOpRegisters *op = DRV.op_regs;
+
+            if((op->usb_cmd & 1) == 1){
+                Write(Level::LOG_INFO, " Controller %d - stopping prior to reset: usb_cmd=0x%08x usb_sts=0x%08x\n",
+                    (unsigned)i, (unsigned)op->usb_cmd, (unsigned)op->usb_sts);
+                op->usb_cmd &= ~1;
+                while((op->usb_sts & 1) == 1){
+                    Arch::ASM::CPURelax();
+                }
+                Write(Level::LOG_INFO, " Controller %d stopped: usb_cmd=0x%08x usb_sts=0x%08x\n",
+                    (unsigned)i, (unsigned)op->usb_cmd, (unsigned)op->usb_sts);
+            }
+
+            //Write(Level::LOG_DEBUG, " Controller %d - initiating HCRST: usb_cmd=0x%08x usb_sts=0x%08x\n",
+            //    (unsigned)i, (unsigned)op->usb_cmd, (unsigned)op->usb_sts);
+            op->usb_cmd |= (1 << 1); // Set HCRST
+
+            for(VAL32 t = 0; t < 5000; t++){
+                if((op->usb_cmd & (1 << 1)) == 0){
+                    //Write(Level::LOG_DEBUG, " Controller %d reset complete: usb_cmd=0x%08x usb_sts=0x%08x\n",
+                    //    (unsigned)i, (unsigned)op->usb_cmd, (unsigned)op->usb_sts);
+                    break;
+                }
+                Arch::Time::Sleep(1);
+            }
+
+            if((op->usb_cmd & (1 << 1)) != 0){
+                Write(Level::LOG_ERR, " Controller %d reset timeout\n", (unsigned)i);
+                continue;
+            }
+
+            //Write(Level::LOG_DEBUG, " Controller %d resetted succesfully\n", (unsigned)i);
+
+            // Wait for Controller Not Ready (CNR, bit11 in USBSTS) to clear
+            {
+                const U32 CNR_MASK = (1u << 11);
+                U32 waited_ms = 0;
+                while ((op->usb_sts & CNR_MASK) != 0 && waited_ms < 500) {
+                    Arch::Time::Sleep(1);
+                    ++waited_ms;
+                }
+                if ((op->usb_sts & CNR_MASK) != 0) {
+                    Write(Level::LOG_WARNING, " Controller %d - CNR still set after %u ms (usb_sts=0x%08x)\n",
+                          (unsigned)i, (unsigned)waited_ms, (unsigned)op->usb_sts);
+                } else {
+                    //Write(Level::LOG_DEBUG, " Controller %d - CNR cleared after %u ms (usb_sts=0x%08x)\n",
+                    //      (unsigned)i, (unsigned)waited_ms, (unsigned)op->usb_sts);
+                }
+            }
+
+            U8 MaxSlots = (DRV.cap_regs->hcs_params1 & 0xFF);
+            DRV.op_regs->config = MaxSlots;
+            Write(Level::LOG_DEBUG, " Controller %d - Configured for %u slots\n", (unsigned)i, (unsigned)MaxSlots);
+
+            // Set system page size (bit0 = 4KiB). Required before programming DCBAAP/scratchpads.
+            DRV.op_regs->page_size = 1u;
+            //Write(Level::LOG_DEBUG, " Controller %d - PAGESIZE set to 4KiB\n", (unsigned)i);
+
+            DRV.DMA_DCBAAP = PageAlloc::DMAAlloc::AllocateDMAPages(1);
+            if(!DRV.DMA_DCBAAP){
+                Write(Level::LOG_ERR, " Controller %d - Failed to allocate DCBAAP\n", (unsigned)i);
+                continue;
+            }
+
+            DRV.V_DCBAAP = (volatile U64*)DRV.DMA_DCBAAP->VirtAddr;
+            String::Memset((void*)DRV.V_DCBAAP, 0, DRV.DMA_DCBAAP->Size);
+
+            // Allocate scratchpad buffers if required by HCSPARAMS2 (Max Scratchpad Buffers)
+            DRV.ScratchpadCount = 0;
+            {
+                U32 hcs2 = DRV.cap_regs->hcs_params2;
+                U32 max_sp = (((hcs2 >> 27) & 0x1F) << 5) | ((hcs2 >> 21) & 0x1F);
+                //Write(Level::LOG_DEBUG, " Controller %d - Max Scratchpads (HCS2): %u\n", (unsigned)i, (unsigned)max_sp);
+                if (max_sp > 64) max_sp = 64; // cap to 64 buffers for now
+                if (max_sp > 0) {
+                    // Allocate array of U64 phys pointers
+                    SIZE_T arr_bytes = max_sp * sizeof(U64);
+                    SIZE_T arr_pages = (arr_bytes + PAGE_SIZE - 1) / PAGE_SIZE;
+                    DRV.DMA_ScratchpadArray = PageAlloc::DMAAlloc::AllocateDMAPages(arr_pages);
+                    if (!DRV.DMA_ScratchpadArray) {
+                        Write(Level::LOG_ERR, " Controller %d - Failed to allocate Scratchpad Array\n", (unsigned)i);
+                        // continue without, but commands may fail
+                    } else {
+                        volatile U64* arr = (volatile U64*)DRV.DMA_ScratchpadArray->VirtAddr;
+                        String::Memset((void*)arr, 0, DRV.DMA_ScratchpadArray->Size);
+                        // Allocate each scratchpad page and record phys
+                        U32 ok_cnt = 0;
+                        for (U32 s = 0; s < max_sp; ++s) {
+                            DRV.DMA_Scratchpads[s] = PageAlloc::DMAAlloc::AllocateDMAPages(1);
+                            if (!DRV.DMA_Scratchpads[s]) {
+                                Write(Level::LOG_ERR, " Controller %d - Scratchpad %u alloc failed\n", (unsigned)i, (unsigned)s);
+                                break;
+                            }
+                            arr[s] = (U64)DRV.DMA_Scratchpads[s]->PhysAddr;
+                            ++ok_cnt;
+                        }
+                        DRV.ScratchpadCount = ok_cnt;
+                        // Program DCBAA[0] to point to scratchpad array
+                        DRV.V_DCBAAP[0] = (U64)DRV.DMA_ScratchpadArray->PhysAddr;
+                       // Write(Level::LOG_DEBUG, " Controller %d - Scratchpads: requested=%u allocated=%u array_phys=0x%llx\n",
+                        //      (unsigned)i, (unsigned)max_sp, (unsigned)DRV.ScratchpadCount, (unsigned long long)DRV.DMA_ScratchpadArray->PhysAddr);
+                    }
+                }
+            }
+
+            // DCBAAP: split writes and verify
+            {
+                U64 phys = (U64)DRV.DMA_DCBAAP->PhysAddr;
+                volatile U32 *dcbaap_lo = (volatile U32*)((UPTR)DRV.op_regs + 0x30);
+                volatile U32 *dcbaap_hi = (volatile U32*)((UPTR)DRV.op_regs + 0x34);
+                U64 readback = 0;
+                for (int attempt = 1; attempt <= 3; ++attempt) {
+                    *dcbaap_hi = (U32)((phys >> 32) & 0xFFFFFFFFu);
+                    *dcbaap_lo = (U32)(phys & 0xFFFFFFFFu);
+                    asm volatile ("mfence" ::: "memory");
+                    readback = DRV.op_regs->dcbaap;
+                    //Write(Level::LOG_DEBUG, " Controller %d - DCBAAP attempt %d wrote=0x%016llx readback=0x%016llx\n",
+                    //    (unsigned)i, attempt, (unsigned long long)phys, (unsigned long long)readback);
+                    if (readback == phys) break;
+                    Arch::Time::Sleep(1);
+                }
+                if (readback != phys) {
+                    Write(Level::LOG_WARNING, " Controller %d - DCBAAP did not stick after attempts\n", (unsigned)i);
+                }
+            }
+
+            DRV.DMA_CmdRing = PageAlloc::DMAAlloc::AllocateDMAPages(1);
+            if(!DRV.DMA_CmdRing){
+                Write(Level::LOG_ERR, " Controller %d - Failed to allocate Command Ring\n", (unsigned)i);
+                continue;
+            }
+
+            DRV.CmdRingSize = (U32)(DRV.DMA_CmdRing->Size / sizeof(xHCITRB));
+            if(DRV.CmdRingSize < 2){
+                Write(Level::LOG_ERR, " Controller %d - Command Ring too small (%u entries)\n",
+                    (unsigned)i, (unsigned)DRV.CmdRingSize);
+                continue;
+            }
+
+            DRV.VCmdRing = (volatile xHCITRB*)DRV.DMA_CmdRing->VirtAddr;
+            String::Memset((void*)DRV.VCmdRing, 0, DRV.DMA_CmdRing->Size);
+
+            // Initialize per-slot device state array
+            for (U32 s = 0; s < xHCI::xHCIDriver::MAX_SLOTS; ++s) {
+                DRV.Devs[s].EP0Ring = nullptr;
+                DRV.Devs[s].EP0EnqueueIdx = 0;
+                DRV.Devs[s].EP0CycleState = TRUE;
+            }
+
+            DRV.CmdRingEnqueueIndex = 0;
+            DRV.CmdRingCycleState = TRUE;
+
+            // Reserve the last TRB as a link back to the start so the command ring loops.
+            U32 linkIndex = DRV.CmdRingSize - 1;
+            volatile xHCITRB *LinkTRB = &DRV.VCmdRing[linkIndex];
+            LinkTRB->parameter = DRV.DMA_CmdRing->PhysAddr;
+            LinkTRB->status = 0;
+            LinkTRB->control = (6u << 10) | (1u << 1) | (DRV.CmdRingCycleState ? 1u : 0u); // Link TRB, toggle cycle on wrap
+
+            // Seed CRCR with the ring base and current cycle state so the HC sees our producer phase.
+            DRV.op_regs->crcr = DRV.DMA_CmdRing->PhysAddr | (DRV.CmdRingCycleState ? 1ull : 0ull);
+
+            DRV.DMA_ERSTable = PageAlloc::DMAAlloc::AllocateDMAPages(1);
+            if(!DRV.DMA_ERSTable){
+                Write(Level::LOG_ERR, " Controller %d - Failed to allocate ERSTable\n", (unsigned)i);
+                continue;
+            }
+
+            DRV.DMA_EventRing = PageAlloc::DMAAlloc::AllocateDMAPages(1);
+            if(!DRV.DMA_EventRing){
+                Write(Level::LOG_ERR, " Controller %d - Failed to allocate Event Ring\n", (unsigned)i);
+                continue;
+            }
+
+            DRV.EventRingSize = (U32)(DRV.DMA_EventRing->Size / sizeof(xHCITRB));
+            if(DRV.EventRingSize == 0){
+                Write(Level::LOG_ERR, " Controller %d - Event Ring too small\n", (unsigned)i);
+                continue;
+            }
+
+            DRV.VEventRing = (volatile xHCITRB*)DRV.DMA_EventRing->VirtAddr;
+            String::Memset((void*)DRV.VEventRing, 0, DRV.DMA_EventRing->Size);
+            DRV.EventRingCycleState = TRUE;
+            DRV.EventRingDequeueIndex = 0;
+
+            volatile xHCIEventRingSegmentTableEntry *ERST_Entry =
+                (volatile xHCIEventRingSegmentTableEntry*)DRV.DMA_ERSTable->VirtAddr;
+
+            ERST_Entry->ring_segment_base_addr = DRV.DMA_EventRing->PhysAddr;
+            ERST_Entry->ring_segment_size = DRV.EventRingSize;
+
+            DRV.rt_regs = (volatile xHCIRuntimeRegisters*)(DRV.regs_base + DRV.cap_regs->rtsoff);
+
+            volatile xHCIInterrupterRegs *IR0 = &DRV.rt_regs->interrupter_regs[0];
+
+            // Program Interrupter 0: ERST size/base and dequeue pointer (set EHB)
+            IR0->erstsz = 1; // 1 entry
+            IR0->erstba = DRV.DMA_ERSTable->PhysAddr; // Set ERST Base Address
+            // Set Dequeue Pointer and clear Event Handler Busy (EHB) to signal readiness
+            IR0->erdp = DRV.DMA_EventRing->PhysAddr | (1u << 3);
+            // Clear any pending and enable interrupter
+            IR0->iman = (1u << 1) | 1u; 
+
+            // Enable host controller interrupts globally and run the HC
+            //Write(Level::LOG_DEBUG, " Controller %d - about to enable interrupts and start: usb_cmd=0x%08x usb_sts=0x%08x\n",
+            //    (unsigned)i, (unsigned)DRV.op_regs->usb_cmd, (unsigned)DRV.op_regs->usb_sts);
+            DRV.op_regs->usb_cmd |= (1u << 2); // INTE: Interrupt Enable
+            DRV.op_regs->usb_cmd |= 1u;        // RS: Run/Stop = Run
+
+            while(DRV.op_regs->usb_sts & 1){
+                Arch::ASM::CPURelax();
+            }
+
+            Write(Level::LOG_NOTICE, " Controller %d running! usb_cmd=0x%08x usb_sts=0x%08x\n",
+                (unsigned)i, (unsigned)DRV.op_regs->usb_cmd, (unsigned)DRV.op_regs->usb_sts);
+
+            Write(Level::LOG_DEBUG, " [XHCIInit] Powering on all ports...\n");
+            for (U32 io = 0; io < DRV.PortCount; io++) {
+                U32 port_sc = DRV.port_regs[io].port_sc;
+                // Cek apakah Port Power (Bit 9) masih mati
+                if ((port_sc & (1 << 9)) == 0) {
+                    U32 set_power = port_sc;
+                    set_power &= ~0x00FE0000; // Masking aman (jangan clear bit change)
+                    set_power |= (1 << 9);    // Set PP (Port Power) ke 1
+                    DRV.port_regs[io].port_sc = set_power;
+                }
+            }
+            
+            Arch::Time::Sleep(600); // 600 ms delay to allow ports to power up
+
+            //Printk::Write(Printk::Level::LOG_DEBUG, " [XHCIInit] Powering on all ports...\n");
+
+            for (U32 io = 0; io < DRV.PortCount; io++) {
+                // 1. Baca Langsung (Tanpa Pointer Pointeran)
+                U32 raw = DRV.port_regs[io].port_sc;
+                
+                bool isEnabled = (raw & (1 << 1)); // PED
+                bool isConnected = (raw & 1);       // CCS
+
+                if(isConnected) {
+                    if(isEnabled) {
+                        Printk::Write(Printk::Level::LOG_INFO, "  [XHCI] Port %d is SuperSpeed (Already Enabled). Pushing to Queue...\n", io+1);
+
+                        U8 CurrentTail = DRV.EnableSlotQueueTail;
+                        DRV.EnableSlotQueue[CurrentTail] = io + 1; // io+1 karena Port ID mulai dari 1
+                        DRV.EnableSlotQueueTail = CurrentTail + 1;
+
+                        DRV.PortStates[io].State = xHCIDriver::PORT_STATE_ENABLE_SENT;
+                        SendEnableSlotCommand(DRV);
+                    } else  { // PLS=7 itu Polling, indikasi port USB 3.0 yang belum siap nangkep device USB 2.0 (misal mouse)
+                        // Skema USB 2.0: Butuh Reset Manual OS
+                        Printk::Write(Printk::Level::LOG_INFO, "  [XHCI] Port %d is Legacy/USB 2.0. Issuing Reset...\n", io+1);
+                        
+                        U32 reset_val = raw;
+                        reset_val &= ~0x00FE0000; // Jangan clear status change (Write 0 aman)
+                        reset_val |= (1 << 4);    // Set PR (Port Reset, Bit 4)
+                        DRV.port_regs[io].port_sc = reset_val;
+                        // Biarkan hardware nge-reset, nanti ISR akan menangani Port Reset Change (PRC)
+                    }
+                }
+            }
+
+            // Diagnostic dump before NOOP
+            //DumpXHCIState(DRV, "pre-noop");
+            SendNOOPCommand(DRV);
+            // Immediate dump after doorbell to capture state and possible pending IP
+            //DumpXHCIState(DRV, "post-noop");
+            // Give controller a short moment and dump again to catch late updates (1ms)
+            Arch::Time::Sleep(1);
+            //DumpXHCIState(DRV, "post-noop-1ms");
+
+            // Enable Slot will now be issued upon Port Status Change (PSC) when a device connects
+
+            DRV.Initialized = TRUE;
+        }
+    }
+}

@@ -1,26 +1,23 @@
+#include "string.hpp"
 #include <kernel_api.hpp>
 #include <../misc/file/extension/elf.hpp>
 #include <logging.hpp>
 #include <mm.hpp>
+#include <export_sym.hpp>
 
 namespace ModuleManager{
-    static KernelAPI g_CoreAPI = {
-        .Printk = Printk::Write,
-        .Panic = Printk::Panic,
-        .AllocateDMAPages = PageAlloc::DMAAlloc::AllocateDMAPages,
-        .AllocateDMABytes = PageAlloc::DMAAlloc::AllocateDMABytes,
-        .FreeDMAPages = PageAlloc::DMAAlloc::FreeDMAPages,
-        .VirtualAllocPages = PageAlloc::VirtualAllocPages,
-        .VirtualFreePages = PageAlloc::VirtualFreePages,
-        .PhysicalAllocLowPages = PageAlloc::PhysicalAllocLowPages,
-        .PhysicalFreeLowPages = PageAlloc::PhysicalFreeLowPages,
-        .PhysicalAllocPages = PageAlloc::PhysicalAllocPages,
-        .PhysicalFreePages = PageAlloc::PhysicalFreePages,
-        .Alloc = Kmalloc::Alloc,
-        .Free = Kmalloc::Free
-    };
+    UPTR FindKernelSymbol(const char* name){
+        KernelSymbol *current = __ksymtab_start;
+        while (current < __ksymtab_end){
+            if (String::Strcmp(current->Name, name) == 0){
+                return current->Value;
+            }
+            current++;
+        }
+        return 0; // Not found
+    }
 
-    int LoadModuleAndRun(VOID* FileBuffer){
+    int LoadModuleAndRun(VOID* FileBuffer, VOID *PrivateData){
         U64 imageBase, imageEnd;
         
         // Panggil Loader dari Step 1
@@ -35,19 +32,14 @@ namespace ModuleManager{
         // Ubah alamat mentah jadi pemanggilan fungsi C++
         ModuleInitFunc init_module = reinterpret_cast<ModuleInitFunc>(entryAddress);
 
-        Printk::Write(Printk::Level::LOG_INFO, "Mengeksekusi Module Init...\n");
-
         // 4. Jalankan modulnya dan lempar g_CoreAPI sebagai parameter
-        int status = init_module(&g_CoreAPI);
+        int status = init_module(PrivateData);
         
-        if (status == 0) {
-            Printk::Write(Printk::Level::LOG_INFO, "Module berhasil diinisialisasi!\n");
-            // TODO: Lo bisa simpan imageBase dan status ke sebuah List/Vector 
-            // supaya nanti gampang kalau mau nge-unload modulnya.
-        } else {
-            Printk::Write(Printk::Level::LOG_ERR, "Module init return error code!\n");
+        if(status < 0){
+            Printk::Write(Printk::Level::LOG_ERR, "Module returning error when inited (code: %d)\n", status);
         }
 
         return status;
     }
 }
+

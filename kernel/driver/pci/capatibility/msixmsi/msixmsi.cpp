@@ -1,3 +1,4 @@
+#include "export_sym.hpp"
 #include <rossys.hpp>
 #include <rosval.h>
 #define PRINTK_MODULE_NAME "MSI"
@@ -175,4 +176,17 @@ namespace MSI{
 
         return vector;
     }
+}
+
+// For Module
+ABI_C {
+    U8 PCIEnableMSI(U8 bus, U8 dev, U8 func, U8 msi_cap_offset, void (*handler)(void *context)){
+        return MSI::EnableMSI(bus, dev, func, msi_cap_offset, handler);
+    }
+    EXPORT_SYMBOL(PCIEnableMSI);
+
+    U8 PCIEnableMSIX(U8 bus, U8 dev, U8 func, U8 msix_cap_offset, void (*handler)(void *context)){
+        return MSI::EnableMSIX(bus, dev, func, msix_cap_offset, handler);
+    }
+    EXPORT_SYMBOL(PCIEnableMSIX);
 }

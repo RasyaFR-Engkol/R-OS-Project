@@ -1,29 +1,25 @@
 #define PRINTK_MODULE_NAME "XHCIPCI"
 #include <rosval.h>
-#include <logging.hpp>
-#include <drivers/pci.hpp>
-#include <mm.hpp>
 #include "xhci.hpp"
 #include "xhci_isr.hpp"
 #include <string.hpp>
-#include "../../filesys/iblockdevice.hpp"
-#include "../../dev/devicemanager.hpp"
-#include "../../filesys/devfs/devfs.hpp"
-#include "../../filesys/vfs/vfs.hpp"
-#include <../kernel/irq/threaded_irq.hpp>
+#include "../kernel/filesys/iblockdevice.hpp"
+#include "../kernel/dev/devicemanager.hpp"
+#include "../kernel/filesys/devfs/devfs.hpp"
 
 namespace xHCI {
     using namespace Printk;
 
     VOID RegisterController(U8 Bus, U8 Device, U8 Function, U8 MSICapOffset){
         if(g_xhci_controller_count >= XHCI_MAX_CONTROLLERS) {
-            Write(Level::LOG_ERR, " Controller full\n");
+            PrintkWrite(Printk::Level::LOG_ERR, " xHCI: Max controller limit reached, skipping registration of %d:%d:%d\n",
+                (int)Bus, (int)Device, (int)Function);
             return;
         }
 
         // Handle potential 64-bit BAR for xHCI (commonly a 64-bit MMIO BAR)
-        U32 Bar0LOW = PCI::ReadDword(Bus, Device, Function, 0x10);
-        U32 Bar0HI  = PCI::ReadDword(Bus, Device, Function, 0x14);
+        U32 Bar0LOW = PCIReadDword(Bus, Device, Function, 0x10);
+        U32 Bar0HI  = PCIReadDword(Bus, Device, Function, 0x14);
         U64 BarType = (Bar0LOW & 0x6) >> 1; // 0=32-bit, 2=64-bit
         U64 RegPhys64 = (BarType == 0x2)
             ? (((U64)Bar0HI << 32) | (U64)(Bar0LOW & 0xFFFFFFF0))
@@ -36,16 +32,16 @@ namespace xHCI {
         // doorbells). Map a larger window (e.g. 16 pages = 64KiB) to cover
         // typical controllers instead of a single page which caused PFs.
         const SIZE_T MapPagesCount = 16;
-        VOID *VirtAddr = PageAlloc::VirtualAllocPages(MapPagesCount);
+        VOID *VirtAddr = MmVirtualAllocPages(MapPagesCount);
         if(!VirtAddr){
-            Write(Level::LOG_ERR, " Failed allocating virtual for XHCI\n");
+            PrintkWrite(Level::LOG_ERR, " Failed allocating virtual for XHCI\n");
             return;
         }
 
         // Avoid setting NX here (EFER.NXE may be clear during early boot).
         PFLAGS Flags = PAGE_PRESENT | PAGE_RW | PAGE_PCD;
-        if(!PageAlloc::MapPages(KernelPML4, RegPhysPage, (UPTR)VirtAddr, MapPagesCount, Flags)) {
-            Write(Level::LOG_ERR, " Failed mapping XHCI registers\n");
+        if(!MmMapPages(KernelPML4, RegPhysPage, (UPTR)VirtAddr, MapPagesCount, Flags)) {
+            PrintkWrite(Level::LOG_ERR, " Failed mapping XHCI registers\n");
             return;
         }
 
@@ -60,17 +56,17 @@ namespace xHCI {
         DRV.IntVector = 0;
 
         { 
-            U8 msix_offset = PCI::FindCapability(Bus, Device, Function, 0x11); 
+            U8 msix_offset = PCIFindCapatibility(Bus, Device, Function, 0x11); 
             if (msix_offset != 0) {
                 //Write(Level::LOG_INFO, " xHCI: MSI-X Capability found at 0x%x. Attempting Enable...\n", msix_offset);
-                U8 vec = MSI::EnableMSIX(Bus, Device, Function, msix_offset, xHCI_InterruptHandler_C0_TopHalf);
+                U8 vec = PCIEnableMSIX(Bus, Device, Function, msix_offset, xHCI_InterruptHandler_C0_TopHalf);
                 
                 if (vec != 0) {
                     DRV.IntVector = vec;
                     //Write(Level::LOG_INFO, " xHCI: MSI-X Enabled! Vector 0x%x\n", vec);
                     goto interrupt_done;
                 } else {
-                    Write(Level::LOG_ERR, " xHCI: MSI-X Enable Failed. Trying fallback...\n");
+                    PrintkWrite(Level::LOG_ERR, " xHCI: MSI-X Enable Failed. Trying fallback...\n");
                 }
             }
         } // Tambahkan kurung kurawal penutup "}" di sini. 
@@ -82,7 +78,7 @@ namespace xHCI {
             U8 msi_offset = PCI::FindCapability(Bus, Device, Function, 0x05); 
             if (msi_offset != 0) {
                 //Write(Level::LOG_INFO, " xHCI: MSI Capability found at 0x%x. Attempting Enable...\n", msi_offset);
-                U8 vec = MSI::EnableMSI(Bus, Device, Function, msi_offset, xHCI_InterruptHandler_C0_TopHalf);
+                U8 vec = PCIEnableMSI(Bus, Device, Function, msi_offset, xHCI_InterruptHandler_C0_TopHalf);
                 
                 if (vec != 0) {
                     DRV.IntVector = vec;
@@ -94,7 +90,7 @@ namespace xHCI {
 
         // 3. TRY LEGACY INTx (The Old Reliable)
         {
-            U8 irq = PCI::EnableLegacyINTxForDevice(Bus, Device, Function, xHCI_InterruptHandler_C0);
+            U8 irq = PCIEnableLegacyINTx(Bus, Device, Function, xHCI_InterruptHandler_C0);
             if (irq != 0) {
                 DRV.IntVector = 0x20 + irq;
                 Write(Level::LOG_WARNING, " xHCI: Fallback to Legacy INTx IRQ %d (Vec 0x%x)\n", irq, DRV.IntVector);
@@ -108,9 +104,9 @@ namespace xHCI {
         // Kita udah set interrupt. saatnya daftarin threaded IRQ handler-nya
         if (DRV.IntVector != 0) {
             RequestThreadedIrq(DRV.IntVector, xHCI_InterruptHandler_C0_TopHalf, xHCI_Worker_Thread, (VOID*)(UPTR)g_xhci_controller_count);
-            Write(Level::LOG_INFO, " Registered threaded IRQ handler for vector 0x%x\n", DRV.IntVector);
+            PrintkWrite(Level::LOG_INFO, " Registered threaded IRQ handler for vector 0x%x\n", DRV.IntVector);
         } else {
-            Write(Level::LOG_ERR, " Failed to register any interrupt handler for this controller!\n");
+            PrintkWrite(Level::LOG_ERR, " Failed to register any interrupt handler for this controller!\n");
         }
 
         g_xhci_controller_count++;
@@ -124,22 +120,9 @@ namespace xHCI {
         int idx_for_name = g_xhci_controller_count - 1;
         XHCIBlockDevice *dev = new XHCIBlockDevice(idx_for_name);
         if(!dev) {
-            Write(Level::LOG_ERR, " Failed allocating XHCI dev wrapper\n");
+            PrintkWrite(Level::LOG_ERR, " Failed allocating XHCI dev wrapper\n");
         } else {
-            DeviceManager::RegisterBlockDevice(dev);
-
-            // Also try to register with DevFS mounted at /dev
-            FileSystem* fs = nullptr; char rel[256];
-            __MAYBE_UNUSED BOOL ok2 = FALSE;
-            if (VFSManager::ResolvePath((const char*)"/dev", &fs, rel) && fs) {
-                DevFS* devfs = (DevFS*)fs;
-                ok2 = devfs->RegisterBlockDevice(dev, dev->GetDeviceName());
-            }
-
-            //Write(Level::LOG_DEBUG, " XHCI: Registered controller node %s (devmgr=%d, devfs=%d)\n", dev->GetDeviceName(), ok1 ? 1 : 0, ok2 ? 1 : 0);
+            VFSCreateBlockNode(dev);
         }
-        //Write(Level::LOG_DEBUG, " Registered XHCI Controller %02X:%02X:%02X\n",
-        //    (unsigned)Bus, (unsigned)Device, (unsigned)Function);
-
     }
 }

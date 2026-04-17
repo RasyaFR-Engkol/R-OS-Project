@@ -1,6 +1,7 @@
 #pragma once
 
 #include <rosval.h>
+#define ELF64_R_SYM(info) ((info) >> 32)
 
 #define EI_NIDENT 16
 #define PT_LOAD 1
@@ -18,14 +19,24 @@
 
 
 #define DT_NULL 0
+#define DT_PLTRELSZ 2
 #define DT_RELA 7
 #define DT_RELASZ 8
 #define DT_RELAENT 9
+#define DT_STRTAB 5
+#define DT_SYMTAB 6
+#define DT_STRSZ 10
+#define DT_SYMENT 11
+#define DT_JMPREL 23
 
 #define ELF64_R_TYPE(info) ((uint32_t)((info) & 0xffffffffUL))
 
 #define R_X86_64_RELATIVE 8
 #define R_X86_64_64 1
+#define R_X86_64_GLOB_DAT 6
+#define R_X86_64_JUMP_SLOT 7
+#define R_X86_64_RELATIVE 8
+#define R_X86_64_GOTPCREL 10
 
 // PT_DYNAMIC (program header type)
 #ifndef PT_DYNAMIC
@@ -61,6 +72,15 @@ namespace ELF{
         U64 P_Filesz;
         U64 P_Memsz;
         U64 P_Align;
+    };
+
+    struct Elf64_Sym {
+        U32 st_name;   // Index string di .dynstr
+        U8  st_info;   // Tipe dan Binding
+        U8  st_other;  // Visibility
+        U16 st_shndx;  // Section index (SHN_UNDEF = 0)
+        U64 st_value;  // Address symbol (kalau internal)
+        U64 st_size;   // Ukuran
     };
 
     U64 OUT_ENTRY_ADDRESS LoadELF64(VOID *ELFImage,

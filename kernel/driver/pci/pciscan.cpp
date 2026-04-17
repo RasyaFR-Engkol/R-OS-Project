@@ -1,3 +1,4 @@
+#include "export_sym.hpp"
 #define PRINTK_MODULE_NAME "PCI"
 #include "pci.hpp"
 #include <rosval.h>
@@ -81,8 +82,16 @@ namespace PCI{
                 if(ClassCode == 0x0C && SubClass == 0x03 && ProgIF == 0x30){
                     Write(Level::LOG_INFO, "USB XHCI Controller Found in %d:%d:%d!\n",
                         (int)bus, (int)device, (int)function);
-                    xHCI::RegisterController(bus, device, function, 0);
 
+                    struct pci_data xhci_data = {
+                        .bus = bus,
+                        .device = device,
+                        .function = function,
+                        .msix_offset = FindCapability(bus, device, function, 0x11) // Cap ID 0x11 = MSI-X
+                    };
+                    
+                    xHCI::RegisterController(xhci_data.bus, xhci_data.device, xhci_data.function, xhci_data.msix_offset);
+                    
                 }
 
                 // Mencari NVMe
@@ -158,3 +167,10 @@ namespace PCI{
         xHCI::InitializeAllControllers();
     }
 }
+
+// FOR MODULE
+ABI_C
+U8 PCIFindCapatibility(U8 Bus, U8 Device, U8 Function, U8 TargetCapID){
+    return PCI::FindCapability(Bus, Device, Function, TargetCapID);
+}
+EXPORT_SYMBOL(PCIFindCapatibility);

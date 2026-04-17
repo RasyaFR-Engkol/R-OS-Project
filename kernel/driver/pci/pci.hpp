@@ -19,3 +19,11 @@ namespace PCI{
     U8 EnableLegacyINTxForDevice(U8 Bus, U8 Device, U8 Function, void (*irq_handler)(void *context));
     U8 FindCapability(U8 Bus, U8 Device, U8 Function, U8 TargetCapID);
 }
+
+// STRUCT KECIL KECILAN
+struct pci_data{
+    U8 bus;
+    U8 device;
+    U8 function;
+    U8 msix_offset;
+};
