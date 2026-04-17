@@ -44,6 +44,7 @@
 #include <network/dhcp.hpp>
 #include "kernel/driver/e1000/e1000.hpp"
 #include "kernel/filesys/pipefs/pipe.hpp"
+#include <../kernel/mod/module_manager.hpp>
 
 // Debug stress test entry (implemented in tools/debug/ext2_stress.cpp)
 ABI_C int main_debug_ext2_stress(int argc, char** argv);
@@ -85,27 +86,7 @@ ABI_C NORET void KernelMain(VOID*)
 
     Userland::Syscall_Init();
     SharedMemoryManager::Init();
-
-    // coba coba
-    DeviceManager::DeviceObject *hpBoot = nullptr;
-    RHANDLE hBoot = DeviceManager::ObjectManager.GiveInstance("multiboot", &hpBoot);
-    if(hBoot){
-        BootInfo *BI = nullptr;
-        BI = (BootInfo*)DeviceManager::ObjectManager.RequestStructOnDevice(
-                hpBoot, 
-                REQ_MULTIBOOT_GET_INFO, 
-                nullptr // Input argumen (biasanya null kalau cuma GET)
-             );
-
-        // 3. Sekarang BI udah berisi alamat valid (misal 0xFFFF8000...)
-        if(BI){
-            Printk::Write(Printk::LOG_INFO, "SCREEN INFO: %ux%u.\n", BI->framebuffer.width, BI->framebuffer.height);
-        } else {
-           Printk::Write(Printk::LOG_ERR, "ERROR: NoIDFound or NoHandle (Return NULL).\n"); 
-        }
-    } else {
-        Printk::Write(Printk::LOG_ERR, "ERROR: NoInstanceFound.\n");
-    }
+    
 
     Partition *P = PartitionManager::FindPartitionByDeviceName("sda2");
     if(P && P->Mount()){
@@ -116,6 +97,34 @@ ABI_C NORET void KernelMain(VOID*)
         }
     } else {
         Printk::Write(Printk::Level::LOG_ERR, "KernelMain: Failed to mount partition sda2.\n"); 
+    }
+
+    // TES DriverExported
+    File *f = VFSManager::Open("/driver/mm.ko", O_RDONLY);
+    if(f){
+        U64 FileSize = f->Node->FileSize;
+        VOID *FileBuffer = Kmalloc::Alloc(FileSize);
+        if(FileBuffer){
+            U64 ReadBytes = VFSManager::Read(f, (U8*)FileBuffer, FileSize);
+            if(ReadBytes == FileSize){
+                Printk::Write(Printk::Level::LOG_INFO, "KernelMain: Successfully read mm.ko into memory, size %llu bytes.\n", (unsigned long long)ReadBytes);
+                int status = ModuleManager::LoadModuleAndRun(FileBuffer);
+                if(status == 0){
+                    Printk::Write(Printk::Level::LOG_INFO, "KernelMain: mm.ko loaded and initialized successfully.\n");
+                } else {
+                    Printk::Write(Printk::Level::LOG_ERR, "KernelMain: mm.ko failed to initialize (status code %d).\n", status);
+                }
+            } else {
+                Printk::Write(Printk::Level::LOG_ERR, "KernelMain: Failed to read full mm.ko (read %llu of %llu bytes).\n",
+                              (unsigned long long)ReadBytes, (unsigned long long)FileSize);
+            }
+            Kmalloc::Free(FileBuffer);
+        } else {
+            Printk::Write(Printk::Level::LOG_ERR, "KernelMain: Failed to allocate memory for mm.ko (size %llu bytes).\n", (unsigned long long)FileSize);
+        }
+        VFSManager::Close(f);
+    } else {
+        Printk::Write(Printk::Level::LOG_ERR, "KernelMain: Failed to open /driver/mm.ko\n");
     }
 
     {

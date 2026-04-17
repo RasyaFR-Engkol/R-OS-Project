@@ -15,7 +15,7 @@ struct KernelAPI{
 
     //PAGINGVIRTUAL
     VOID *(*VirtualAllocPages)(SIZE_T count);
-    VOID *(*VirtualFreePages)(VOID* addr, SIZE_T count);
+    VOID (*VirtualFreePages)(VOID* addr, SIZE_T count);
 
     //PAGINGPHYSICAL
     UPTR (*PhysicalAllocLowPages)(SIZE_T count);

@@ -1,6 +1,7 @@
 #include <kernel_api.hpp>
 #include <../misc/file/extension/elf.hpp>
 #include <logging.hpp>
+#include <mm.hpp>
 
 namespace ModuleManager{
     static KernelAPI g_CoreAPI = {
@@ -8,14 +9,22 @@ namespace ModuleManager{
         .Panic = Printk::Panic,
         .AllocateDMAPages = PageAlloc::DMAAlloc::AllocateDMAPages,
         .AllocateDMABytes = PageAlloc::DMAAlloc::AllocateDMABytes,
-        .FreeDMAPages = PageAlloc::DMAAlloc::FreeDMAPages
+        .FreeDMAPages = PageAlloc::DMAAlloc::FreeDMAPages,
+        .VirtualAllocPages = PageAlloc::VirtualAllocPages,
+        .VirtualFreePages = PageAlloc::VirtualFreePages,
+        .PhysicalAllocLowPages = PageAlloc::PhysicalAllocLowPages,
+        .PhysicalFreeLowPages = PageAlloc::PhysicalFreeLowPages,
+        .PhysicalAllocPages = PageAlloc::PhysicalAllocPages,
+        .PhysicalFreePages = PageAlloc::PhysicalFreePages,
+        .Alloc = Kmalloc::Alloc,
+        .Free = Kmalloc::Free
     };
 
     int LoadModuleAndRun(VOID* FileBuffer){
         U64 imageBase, imageEnd;
         
         // Panggil Loader dari Step 1
-        U64 entryAddress = ELF::LoadKernelModule(FileBuffer, DoCR3::GetCurrentCR3(), &imageBase, &imageEnd);
+        U64 entryAddress = ELF::LoadKernelModule(FileBuffer, HHDM_PhysToVirt((UPTR)DoCR3::GetCurrentCR3()), &imageBase, &imageEnd);
         
         if (entryAddress == (U64)ELF_ERR_UNSUPPORTED || entryAddress == 0) {
             Printk::Write(Printk::Level::LOG_ERR, "Gagal nge-load module!\n");

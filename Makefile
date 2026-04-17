@@ -52,7 +52,8 @@ CXX = ~/opt/cross/bin/x86_64-elf-g++
 
 # Temukan semua file sumber (exclude build directory to avoid generated files)
 C_SRCS := $(shell find . -path ./$(BUILD_DIR) -prune -o -type f -name "*.c" -print | \
-		  grep -v "firmware/acpica/source/")
+          grep -v "firmware/acpica/source/" | \
+          grep -v "exported_driver/")
 
 ifeq ($(BUILD_ACPICA),1)
 ACPICA_SRCS := \
@@ -64,7 +65,8 @@ else
 ACPICA_SRCS :=
 endif
 
-CPP_SRCS := $(shell find . -path ./$(BUILD_DIR) -prune -o -type f -name "*.cpp" -print)
+CPP_SRCS := $(shell find . -path ./$(BUILD_DIR) -prune -o -type f -name "*.cpp" -print | \
+            grep -v "exported_driver/")
 # All ASM sources except the AP trampoline which is a flat binary
 ASM_SRCS := $(shell find . -path ./$(BUILD_DIR) -prune -o -type f -name "*.asm" -print | \
             grep -v "firmware/acpi/madt/smpmod/rmpmlmtramp.asm")
@@ -74,6 +76,47 @@ C_OBJS := $(patsubst ./%, $(BUILD_DIR)/%, $(C_SRCS:.c=.o))
 ACPICA_OBJS := $(patsubst firmware/%, $(BUILD_DIR)/firmware/%, $(ACPICA_SRCS:.c=.o))
 CPP_OBJS := $(patsubst ./%, $(BUILD_DIR)/%, $(CPP_SRCS:.cpp=.o))
 ASM_OBJS := $(patsubst ./%, $(BUILD_DIR)/%, $(ASM_SRCS:.asm=.o))
+
+
+# ================================================
+# FOR KO MODULES (MULTI-FILE FOLDER STRUCTURE)
+# ================================================
+
+# Kita definisikan manual supaya bersih dari -fno-pic kernel
+KMOD_CXXFLAGS_BASE := -g -std=gnu++20 -ffreestanding -fno-exceptions -fno-rtti -m64 -Os \
+				 -Wall -Wextra -IInclude -mno-red-zone -mgeneral-regs-only \
+				 -D__ROS_KERNEL__ -fPIC -mcmodel=large
+
+# LDFLAGS: Tambahkan -pie atau -shared secara eksplisit ke linker
+KMOD_LDFLAGS := -Wl,-shared -Wl,-pie -nostdlib -z max-page-size=0x1000 \
+				-Wl,-e,module_init -Wl,--fatal-warnings
+
+# 1. Cari semua sub-folder di dalam exported_driver/ (misal: exported_driver/xhci/)
+KMOD_DIRS := $(wildcard exported_driver/*/)
+# Ekstrak nama foldernya saja (misal: xhci)
+KMOD_NAMES := $(patsubst exported_driver/%/,%,$(KMOD_DIRS))
+
+# 2. Tentukan target akhir: build/exported_driver/xhci.ko, build/exported_driver/e1000.ko
+KMOD_TARGETS := $(patsubst %, $(BUILD_DIR)/exported_driver/%.ko, $(KMOD_NAMES))
+
+# 3. MACRO: Bikin aturan kompilasi dinamis untuk setiap folder driver
+define MAKE_DRIVER_RULE
+# Ambil semua file .cpp dan .c di folder driver ini (misal di exported_driver/$1/)
+$1_SRCS := $$(shell find exported_driver/$1 -type f -name "*.cpp" -o -name "*.c")
+
+# Bikin list target .o yang akan ditaruh di build/exported_driver/$1/
+$1_OBJS := $$(patsubst exported_driver/%.cpp, $$(BUILD_DIR)/exported_driver/%.o, $$(filter %.cpp, $$($1_SRCS))) \
+		   $$(patsubst exported_driver/%.c, $$(BUILD_DIR)/exported_driver/%.o, $$(filter %.c, $$($1_SRCS)))
+
+# Rule Linker: Gabungkan SEMUA .o di folder ini jadi SATU .ko (misal: $1.ko)
+$$(BUILD_DIR)/exported_driver/$1.ko: $$($1_OBJS)
+	@mkdir -p $$(dir $$@)
+	@echo "  [KMOD-LD]  $$@ (Linked from $1/)"
+	@$$(CXX) $$(KMOD_CXXFLAGS_BASE) -shared $$^ -o $$@ $$(KMOD_LDFLAGS)
+endef
+
+# 4. Eksekusi Macro di atas untuk semua nama driver yang terdeteksi
+$(foreach drv, $(KMOD_NAMES), $(eval $(call MAKE_DRIVER_RULE,$(drv))))
 
 # AP Trampoline (flat binary at 0x8000). We assemble both a flat binary and an
 # embedded object so the kernel can memcpy it into low memory automatically.
@@ -85,7 +128,9 @@ OBJS := $(C_OBJS) $(CPP_OBJS) $(ASM_OBJS) $(TRAMP_OBJ) $(ACPICA_OBJS)
 
 
 # Default rule 
-all: $(TRAMP_BIN) $(TRAMP_OBJ) $(TARGET)
+# --- UBAH BAGIAN INI ---
+# Default rule (Sekarang ngebangun kernel DAN semua driver)
+all: $(TRAMP_BIN) $(TRAMP_OBJ) $(TARGET) $(KMOD_TARGETS)
 
 # Linking
 $(TARGET): $(OBJS)
@@ -124,6 +169,18 @@ $(BUILD_DIR)/%.o: %.cpp
 	@mkdir -p $(dir $@)
 	@echo "  [G++]     $<"
 	@$(CXX) $(CXXFLAGS) -c $< -o $@
+
+# 5. Rule Compiler Individual: Ubah .cpp/.c milik modul jadi .o
+# PENTING: Harus pakai KMOD_CXXFLAGS_BASE supaya dapat -fPIC
+$(BUILD_DIR)/exported_driver/%.o: exported_driver/%.cpp
+	@mkdir -p $(dir $@)
+	@echo "  [KMOD-G++] $<"
+	@$(CXX) $(KMOD_CXXFLAGS_BASE) -c $< -o $@
+
+$(BUILD_DIR)/exported_driver/%.o: exported_driver/%.c
+	@mkdir -p $(dir $@)
+	@echo "  [KMOD-CC]  $<"
+	@$(CXX) $(KMOD_CXXFLAGS_BASE) -x c++ -c $< -o $@
 
 $(BUILD_DIR)/%.o: %.asm
 	@mkdir -p $(dir $@)
