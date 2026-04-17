@@ -12,16 +12,20 @@ typedef enum {
 
 #define PARTITIONMANAGERFUNC
 
+class IBlockDevice;
+
 namespace PartitionManager{
     void InitializePM();
 
-    BOOL RegisterPartition(Partition *Part);
+    BOOL RegisterPartition(Partition *Part, IBlockDevice *WrapperDevice);
 
     Partition* GetPartitionByIndex(U32 Index);
 
     U32 GetPartitionCount();
 
     PARTMANAGER InitializeRegisteredPartitionToFS();
+
+    Partition *FindPartitionByDeviceName(const char *DeviceName);
 
     // membuat struct untuk mengembalikan data yang diminta oleh
     // userland untuk mengetahui Partisi yang ada di sistem

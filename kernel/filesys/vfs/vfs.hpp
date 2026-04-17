@@ -70,6 +70,7 @@ namespace VFSManager{
     INTN ReadDir(File* dirFile, void* buffer, U32 bufferSize);
     INTN Ioctl(File* file, U32 command, U64 arg);
     BOOL SyncAll();
+    BOOL MountDevice(const char* devicePath, const char* mountPath);
 }
 
 // pipa

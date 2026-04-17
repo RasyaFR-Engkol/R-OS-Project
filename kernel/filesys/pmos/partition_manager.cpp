@@ -6,6 +6,9 @@
 #include <filesystem/filesystem.hpp>
 #include "partition_manager.hpp"
 #include "../vfs/vfs.hpp"
+#include <../kernel/filesys/iblockdevice.hpp>
+#include <../kernel/dev/devicemanager.hpp>
+#include <../kernel/filesys/devfs/devfs.hpp>
 
 namespace PartitionManager{
     static const U32 MAX_PARTITIONS = 128;
@@ -23,6 +26,15 @@ namespace PartitionManager{
         Printk::Write(Printk::Level::LOG_NOTICE, "PartManager v1.0 Copyright ROS Team (This is part of ManagementPMTools by ROS Team).\n");
     }
 
+    Partition *FindPartitionByDeviceName(const char *DeviceName){
+        for(U32 i = 0; i < s_PartitionsCount; i++){
+            if(s_PartitionsList[i] && String::Strcmp(s_PartitionsList[i]->GetPartitionName(), DeviceName) == 0){
+                return s_PartitionsList[i];
+            }
+        }
+        return nullptr;
+    }
+
     PARTMANAGER InitializeRegisteredPartitionToFS(){
         //Printk::Write(Printk::Level::LOG_INFO, " Partition Manager: Initializing registered partitions to filesystems...\n");
 
@@ -38,20 +50,10 @@ namespace PartitionManager{
             if(Part && Part->Mount()){
                 char MountPath[64];
                 String::Strcpy(MountPath, "/mnt/part");
-                //String::Strcat(MountParh, String::Itoa(i, MountPath, 10));
-                switch(i){
-                    case 0: String::Strcat(MountPath, "0"); break;
-                    case 1: String::Strcat(MountPath, "1"); break;
-                    case 2: String::Strcat(MountPath, "2"); break;
-                    case 3: String::Strcat(MountPath, "3"); break;
-                    case 4: String::Strcat(MountPath, "4"); break;
-                    case 5: String::Strcat(MountPath, "5"); break;
-                    case 6: String::Strcat(MountPath, "6"); break;
-                    case 7: String::Strcat(MountPath, "7"); break;
-                    case 8: String::Strcat(MountPath, "8"); break;
-                    case 9: String::Strcat(MountPath, "9"); break;
-                    default: String::Strcat(MountPath, "X"); break; // for simplicity
-                }
+                
+                char numbuf[16];
+                String::Utoa((unsigned long long)(i+1), (char*)numbuf, 10); // i+1 agar partisi pertama jadi /mnt/part1
+                String::Strcat(MountPath, numbuf);
 
                 if(VFSManager::Mount(MountPath, Part)){
                     Printk::Write(Printk::Level::LOG_INFO, "  Mounted partition %d at %s\n", i, MountPath);
@@ -66,25 +68,29 @@ namespace PartitionManager{
         return PARTITIONS_INITIALIZED;
     }
 
-    BOOL RegisterPartition(Partition *Part){
-        if(!Part){
-            Printk::Write(Printk::Level::LOG_ERR, " Partition Manager: Invalid Partition Entry.\n");
-            return FALSE;
+    BOOL RegisterPartition(Partition *Part, IBlockDevice *ParentDevice) {
+        if(!Part || s_PartitionsCount >= MAX_PARTITIONS) return FALSE;
+
+        // Gunakan count saat ini + 1 untuk index penamaan (misal sda1)
+        U32 partIndex = s_PartitionsCount + 1;
+
+        PartitionBlockDevice *Wrapper = new PartitionBlockDevice(Part, ParentDevice->GetDeviceName(), partIndex);
+        if(!Wrapper) return FALSE;
+
+        // Registrasi
+        DeviceManager::RegisterBlockDevice(Wrapper);
+        Part->SetDeviceWrapper(Wrapper);
+
+        // Registrasi ke DevFS
+        FileSystem *FS = nullptr; CHAR8 rel[256];
+        if(VFSManager::ResolvePath("/dev", &FS, rel) && FS) {
+            ((DevFS*)FS)->RegisterBlockDevice(Wrapper, Wrapper->GetDeviceName());
         }
 
-        if(s_PartitionsCount >= MAX_PARTITIONS){
-            Printk::Write(Printk::Level::LOG_ERR, " Partition Manager: Maximum partition limit reached.\n");
-            return FALSE;
-        }
-
+        // Baru simpan ke list dan naikkan count kalau semua ok
         s_PartitionsList[s_PartitionsCount] = Part;
+        s_PartitionsList[s_PartitionsCount]->SetDeviceName(Wrapper->GetDeviceName());
         s_PartitionsCount++;
-
-        Printk::Write(Printk::Level::LOG_INFO, "Partition Manager: Registered new partition. No. %d (LBA: %llu, Sectors: %llu)\n",
-            s_PartitionsCount,
-            Part->GetStartingLBA(),
-            Part->GetSectorCount()
-        );
 
         return TRUE;
     }

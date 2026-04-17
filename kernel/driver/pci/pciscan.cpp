@@ -95,7 +95,7 @@ namespace PCI{
                     }
                 }
 
-                // Mencari Intel HDA Sound
+                // Mencari Woodpecker AC97 Sound
                 if (ClassCode == 0x04 && SubClass == 0x01) {
                     Write(Level::LOG_INFO, "AC97 Audio Controller Found at %d:%d:%d\n", 
                         (int)bus, (int)device, (int)function);

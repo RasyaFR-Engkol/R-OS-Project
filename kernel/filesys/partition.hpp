@@ -16,10 +16,11 @@ class IBlockDevice;
 
 class Partition{
     private:
-        // Info partisi
+    // Info partisi
     U64 m_StartingLBA;      // LBA absolut di disk
     U64 m_EndingLBA;
     U64 m_SectorCount;
+    CHAR8 m_Name[64];
     GPTFS::GPTGuid m_TypeGUID;
     GPTFS::GPTGuid m_UniqueGUID;
     
@@ -27,8 +28,8 @@ class Partition{
     IBlockDevice *m_ParentDevice;
 
     FileSystem* m_Filesystem; // Pointer ke driver FS yang ter-mount
-    BOOL m_isMounted;
-    BOOL m_ReadOnly;
+    BOOL m_isMounted = FALSE;
+    BOOL m_ReadOnly = TRUE;
     // Optional wrapper object registered with DeviceManager/DevFS
     IBlockDevice* m_DeviceWrapper;
 
@@ -68,6 +69,8 @@ class Partition{
     // Store pointer to wrapper device representing this partition
     void SetDeviceWrapper(IBlockDevice* wrapper){ m_DeviceWrapper = wrapper; }
     IBlockDevice* GetDeviceWrapper(){ return m_DeviceWrapper; }
+    VOID SetDeviceName(const char* name) { String::Strcpy(m_Name, name); }
+    const char* GetPartitionName() { return m_Name; }
 
     BOOL ReadSectors(U64 LBA, U32 Count, PageAlloc::DMAAlloc::DMABuffer **BufferOut) {
         if (LBA + Count > m_SectorCount) {

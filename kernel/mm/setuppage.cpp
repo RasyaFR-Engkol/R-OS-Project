@@ -145,6 +145,21 @@ namespace Paging{
         }
     }
 
+    // Inisialisasi PAT (Page Attribute Table)
+    // Kita set Entry 4 (PA4) menjadi Write-Combining (0x01).
+    // Indeks 4 dipilih hardware jika: PAT=1, PCD=0, PWT=0.
+    {
+        U32 low, high;
+        asm volatile("rdmsr" : "=a"(low), "=d"(high) : "c"(0x277));
+        U64 pat = ((U64)high << 32) | low;
+        pat &= ~(0xFFULL << 32); // Kosongkan PA4 (bits 32-39)
+        pat |= (0x01ULL << 32);  // Isi PA4 dengan 0x01 (WC)
+        low = (U32)pat;
+        high = (U32)(pat >> 32);
+        asm volatile("wrmsr" : : "a"(low), "d"(high), "c"(0x277));
+        Printk::Write(Printk::Level::LOG_INFO, "PAT initialized: PA4 set to Write-Combining (0x01)\n");
+    }
+
     // After loading CR3, the higher-half direct map is active.
     // Update KernelPML4 to point to the HHDM-mapped virtual address
     // so future dereferences use the higher-half view.

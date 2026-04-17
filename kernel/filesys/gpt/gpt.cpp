@@ -70,8 +70,6 @@ namespace GPTFS{
             return FALSE;
         }
 
-        //Printk::Write(Printk::Level::LOG_DEBUG, "GPT: Parsing Partition Entries in LBA %llu\n", GPTHeader0->PartitionEntryLBA);
-
         // PERBAIKAN:
         U32 TableSizeBytes = GPTHeader0->NumberOfPartitionEntries * GPTHeader0->SizeOfPartitionEntry;
             U32 SectorsToRead = (TableSizeBytes + (SECTOR_SIZE - 1)) / SECTOR_SIZE; // (pembulatan ke atas)
@@ -108,62 +106,19 @@ namespace GPTFS{
             }
 
             PartitionCount++;
-
-            //Printk::Write(Printk::Level::LOG_DEBUG, "  Partition No.%d:\n", PartitionCount);
-            //Printk::Write(Printk::Level::LOG_DEBUG, "    GUID Type: %08X-%04X-%04X-...\n", 
-              //  entry->PartitionTypeGUID.data1, 
-              //  entry->PartitionTypeGUID.data2, 
-              //  entry->PartitionTypeGUID.data3);
-            
-            //Printk::Write(Printk::Level::LOG_DEBUG, "    First LBA: %llu, Last LBA: %llu\n",
-            //    entry->StartingLBA,
-            //    entry->EndingLBA);
-
             Partition *newPartition = new Partition(entry, Device);
             if(newPartition){
                 // Daftarkan partisi baru ke PartitionManager
-                PartitionManager::RegisterPartition(newPartition);
-
-                // Buat wrapper IBlockDevice kecil untuk mewakili partisi ini
-                // sehingga bisa didaftarkan ke DeviceManager dan DevFS sebagai
-                // node /dev/<parent><n> (contoh: sda1, sda2).
-
-                // PartitionCount is the sequential index for non-empty partitions
-                // (1-based). Use it as the partition number suffix.
-                PartitionBlockDevice *pdev = new PartitionBlockDevice(newPartition, Device->GetDeviceName(), (U32)PartitionCount);
-                if(pdev){
-                    BOOL ok1 = DeviceManager::RegisterBlockDevice(pdev);
-                    // Store pointer on Partition so we can unregister later
-                    newPartition->SetDeviceWrapper(pdev);
-                    BOOL ok2 = FALSE;
-                    // Also try to register with DevFS mounted at /dev
-                    FileSystem* fs = nullptr; char rel[256];
-                    if (VFSManager::ResolvePath((const char*)"/dev", &fs, rel) && fs) {
-                        DevFS* devfs = (DevFS*)fs;
-                        ok2 = devfs->RegisterBlockDevice(pdev, pdev->GetDeviceName());
-                    }
-                    Printk::Write(Printk::Level::LOG_DEBUG, " GPT: Registered partition device %s (devmgr=%d, devfs=%d)\n", pdev->GetDeviceName(), ok1 ? 1 : 0, ok2 ? 1 : 0);
-                }
-
+                PartitionManager::RegisterPartition(newPartition, Device);
             } else {
                 Printk::Write(Printk::Level::LOG_ERR, " GPT: Failed to allocate memory for new partition object.\n");
             }
         }
-
-        //Printk::Write(Printk::Level::LOG_NOTICE, " GPT: Total %d partitions found.\n", PartitionCount);
-
         PageAlloc::DMAAlloc::FreeDMABuffer(buf);
         return TRUE;
     }
 
     BOOL InitFs(){
-        PartitionManager::InitializePM();
-
-        EXT2::InitializeEXT2Driver();
-        // Register filesystem drivers BEFORE initializing GPT/partitions
-        VFSManager::RegisterFileSystem("FAT32", []()->FileSystem* { return new FAT32FileSystem(); });
-
-        //Printk::Write(Printk::Level::LOG_NOTICE, " GPT: Starting initialization...\n");
 
         U32 DeviceCount = DeviceManager::GetBlockDeviceCount();
         if(DeviceCount == 0){
@@ -198,10 +153,25 @@ namespace GPTFS{
             AttemptGPTCall++;
         }
 
-        //Printk::Write(Printk::Level::LOG_DEBUG, " GPT: Initialization complete (%llu attempt)\n", AttemptGPTCall);
-
         PartitionManager::InitializeRegisteredPartitionToFS();
 
+        return TRUE;
+    }
+
+    BOOL ScanAllDevices() {
+        U32 DeviceCount = DeviceManager::GetBlockDeviceCount();
+        if(DeviceCount == 0) return FALSE;
+
+        for(U32 i = 0 ; i < DeviceCount; i++){
+            IBlockDevice *Device = DeviceManager::GetBlockDevice(i);
+            if(!Device) continue;
+
+            GPTFS::GPTHeader *GPTHeader0 = nullptr;
+            if(InitializeGPT(Device, &GPTHeader0)){
+                ParsePartitionEntries(Device, GPTHeader0);
+            }
+        }
+        //PartitionManager::InitializeRegisteredPartitionToFS();
         return TRUE;
     }
 }

@@ -118,20 +118,6 @@ namespace xHCI {
         // exposed via /dev as a device node (name format: "ud%c"). The
         // wrapper does not implement sector IO; it simply provides a name
         // so DevFS/DeviceManager can list the controller.
-        class XHCIBlockDevice : public IBlockDevice {
-        public:
-            CHAR8 m_Name[8];
-            int m_Index;
-            XHCIBlockDevice(int idx){
-                m_Index = idx;
-                char letter = (char)('a' + (idx & 0x1F));
-                m_Name[0] = 'u'; m_Name[1] = 'd'; m_Name[2] = letter; m_Name[3] = '\0';
-            }
-            virtual ~XHCIBlockDevice() {}
-            virtual BOOL ReadSectors(U64 LBA, U32 Count, PageAlloc::DMAAlloc::DMABuffer **BufferOut) override { (void)LBA; (void)Count; (void)BufferOut; return FALSE; }
-            virtual BOOL WriteSectors(U64 LBA, U32 Count, PageAlloc::DMAAlloc::DMABuffer *Buffer) override { (void)LBA; (void)Count; (void)Buffer; return FALSE; }
-            virtual const CHAR8* GetDeviceName() override { return m_Name; }
-        };
 
         // Instantiate and register the device
         int idx_for_name = g_xhci_controller_count - 1;

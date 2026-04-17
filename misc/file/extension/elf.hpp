@@ -32,6 +32,8 @@
 #define PT_DYNAMIC 2
 #endif
 
+#define ET_DYN 3  /* Shared object file */
+
 namespace ELF{
     struct ELF64_EHDR{
         UCHAR8 E_Ident[EI_NIDENT];
@@ -65,4 +67,9 @@ namespace ELF{
                                     U64 *TargetCR3,
                                     U64 *ImageBaseOut = nullptr,
                                     U64 *ImageEndOut = nullptr);
+
+    U64 LoadKernelModule(VOID *ELFImage,
+                         U64 *KernelPML4,
+                         U64 *ImageBaseOut,
+                         U64 *ImageEndOut);
 }

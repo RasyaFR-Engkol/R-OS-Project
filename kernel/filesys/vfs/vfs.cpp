@@ -188,7 +188,39 @@ namespace VFSManager{
         g_MountPointCount++;
         Printk::Write(Printk::Level::LOG_INFO, "VFS: Mounted FS at %s\n", path);
         g_VFSLock.ReleaseWrite();
-        return TRUE;
+        return TRUE;   
+    }
+
+    BOOL MountDevice(const char* devicePath, const char* mountPath) {
+        FileSystem *devfs = nullptr;
+        char relative[256];
+        
+        // 1. Cari Inode untuk "/dev/sda1"
+        if (!VFSManager::ResolvePath(devicePath, &devfs, relative)) {
+            Printk::Write(Printk::Level::LOG_ERR, "VFS: Device path %s not found\n", devicePath);
+            return FALSE;
+        }
+
+        // 2. Tanya ke DevFS, InodeID ini device apa?
+        Inode node;
+        if (!devfs->PopulateInode(devfs->Lookup(relative), &node)) return FALSE;
+
+        if (node.Type != FT_DEVBLOK) {
+            Printk::Write(Printk::Level::LOG_ERR, "VFS: %s is not a block device\n", devicePath);
+            return FALSE;
+        }
+
+        // 3. Tarik IBlockDevice-nya
+        IBlockDevice* bdev = (IBlockDevice*)(UPTR)node.InodeID;
+        
+        // 4. Di sinilah triknya: Kita harus tahu apakah bdev ini 
+        // adalah milik sebuah Partition. 
+        // Kita bisa casting (jika yakin) atau simpan pointer di dalam Wrapper.
+        PartitionBlockDevice* pdev = (PartitionBlockDevice*)bdev;
+        Partition* part = pdev->m_Part; // Dapet objek partisinya!
+
+        // 5. Panggil fungsi Mount lu yang tadi
+        return VFSManager::Mount(mountPath, part);
     }
 
     BOOL MountFS(const char *path, FileSystem* fs){

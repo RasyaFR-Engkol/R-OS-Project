@@ -67,16 +67,6 @@ BOOL Partition::Mount(){
 
     if(m_Filesystem->Mount(this)){
         m_isMounted = TRUE;
-        static BOOL RootAssigned = FALSE;
-        if((String::Strcmp(DetectedFSType, "EXT2") == 0) && !RootAssigned){
-            FileSystem *Root = ROOTFS::GetRootFS();
-            if(Root){
-                ((RootFS*)Root)->SetBackingFileSystem(m_Filesystem);
-                Printk::Write(Printk::Level::LOG_NOTICE, " Partition: Set as RootFS backing store!\n");
-                RootAssigned = TRUE;
-            }
-        }
-        
         return TRUE;
     } else {
         Printk::Write(Printk::Level::LOG_ERR, " Partition: Filesystem driver failed to mount partition.\n");

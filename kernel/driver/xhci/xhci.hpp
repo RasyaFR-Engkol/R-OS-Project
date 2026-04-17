@@ -6,6 +6,7 @@
 #include <mm.hpp>
 #include "../hid/usb_hid_key.hpp"
 #include <task.hpp>
+#include <../kernel/dev/devicemanager.hpp>
 
 namespace xHCI{
     #define XHCI_MAX_CONTROLLERS 4
@@ -273,6 +274,21 @@ namespace xHCI{
 // ==============================
 // EVENT TYPE
 // ==============================
+#define EVENT_TYPE_TRANSFER_EVENT       32  
 #define EVENT_TYPE_COMMAND_COMPLETION   33
 #define EVENT_TYPE_PORT_STATUS_CHANGE   34
-#define EVENT_TYPE_TRANSFER_EVENT       32  
+
+class XHCIBlockDevice : public IBlockDevice {
+public:
+    CHAR8 m_Name[8];
+    int m_Index;
+    XHCIBlockDevice(int idx){
+        m_Index = idx;
+        char letter = (char)('a' + (idx & 0x1F));
+        m_Name[0] = 'u'; m_Name[1] = 'd'; m_Name[2] = letter; m_Name[3] = '\0';
+        }
+    virtual ~XHCIBlockDevice() {}
+    virtual BOOL ReadSectors(U64 LBA, U32 Count, PageAlloc::DMAAlloc::DMABuffer **BufferOut) override { (void)LBA; (void)Count; (void)BufferOut; return FALSE; }
+    virtual BOOL WriteSectors(U64 LBA, U32 Count, PageAlloc::DMAAlloc::DMABuffer *Buffer) override { (void)LBA; (void)Count; (void)Buffer; return FALSE; }
+    virtual const CHAR8* GetDeviceName() override { return m_Name; }
+};

@@ -51,4 +51,6 @@ namespace GPTFS{
     BOOL ParsePartitionEntries(IBlockDevice* Device, GPTFS::GPTHeader* GPTHeader0);
 
     BOOL InitFs();
+
+    BOOL ScanAllDevices();
 }

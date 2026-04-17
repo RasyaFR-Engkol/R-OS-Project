@@ -64,7 +64,7 @@ namespace FB {
             void *virt = PageAlloc::VirtualAllocPages(pages);
             if (virt) {
                 // Map physical pages into the allocated virtual range
-                if (PageAlloc::MapPages(KernelPML4, phys_page_base, (UPTR)virt, pages, PAGE_PRESENT | PAGE_RW)) {
+                if (PageAlloc::MapPages(KernelPML4, phys_page_base, (UPTR)virt, pages, PAGE_PRESENT | PAGE_RW )) {
                     fb_virt = (U8*)virt + offset;
                 } else {
                     // mapping failed; free the virtual pages and fall back to HHDM
@@ -105,7 +105,7 @@ namespace FB {
                     // Allocate contiguous physical pages and map them
                     UPTR phys_back = PageAlloc::PhysicalAllocPages(back_pages);
                     if (phys_back != 0) {
-                        if (PageAlloc::MapPages(KernelPML4, phys_back, (UPTR)vbuf, back_pages, PAGE_PRESENT | PAGE_RW)) {
+                        if (PageAlloc::MapPages(KernelPML4, phys_back, (UPTR)vbuf, back_pages, PAGE_PRESENT | PAGE_RW )) {
                             state.backbuffer = (U8*)vbuf;
                         } else {
                             // mapping failed; free physical + virtual
@@ -165,7 +165,7 @@ namespace FB {
             // Map Physical VRAM ke Virtual baru.
             // PENTING: Gunakan PAGE_PCD (Cache Disable) atau Write-Combining kalau ada,
             // karena ini VRAM GPU. Kalau di-cache CPU, gambar gak bakal muncul real-time.
-            if (PageAlloc::MapPages(KernelPML4, Config->FrameBufferAddr, (UPTR)virt, pages, PAGE_PRESENT | PAGE_RW)) {
+            if (PageAlloc::MapPages(KernelPML4, Config->FrameBufferAddr, (UPTR)virt, pages, PAGE_PRESENT | PAGE_RW )) {
                  new_fb_virt = (U8*)virt;
             } else {
                  PageAlloc::VirtualFreePages(virt, pages);
@@ -187,7 +187,7 @@ namespace FB {
             // Alloc Backbuffer Physical (RAM biasa, jadi boleh di-cache -> Hapus PAGE_PCD)
             UPTR pback = PageAlloc::PhysicalAllocPages(pages);
             if (pback) {
-                if (PageAlloc::MapPages(KernelPML4, pback, (UPTR)vback, pages, PAGE_PRESENT | PAGE_RW)) {
+                if (PageAlloc::MapPages(KernelPML4, pback, (UPTR)vback, pages, PAGE_PRESENT | PAGE_RW )) {
                      new_backbuffer = (U8*)vback;
                      // Bersihkan backbuffer baru jadi hitam biar gak sampah
                      String::Memset(new_backbuffer, 0, fb_bytes);

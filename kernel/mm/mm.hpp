@@ -17,6 +17,14 @@
 #define PAGE_DIRTY     0x40     // bit 6: dirty
 #define PAGE_PS        0x80     // bit 7: huge page (2 MiB / 1 GiB)
 #define PAGE_GLOBAL    0x100    // bit 8: global page
+#define PAGE_PAT       0x80     // bit 7: PAT bit untuk 4KB PTE
+#define PAGE_PAT_LARGE 0x1000   // bit 12: PAT bit untuk 2MB/1GB entries
+
+// Write-Combining (Asumsi Indeks PAT 4 di-setup sebagai WC)
+// Pemilihan Indeks 4: PAT=1, PCD=0, PWT=0
+#define PAGE_WC        PAGE_PAT
+#define PAGE_WC_LARGE  (PAGE_PS | PAGE_PAT_LARGE)
+
 #define PAGE_NX        (1ULL << 63) // bit 63: no-execute (EFER.NXE harus di-set)
 
 // --- Tambahkan konstanta ini ---

@@ -1,6 +1,8 @@
 // Minimal kernel entry implementation that prints to serial (COM1)
 // This helps verify that we've actually jumped into 64-bit kernel_main.
 #include "kernel/dev/devicemanager.hpp"
+#include "kernel/filesys/filesystem.hpp"
+#include "kernel/filesys/partition.hpp"
 #define PRINTK_MODULE_NAME "Kernel"
 #include <stdint.h>
 #include <serial.hpp>
@@ -75,7 +77,11 @@ ABI_C NORET void KernelMain(VOID*)
     // Initialize PCI and its drivers
     PCI::IntializePCIDrivers();
 
-    GPTFS::InitFs();
+    PartitionManager::InitializePM();
+
+    EXT2::InitializeEXT2Driver();
+    VFSManager::RegisterFileSystem("FAT32", []()->FileSystem* { return new FAT32FileSystem(); });
+    GPTFS::ScanAllDevices();
 
     Userland::Syscall_Init();
     SharedMemoryManager::Init();
@@ -99,6 +105,17 @@ ABI_C NORET void KernelMain(VOID*)
         }
     } else {
         Printk::Write(Printk::LOG_ERR, "ERROR: NoInstanceFound.\n");
+    }
+
+    Partition *P = PartitionManager::FindPartitionByDeviceName("sda2");
+    if(P && P->Mount()){
+        FileSystem *EXT2FS = P->GetFilesystem();
+        if(EXT2FS){
+            ROOTFS::GetRootFS()->SetBackingFileSystem(EXT2FS);
+            Printk::Write(Printk::Level::LOG_INFO, "KernelMain: Successfully mounted partition sda2 as RootFS Backing Filesystem.\n");
+        }
+    } else {
+        Printk::Write(Printk::Level::LOG_ERR, "KernelMain: Failed to mount partition sda2.\n"); 
     }
 
     {

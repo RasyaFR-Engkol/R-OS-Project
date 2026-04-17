@@ -861,3 +861,80 @@ VOID Sys_Lstat(CpuContext_T *CPUContext){
 
     RETVAL(CPUContext) = 0;
 }
+
+VOID Sys_Mount(CpuContext_T *ctx){
+    const char* dev_name = (const char*)CATCHARG1(ctx);
+    const char* mount_point = (const char*)CATCHARG2(ctx);
+    const char* fs_type = (const char*)CATCHARG3(ctx);
+    __MAYBE_UNUSED unsigned long flags = (unsigned long)CATCHARG4(ctx);
+    __MAYBE_UNUSED void* data = (void*)CATCHARG5(ctx);
+
+    Tasking::Task *Curtask = Tasking::GetCurrentTaskPtr();
+    if (!Curtask) {
+        RETVAL(ctx) = -ROS_ERROR_TRY_AGAIN_LATER;
+        return;
+    }
+
+    // ambil data 1 per 1 dari user
+    CHAR8 DevName[256], MountPoint[256], FSType[256];
+    U64 *user_pml4 = HHDM_PhysToVirt(Curtask->CR3);
+    
+    // Copy per 1 byte untuk menghindari segfault kalau stringnya gak null-terminated
+    for(int i = 0; i < (int)sizeof(DevName) - 1; i++){
+        char c;
+        if(!PageAlloc::CopyFromUser(user_pml4, &c, (void*)(dev_name + i), 1)){
+            RETVAL(ctx) = -ROS_ERROR_FAULTY_ADDRESS;
+            return;
+        }
+        DevName[i] = c;
+        if(c == '\0') break;
+    }
+    DevName[sizeof(DevName) - 1] = '\0';
+
+    for(int i = 0; i < (int)sizeof(MountPoint) - 1; i++){
+        char c;
+        if(!PageAlloc::CopyFromUser(user_pml4, &c, (void*)(mount_point + i), 1)){
+            RETVAL(ctx) = -ROS_ERROR_FAULTY_ADDRESS;
+            return;
+        }
+        MountPoint[i] = c;
+        if(c == '\0') break;
+    }
+    MountPoint[sizeof(MountPoint) - 1] = '\0';
+
+    for(int i = 0; i < (int)sizeof(FSType) - 1; i++){
+        char c;
+        if(!PageAlloc::CopyFromUser(user_pml4, &c, (void*)(fs_type + i), 1)){
+            RETVAL(ctx) = -ROS_ERROR_FAULTY_ADDRESS;
+            return;
+        }
+        FSType[i] = c;
+        if(c == '\0') break;
+    }
+    FSType[sizeof(FSType) - 1] = '\0';
+    // Canonicalize mount point relative to task CWD
+    CHAR8 FinalMount[256];
+    CanonicalizePath(Curtask->CWD, (const char*)MountPoint, (char*)FinalMount);
+
+    // If mountpoint already used, refuse
+    FileSystem* tmpFs = nullptr; char rel[256];
+    if (VFSManager::FindMountPoint((const char*)FinalMount, &tmpFs, rel)) {
+        RETVAL(ctx) = -ROS_ERROR_RESOURCE_BUSY; // already mounted
+        return;
+    }
+
+    // Try mounting device path (typical case: dev_name == "/dev/sda1")
+    if (String::Strlen(DevName) == 0) {
+        RETVAL(ctx) = -ROS_ERROR_FAULTY_ADDRESS;
+        return;
+    }
+
+    if (VFSManager::MountDevice((const char*)DevName, (const char*)FinalMount)) {
+        RETVAL(ctx) = 0; // success
+        return;
+    }
+
+    // Generic failure: device not found or mount failed
+    RETVAL(ctx) = -ROS_ERROR_NO_DEV;
+    return;
+}
