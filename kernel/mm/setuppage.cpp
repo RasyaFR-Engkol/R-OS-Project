@@ -7,6 +7,7 @@
 #include "../Include/rossys.hpp"
 #include "../mm/kmalloc/kmalloc.hpp"
 #include "../../x86_64/tss.hpp"
+#include "rosval.h"
 #include <bootinfo.h>
 #include <string.hpp>
 #include <../kernel/mm/shm/shm.hpp>
@@ -16,60 +17,114 @@
 U64 *KernelPML4;
 UPTR KernelPML4Phys;
 
+extern "C" char __kernel_phys_start[];
+extern "C" char __kernel_phys_end[];
+
+ABI_C char __text_start[], __text_end[];
+ABI_C char __rodata_start[], __rodata_end[];
+ABI_C char __data_start[], __bss_end[];
+
 namespace Paging{
     // Virtual address of the kernel stack top after SwitchToKernelStack
     static UPTR KernelStackTopVirt = 0;
 
+    VOID ProtectKernelSections(U64 *PML4Virt){
+        using namespace PageAlloc;
+
+        // 1. TEXT: Read-Only + Executable
+        // (Tidak ada PAGE_RW dan tidak ada PAGE_NX)
+        SetRegionFlags(PML4Virt, (UPTR)__text_start, (UPTR)__text_end, PAGE_PRESENT);
+
+        // 2. RODATA: Read-Only + No-Execute
+        // (Ada PAGE_NX, tidak ada PAGE_RW)
+        SetRegionFlags(PML4Virt, (UPTR)__rodata_start, (UPTR)__rodata_end, PAGE_PRESENT | PAGE_NX);
+
+        // 3. DATA & BSS: Read-Write + No-Execute
+        // (Ada PAGE_RW dan PAGE_NX)
+        SetRegionFlags(PML4Virt, (UPTR)__data_start, (UPTR)__bss_end, PAGE_PRESENT | PAGE_RW | PAGE_NX);
+
+        // Karena kita ngubah banyak banget PTE, lebih efisien & aman kita flush seluruh TLB 
+        // daripada ngandelin invlpg per halaman. Reload CR3 langsung:
+        asm volatile("mov %%cr3, %%rax; mov %%rax, %%cr3" ::: "rax", "memory");
+    }
+
     void Initialize() {
         // Initialize allocators
         PageAlloc::Physical();
+
+        UPTR StartReserve = 0x100000;
+        UPTR EndKernel = (UPTR)__kernel_phys_end;
+
+        EndKernel = (EndKernel + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1); // align up
+        SIZE_T KernelPages = (EndKernel - StartReserve) / PAGE_SIZE;
+
+        PageAlloc::PhysicalReserve(StartReserve, KernelPages);
+        Serial::Printf("[ROS] Reserved Kernel: %p - %p (%llu pages)\n", 
+                   (void*)StartReserve, (void*)EndKernel, KernelPages);
+
+        // ==========================================
+        // STRATEGI 2: DEEP TABLE PROTECTION (Anti-Double Fault)
+        // ==========================================
+        // Kita telusuri CR3 sekarang dan reserve semua table yang dipakai bootloader.
+        U64 currentCr3 = 0;
+        asm volatile("mov %%cr3, %0" : "=r"(currentCr3));
+        U64 cr3Phys = currentCr3 & ~0xFFFULL;
+        
+        // Amankan PML4 itu sendiri
+        PageAlloc::PhysicalReserve((UPTR)cr3Phys, 1);
+        U64* bootPML4 = (U64*)(UPTR)cr3Phys;
+
+        // Scan seluruh PML4 untuk mencari PDPT, PD, dan PT yang aktif
+        for (int i = 0; i < 512; ++i) {
+            if (bootPML4[i] & PAGE_PRESENT) {
+                U64 pdpt_p = bootPML4[i] & ~0xFFFULL;
+                PageAlloc::PhysicalReserve((UPTR)pdpt_p, 1);
+                U64* pdpt = (U64*)(UPTR)pdpt_p;
+
+                for (int j = 0; j < 512; ++j) {
+                    if (pdpt[j] & PAGE_PRESENT) {
+                        if (pdpt[j] & PAGE_PS) continue; // Skip 1GB pages
+                        
+                        U64 pd_p = pdpt[j] & ~0xFFFULL;
+                        PageAlloc::PhysicalReserve((UPTR)pd_p, 1);
+                        U64* pd = (U64*)(UPTR)pd_p;
+
+                        for (int k = 0; k < 512; ++k) {
+                            if ((pd[k] & PAGE_PRESENT) && !(pd[k] & PAGE_PS)) {
+                                U64 pt_p = pd[k] & ~0xFFFULL;
+                                PageAlloc::PhysicalReserve((UPTR)pt_p, 1);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         PageAlloc::Virtual();
 
-        // Reserve bootstrap page-tables so allocator won't hand out their frames
-        constexpr UPTR EARLY_RESERVE_BASE = 0x00100000ULL;   // 1 MiB
-        constexpr SIZE_T EARLY_RESERVE_PAGES = 512;          // cover first 2 MiB
-        PageAlloc::PhysicalReserve(EARLY_RESERVE_BASE, EARLY_RESERVE_PAGES);
         // The boot stub maps the first 1 GiB identity using 2MiB pages.
         // Avoid touching boot tables here to keep higher-half code model clean.
         constexpr SIZE_T TWO_MB = 0x200000;
 
-    // Allocate one physical page untuk PML4 baru (masih dalam identity-map)
-    UPTR phys = PageAlloc::PhysicalAllocPages(1);
-    KernelPML4Phys = phys;
+        // Allocate one physical page untuk PML4 baru (masih dalam identity-map)
+        UPTR phys = PageAlloc::PhysicalAllocPages(1);
+        KernelPML4Phys = phys;
 
-    // Selagi identity mapping masih aktif kita bisa menulis PML4 lewat pointer
-    KernelPML4 = (U64*)phys;
+        // Selagi identity mapping masih aktif kita bisa menulis PML4 lewat pointer
+        KernelPML4 = (U64*)phys;
 
-    // Nolkan seluruh entri terlebih dahulu
-    for (size_t i = 0; i < 512; ++i) KernelPML4[i] = 0;
+        // Nolkan seluruh entri terlebih dahulu
+        for (size_t i = 0; i < 512; ++i) KernelPML4[i] = 0;
+        for (size_t i = 0; i < 512; ++i) KernelPML4[i] = bootPML4[i];
 
-    // Copy entries from current PML4 (read CR3 physical address)
-    U64 currentCr3 = 0;
-    asm volatile("mov %%cr3, %0" : "=r"(currentCr3));
-    U64 cr3Phys = currentCr3 & ~0xFFFULL;
-    // Reserve bootstrap tables so allocator doesn't hand them out
-    PageAlloc::PhysicalReserve((UPTR)cr3Phys, 1);
-    U64* bootPML4 = (U64*)(UPTR)cr3Phys; // accessible via identity map
-    // Reserve identity PDPT/PD used by the boot stub (slot 0)
-    if (bootPML4[0] & PAGE_PRESENT) {
-        U64 id_pdpt_phys = bootPML4[0] & ~0xFFFULL;
-        PageAlloc::PhysicalReserve((UPTR)id_pdpt_phys, 1);
-        U64* id_pdpt = (U64*)(UPTR)id_pdpt_phys;
-        if (id_pdpt[0] & PAGE_PRESENT) {
-            U64 id_pd_phys = id_pdpt[0] & ~0xFFFULL;
-            PageAlloc::PhysicalReserve((UPTR)id_pd_phys, 1);
+        // Duplikasi entri low-half ke upper-half (256..511) supaya kernel punya
+        // alias higher-half. Nantinya ketika kita pindah eksekusi ke alamat tinggi,
+        // cukup gunakan entri atas ini dan bisa mengosongkan low-half per proses.
+        for (size_t i = 0; i < 256; ++i) {
+            if (KernelPML4[256 + i] == 0) {
+                KernelPML4[256 + i] = bootPML4[i];
+            }
         }
-    }
-    for (size_t i = 0; i < 512; ++i) KernelPML4[i] = bootPML4[i];
-
-    // Duplikasi entri low-half ke upper-half (256..511) supaya kernel punya
-    // alias higher-half. Nantinya ketika kita pindah eksekusi ke alamat tinggi,
-    // cukup gunakan entri atas ini dan bisa mengosongkan low-half per proses.
-    for (size_t i = 0; i < 256; ++i) {
-        if (KernelPML4[256 + i] == 0) {
-            KernelPML4[256 + i] = bootPML4[i];
-        }
-    }
 
         // Build a HHDM (Higher Half Direct Map) sized from E820 information.
         constexpr UPTR HHDM_BASE = 0xffff800000000000ULL;
@@ -98,7 +153,7 @@ namespace Paging{
         }
 
         // Align up to 2 MiB so large pages cover full range.
-    max_phys = (max_phys + (TWO_MB - 1)) & ~(U64)(TWO_MB - 1);
+        max_phys = (max_phys + (TWO_MB - 1)) & ~(U64)(TWO_MB - 1);
         if (max_phys == 0) max_phys = TWO_MB;
 
         const U64 ONE_GB = 0x40000000ULL;
@@ -129,41 +184,43 @@ namespace Paging{
 
         KernelPML4[HHDM_PML4_INDEX] = ((U64)hhdm_pdpt_phys) | PAGE_PRESENT | PAGE_RW;
 
-    // Load new PML4 (CR3 requires physical address)
-    DoCR3::Load((uint64_t*)KernelPML4Phys);
+        // Load new PML4 (CR3 requires physical address)
+        DoCR3::Load((uint64_t*)KernelPML4Phys);
 
-    // Enable NX (No-Execute) in EFER so the NX bit in page tables takes effect.
-    // EFER.NXE is bit 11 (1 << 11).
-    {
-        U64 efer = Arch::MSR::ReadEFER();
-        const U64 NXE_BIT = (1ULL << 11);
-        if (!(efer & NXE_BIT)) {
-            Arch::MSR::WriteEFER(efer | NXE_BIT);
-            Serial::Write("[ROS] EFER.NXE enabled\n");
-        } else {
-            Serial::Write("[ROS] EFER.NXE already set\n");
+        // Enable NX (No-Execute) in EFER so the NX bit in page tables takes effect.
+        // EFER.NXE is bit 11 (1 << 11).
+        {
+            U64 efer = Arch::MSR::ReadEFER();
+            const U64 NXE_BIT = (1ULL << 11);
+            if (!(efer & NXE_BIT)) {
+                Arch::MSR::WriteEFER(efer | NXE_BIT);
+                Serial::Write("[ROS] EFER.NXE enabled\n");
+            } else {
+                Serial::Write("[ROS] EFER.NXE already set\n");
+            }
         }
-    }
 
-    // Inisialisasi PAT (Page Attribute Table)
-    // Kita set Entry 4 (PA4) menjadi Write-Combining (0x01).
-    // Indeks 4 dipilih hardware jika: PAT=1, PCD=0, PWT=0.
-    {
-        U32 low, high;
-        asm volatile("rdmsr" : "=a"(low), "=d"(high) : "c"(0x277));
-        U64 pat = ((U64)high << 32) | low;
-        pat &= ~(0xFFULL << 32); // Kosongkan PA4 (bits 32-39)
-        pat |= (0x01ULL << 32);  // Isi PA4 dengan 0x01 (WC)
-        low = (U32)pat;
-        high = (U32)(pat >> 32);
-        asm volatile("wrmsr" : : "a"(low), "d"(high), "c"(0x277));
-        Printk::Write(Printk::Level::LOG_INFO, "PAT initialized: PA4 set to Write-Combining (0x01)\n");
-    }
+        // Inisialisasi PAT (Page Attribute Table)
+        // Kita set Entry 4 (PA4) menjadi Write-Combining (0x01).
+        // Indeks 4 dipilih hardware jika: PAT=1, PCD=0, PWT=0.
+        {
+            U32 low, high;
+            asm volatile("rdmsr" : "=a"(low), "=d"(high) : "c"(0x277));
+            U64 pat = ((U64)high << 32) | low;
+            pat &= ~(0xFFULL << 32); // Kosongkan PA4 (bits 32-39)
+            pat |= (0x01ULL << 32);  // Isi PA4 dengan 0x01 (WC)
+            low = (U32)pat;
+            high = (U32)(pat >> 32);
+            asm volatile("wrmsr" : : "a"(low), "d"(high), "c"(0x277));
+            Printk::Write(Printk::Level::LOG_INFO, "PAT initialized: PA4 set to Write-Combining (0x01)\n");
+        }
 
-    // After loading CR3, the higher-half direct map is active.
-    // Update KernelPML4 to point to the HHDM-mapped virtual address
-    // so future dereferences use the higher-half view.
-    KernelPML4 = (U64*)HHDM_PhysToVirt(KernelPML4Phys);
+        // After loading CR3, the higher-half direct map is active.
+        // Update KernelPML4 to point to the HHDM-mapped virtual address
+        // so future dereferences use the higher-half view.
+        KernelPML4 = (U64*)HHDM_PhysToVirt(KernelPML4Phys);
+
+        ProtectKernelSections(KernelPML4);
 
         Serial::Write("[ROS] Paging Activated\n");
         // print physical CR3 and its HHDM virtual mapping

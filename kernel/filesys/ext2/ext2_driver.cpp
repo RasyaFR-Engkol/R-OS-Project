@@ -827,6 +827,7 @@ U32 EXT2FileSystem::Read(File* file, U8* buffer, U32 size) {
     // [FIX] Cek VFS Type
     if(file->Node->Type == FileType::FT_DIR){
         Printk::Write(Printk::Level::LOG_WARNING, "EXT2: Read() called on a directory. Returning Directory Handle\n");
+        Printk::Write(Printk::Level::LOG_WARNING, "FLIE NAME: %s.\n", file->FileName);
     }
 
     // [FIX] Ambil dari VFS Inode

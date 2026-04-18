@@ -30,6 +30,7 @@ struct KernelAPI{
 
 typedef int (*ModuleInitFunc)(VOID* PrivateData);
 
+/*
 ABI_C {
     // api from any kernel function
     // PCI
@@ -65,3 +66,4 @@ ABI_C {
     BOOL VFSResolvePath(const char *path, FileSystem **outFS, char *OutRelativePath, BOOL FollowLastSymlink = FALSE);
     BOOL VFSCreateBlockNode(IBlockDevice *dev);
 }
+    */

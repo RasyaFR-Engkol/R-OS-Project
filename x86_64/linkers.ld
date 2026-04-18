@@ -40,13 +40,18 @@ SECTIONS {
 
     /* Higher-half kernel proper mapped at KERNEL_VMA, loaded at KERNEL_LMA */
     . = KERNEL_VMA;
+    . = ALIGN(4096); /* For page protection and alignment */
 
     .text : AT (KERNEL_LMA + (ADDR(.text) - KERNEL_VMA)) {
+        __text_start = .;
         __kernel_virt_start = .;
         *(.text .text.*)
+        . = ALIGN(4096);
+        __text_end = .;
     } :text
 
     .rodata : AT (KERNEL_LMA + (ADDR(.rodata) - KERNEL_VMA)) {
+        __rodata_start = .;
         *(.rodata .rodata.*)
 
         . = ALIGN(8); /* Pointer 64-bit butuh align 8 byte */
@@ -56,10 +61,15 @@ SECTIONS {
 
         . = ALIGN(1);
         KEEP(*(__ksymtab_strings)) /* String names dari symbolnya */
+        . = ALIGN(4096);
+        __rodata_end = .;
     } :rodata
 
     .data : AT (KERNEL_LMA + (ADDR(.data) - KERNEL_VMA)) {
+        __data_start = .;
         *(.data .data.*)
+        . = ALIGN(4096);
+        __data_end = .;
     } :data
 
     .init_array : AT (KERNEL_LMA + (ADDR(.init_array) - KERNEL_VMA)) {
@@ -69,7 +79,11 @@ SECTIONS {
     } :data
 
     .bss : AT (KERNEL_LMA + (ADDR(.bss) - KERNEL_VMA)) {
+        __bss_start = .;
         *(.bss .bss.*)
+        *(COMMON) /* <--- WAJIB DITAMBAHIN CUK */
+        . = ALIGN(4096);
+        __bss_end = .;
     } :bss
 
     /DISCARD/ : { *(.eh_frame) *(.eh_frame_hdr) *(.comment) }

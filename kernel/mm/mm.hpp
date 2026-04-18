@@ -132,7 +132,7 @@ namespace PageAlloc{
         void fill_guard_region(PageAlloc::DMAAlloc::DMABuffer* buf);
         bool guard_region_intact(const PageAlloc::DMAAlloc::DMABuffer* buf);
     }
-
+    BOOL SetRegionFlags(U64 *PML4Virt, UPTR StartAddr, UPTR EndAddr, U64 Flags);
 }
 
 namespace DoCR3 {

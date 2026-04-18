@@ -8,6 +8,7 @@
 namespace AHCI {
     // Kita siapkan array untuk maks 4 controller
     #define MAX_AHCI_CONTROLLERS 4
+    #define MAX_AHCI_PORT 32
 
     enum class DeviceType {
         NONE = 0,
@@ -54,7 +55,9 @@ namespace AHCI {
         volatile U8* v_cmd_tables[32]; // (Kita pakai U8* biar gampang di-offset)
 
         // task preempted oleh interrupt AHCI
-        Tasking::Task *WaitingTask[32];
+        Tasking::Task *WaitingTask[MAX_AHCI_PORT];
+
+        Mutex PortLocks[MAX_AHCI_PORT];
     };
 
     struct AHCIPortInfo {

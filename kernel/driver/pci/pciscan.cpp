@@ -167,10 +167,3 @@ namespace PCI{
         xHCI::InitializeAllControllers();
     }
 }
-
-// FOR MODULE
-ABI_C
-U8 PCIFindCapatibility(U8 Bus, U8 Device, U8 Function, U8 TargetCapID){
-    return PCI::FindCapability(Bus, Device, Function, TargetCapID);
-}
-EXPORT_SYMBOL(PCIFindCapatibility);

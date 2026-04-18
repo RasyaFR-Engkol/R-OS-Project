@@ -6,15 +6,22 @@
 #include <export_sym.hpp>
 
 namespace ModuleManager{
-    UPTR FindKernelSymbol(const char* name){
-        KernelSymbol *current = __ksymtab_start;
-        while (current < __ksymtab_end){
-            if (String::Strcmp(current->Name, name) == 0){
-                return current->Value;
+    UPTR FindKernelSymbol(const char* name) {
+        KernelSymbol* current = __ksymtab_start;
+
+        while (current < __ksymtab_end) {
+            // 1. Resolve alamat string nama
+            // Alamat string = (Alamat member name_offset) + (Nilai name_offset)
+            const char* sym_name = (const char*)((uintptr_t)&current->name_offset + current->name_offset);
+
+            if (String::Strcmp(sym_name, name) == 0) {
+                // 2. Resolve alamat value (fungsi/variabel)
+                // Alamat value = (Alamat member value_offset) + (Nilai value_offset)
+                return (UPTR)((uintptr_t)&current->value_offset + current->value_offset);
             }
             current++;
         }
-        return 0; // Not found
+        return 0; // Gak ketemu, sedih.
     }
 
     int LoadModuleAndRun(VOID* FileBuffer, VOID *PrivateData){

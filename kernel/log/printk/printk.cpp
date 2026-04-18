@@ -359,5 +359,4 @@ namespace Printk {
 ABI_C BOOL PrintkWrite(Printk::Level level, const char *fmt, ...){
     return Printk::Write(level, fmt);
 }
-
 EXPORT_SYMBOL(PrintkWrite);

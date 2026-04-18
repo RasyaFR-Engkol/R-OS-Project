@@ -47,22 +47,18 @@
 #include <../kernel/mod/module_manager.hpp>
 #include <export_sym.hpp>
 
-VOID DumpExportedSymbol(){
-    Printk::Write(Printk::Level::LOG_INFO, "Dumping exported symbols:\n");
-
-    KernelSymbol *current = __ksymtab_start;
-    while (current < __ksymtab_end){
-        // Tampilkan nama dan alamatnya
-        // Contoh Output: Printk is at 0xffffffff80205abc
-        Printk::Write(Printk::Level::LOG_INFO, "Symbol: %s is at 0x%x\n", current->Name, current->Value);
-        current++;
+void DumpSymbols() {
+    for (KernelSymbol* s = __ksymtab_start; s < __ksymtab_end; s++) {
+        const char* name = (const char*)resolve_symbol_address(&s->name_offset);
+        uintptr_t addr   = resolve_symbol_address(&s->value_offset);
+        
+        Serial::Printf("Symbol: %s at %p\n", name, (void*)addr);
     }
-    Printk::Write(Printk::Level::LOG_INFO, "Finished dumping exported symbols.\n");
 }
 
 ABI_C VOID IdleLoop(VOID*){
     while(TRUE){
-        Tasking::SchedulerYield(); // Yield to scheduler to run other tasks (like init) while idle
+        Tasking::SchedulerYield();
     }
 }
 
@@ -110,7 +106,7 @@ ABI_C NORET void KernelMain(VOID*)
         Printk::Write(Printk::Level::LOG_ERR, "KernelMain: Failed to mount partition sda2.\n"); 
     }
 
-    DumpExportedSymbol();
+    DumpSymbols();
 
     // TES DriverExported
     File *f = VFSManager::Open("/driver/mm.ko", O_RDONLY);

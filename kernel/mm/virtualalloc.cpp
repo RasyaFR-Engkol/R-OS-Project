@@ -180,16 +180,3 @@ namespace PageAlloc{
         Arch::RestoreInterrupts(_irq);
     }
 }
-
-ABI_C {
-    // FOR MODULES
-    VOID* MmVirtualAllocPages(SIZE_T count) {
-        return PageAlloc::VirtualAllocPages(count);
-    }
-    EXPORT_SYMBOL(MmVirtualAllocPages);
-
-    VOID MmVirtualFreePages(VOID* addr, SIZE_T count) {
-        PageAlloc::VirtualFreePages(addr, count);
-    }
-    EXPORT_SYMBOL(MmVirtualFreePages);
-}

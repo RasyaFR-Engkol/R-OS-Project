@@ -183,7 +183,13 @@ namespace AHCI {
 
     BOOL ReadSectors(AHCIDriver &Driver, VAL32 PortNum, U64 lba, U32 count,
                      PageAlloc::DMAAlloc::DMABuffer **outBuf) {
-        if (!outBuf || count == 0) return FALSE;
+
+        Driver.PortLocks[PortNum].Acquire();
+
+        if (!outBuf || count == 0) {
+            Driver.PortLocks[PortNum].Release();
+            return FALSE;
+        }
 
         U32 bytes = count * 512u;
         SIZE_T pages = (bytes + PAGE_SIZE - 1) / PAGE_SIZE;
@@ -191,7 +197,11 @@ namespace AHCI {
         if (!buf) return FALSE;
 
         I32 Slot = FindFreeCommandSlot(Driver, PortNum);
-        if (Slot == (VAL32)-1) { PageAlloc::DMAAlloc::FreeDMABuffer(buf); return FALSE; }
+        if (Slot == (VAL32)-1) { 
+            PageAlloc::DMAAlloc::FreeDMABuffer(buf); 
+            Driver.PortLocks[PortNum].Release(); 
+            return FALSE; 
+        }
 
         HBA_CMD_HEADER *hdr = (HBA_CMD_HEADER*)&Driver.v_cmd_lists[PortNum][Slot];
         HBA_CMD_TBL *tbl = (HBA_CMD_TBL*)(Driver.v_cmd_tables[PortNum] + (Slot * 256));
@@ -209,8 +219,14 @@ namespace AHCI {
         BuildRWCFIS((FIS_REG_H2D*)&tbl->cfis[0], 0x25, lba, (U16)count);
 
         BOOL ok = IssueCommand(Driver, PortNum, Slot);
-        if (!ok) { PageAlloc::DMAAlloc::FreeDMABuffer(buf); return FALSE; }
+        if (!ok) { 
+            PageAlloc::DMAAlloc::FreeDMABuffer(buf); 
+            Driver.PortLocks[PortNum].Release(); 
+            return FALSE; 
+        }
         InvalidateCacheLines((const void*)(uintptr_t)buf->VirtAddr, bytes);
+
+        Driver.PortLocks[PortNum].Release();
 
         *outBuf = buf;
         return TRUE;
@@ -249,8 +265,14 @@ namespace AHCI {
     }
 
     BOOL WriteSectors(AHCIDriver &Driver, VAL32 PortNum, U64 lba, U32 count,
-                      PageAlloc::DMAAlloc::DMABuffer *buf) {
-        if (!buf || count == 0) return FALSE;
+                      PageAlloc::DMAAlloc::DMABuffer *buf) 
+    {
+        Driver.PortLocks[PortNum].Acquire();
+
+        if (!buf || count == 0) {
+            Driver.PortLocks[PortNum].Release();
+            return FALSE;
+        }
 
         U32 bytes = count * 512u;
         if (bytes > buf->Size) {
@@ -278,6 +300,9 @@ namespace AHCI {
         BuildRWCFIS((FIS_REG_H2D*)&tbl->cfis[0], 0x35, lba, (U16)count);
 
         BOOL ok = IssueCommand(Driver, PortNum, Slot);
+
+        Driver.PortLocks[PortNum].Release();
+
         return ok;
     }
 

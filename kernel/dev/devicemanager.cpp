@@ -85,15 +85,3 @@ namespace DeviceManager{
         return nullptr;
     }
 }
-
-ABI_C {
-    BOOL DMRegisterBlockDevice(IBlockDevice *Device){
-        return DeviceManager::RegisterBlockDevice(Device);
-    }
-    EXPORT_SYMBOL(DMRegisterBlockDevice)
-
-    BOOL DMRegisterCharDevice(ICharDevice *Device){
-        return DeviceManager::RegisterCharDevice(Device);
-    }
-    EXPORT_SYMBOL(DMRegisterCharDevice)
-}

@@ -196,6 +196,7 @@ namespace Paging{
         Arch::RestoreInterrupts(_irq);
         return TRUE;
     }
+    
 }
 
 // Provide compatibility wrapper in PageAlloc namespace so callers using
@@ -310,17 +311,18 @@ namespace PageAlloc {
         Arch::RestoreInterrupts(_irq);
         return TRUE;
     }
-}
 
-ABI_C {
-    // FOR MODULES
-    BOOL MmMapPages(U64 *PML4Virt, UPTR PhysAddr, UPTR VirtAddr, SIZE_T Count, U64 Flags) {
-        return PageAlloc::MapPages(PML4Virt, PhysAddr, VirtAddr, Count, Flags);
-    }
-    EXPORT_SYMBOL(MmMapPages);
+    BOOL SetRegionFlags(U64 *PML4Virt, UPTR StartAddr, UPTR EndAddr, U64 Flags) {
+        // Pastikan alamat diratakan (aligned) ke kelipatan 4096
+        StartAddr &= ~0xFFFULL; 
+        EndAddr = (EndAddr + 0xFFFULL) & ~0xFFFULL; 
 
-    BOOL MmUnMapPages(U64 *PML4Virt, UPTR VirtAddr) {
-        return PageAlloc::UnMapPages(PML4Virt, VirtAddr);
+        for (UPTR addr = StartAddr; addr < EndAddr; addr += 4096) {
+            if (!SetFlags(PML4Virt, addr, Flags)) {
+                Serial::Printf("[ERR] Gagal set flags di alamat %p\n", (void*)addr);
+                return FALSE;
+            }
+        }
+        return TRUE;
     }
-    EXPORT_SYMBOL(MmUnMapPages);
 }
