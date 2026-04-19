@@ -4,53 +4,64 @@ OUTPUT_FORMAT(elf64-x86-64)
 
 /* Virtual base for kernel proper and physical load base */
 KERNEL_VMA = 0xffffffff80000000;
-KERNEL_LMA = 0x00200000; /* 2MiB */
+KERNEL_LMA = 0x01000000; /* 16MiB - Aman dari area ACPI di ~2MB */
 
+/* Pisahkan segment untuk file ELF biar nggak terjadi padding raksasa */
 PHDRS {
-    boottext   PT_LOAD;
-    bootrodata PT_LOAD;
-    bootdata   PT_LOAD;
-    bootbss    PT_LOAD;
-    text       PT_LOAD;
-    rodata     PT_LOAD;
-    data       PT_LOAD;
-    bss        PT_LOAD;
+    boot_rx   PT_LOAD FLAGS(5); /* Read + Execute */
+    boot_rw   PT_LOAD FLAGS(6); /* Read + Write */
+    kernel_rx PT_LOAD FLAGS(5); /* Read + Execute */
+    kernel_rw PT_LOAD FLAGS(6); /* Read + Write */
 }
 
 SECTIONS {
-    /* Low memory boot stub: identity mapped */
-    . = 0x00100000; /* 1MiB */
+    /* ==================================================================== */
+    /* BAGIAN 1: LOW MEMORY BOOT STUB (Identity Mapped)                     */
+    /* ==================================================================== */
+    
+    /* Mulai di 1MiB (0-nya 5 biji, jangan kelebihan!) */
+    . = 0x00100000; 
 
     .boottext : {
+        /* Multiboot2 header WAJIB ada di urutan paling atas */
         KEEP(*(.multiboot2_header))
-        *(.boottext*)
-    } :boottext
+        *(.boottext .boottext.*)
+    } :boot_rx
 
     .bootrodata : {
-        *(.bootrodata*)
-    } :bootrodata
+        *(.bootrodata .bootrodata.*)
+    } :boot_rx
+
+    /* Align ke 4K sebelum masuk area Writeable */
+    . = ALIGN(4096);
 
     .bootdata : {
-        *(.bootdata*)
-    } :bootdata
+        *(.bootdata .bootdata.*)
+    } :boot_rw
 
     .bootbss : {
-        *(.bootbss*)
-    } :bootbss
+        *(.bootbss .bootbss.*)
+    } :boot_rw
 
-    /* Higher-half kernel proper mapped at KERNEL_VMA, loaded at KERNEL_LMA */
+
+    /* ==================================================================== */
+    /* BAGIAN 2: HIGHER-HALF KERNEL PROPER                                  */
+    /* ==================================================================== */
+    
+    /* Lompat ke Virtual Memory Address (VMA) */
     . = KERNEL_VMA;
-    . = ALIGN(4096); /* For page protection and alignment */
+    . = ALIGN(4096); 
 
-    .text : AT (KERNEL_LMA + (ADDR(.text) - KERNEL_VMA)) {
+    /* AT(...) mendefinisikan Load Memory Address (LMA) alias fisik-nya */
+    .text : AT(KERNEL_LMA + (ADDR(.text) - KERNEL_VMA)) {
         __text_start = .;
         __kernel_virt_start = .;
         *(.text .text.*)
         . = ALIGN(4096);
         __text_end = .;
-    } :text
+    } :kernel_rx
 
-    .rodata : AT (KERNEL_LMA + (ADDR(.rodata) - KERNEL_VMA)) {
+    .rodata : AT(KERNEL_LMA + (ADDR(.rodata) - KERNEL_VMA)) {
         __rodata_start = .;
         *(.rodata .rodata.*)
 
@@ -63,33 +74,39 @@ SECTIONS {
         KEEP(*(__ksymtab_strings)) /* String names dari symbolnya */
         . = ALIGN(4096);
         __rodata_end = .;
-    } :rodata
+    } :kernel_rx
 
-    .data : AT (KERNEL_LMA + (ADDR(.data) - KERNEL_VMA)) {
+    .data : AT(KERNEL_LMA + (ADDR(.data) - KERNEL_VMA)) {
         __data_start = .;
         *(.data .data.*)
         . = ALIGN(4096);
         __data_end = .;
-    } :data
+    } :kernel_rw
 
-    .init_array : AT (KERNEL_LMA + (ADDR(.init_array) - KERNEL_VMA)) {
+    .init_array : AT(KERNEL_LMA + (ADDR(.init_array) - KERNEL_VMA)) {
         PROVIDE(__init_array_start = .);
-        *(.init_array)
+        KEEP(*(.init_array .init_array.*))
         PROVIDE(__init_array_end = .);
-    } :data
+        . = ALIGN(4096);
+    } :kernel_rw
 
-    .bss : AT (KERNEL_LMA + (ADDR(.bss) - KERNEL_VMA)) {
+    .bss : AT(KERNEL_LMA + (ADDR(.bss) - KERNEL_VMA)) {
         __bss_start = .;
         *(.bss .bss.*)
-        *(COMMON) /* <--- WAJIB DITAMBAHIN CUK */
+        *(COMMON) /* <--- Wajib, biar variabel global yg gak diinisialisasi masuk sini */
         . = ALIGN(4096);
         __bss_end = .;
-    } :bss
+    } :kernel_rw
 
-    /DISCARD/ : { *(.eh_frame) *(.eh_frame_hdr) *(.comment) }
+    /DISCARD/ : { 
+        *(.eh_frame) 
+        *(.eh_frame_hdr) 
+        *(.comment) 
+        *(.note.*) 
+    }
 
     /* Useful symbols */
-    __kernel_phys_start = LOADADDR(.text);
+    __kernel_phys_start = KERNEL_LMA;
     __kernel_phys_end   = LOADADDR(.bss) + SIZEOF(.bss);
     __kernel_virt_end   = ADDR(.bss) + SIZEOF(.bss);
 }

@@ -96,6 +96,7 @@ namespace PCI{
 
                 // Mencari NVMe
                 if(ClassCode == 0x01 && SubClass == 0x08){
+                    Printk::Write(Printk::Level::LOG_INFO, "NVME Found.\n");
                     if(ProgIF == 0x02){
                         Printk::Write(Printk::Level::LOG_INFO, "NVMe Controller Found in %d:%d:%d!\n",
                             (int)bus, (int)device, (int)function);

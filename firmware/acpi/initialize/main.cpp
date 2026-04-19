@@ -1,3 +1,4 @@
+#include "debug.hpp"
 #define PRINTK_MODULE_NAME "ACPIMain"
 #include <rosval.h>
 #include <rossys.hpp>
@@ -126,6 +127,12 @@ namespace ACPI{
         /* Correct RSDP signature is "RSD PTR " (8 bytes including spaces). */
         if (Strncmp(rsdp->Signature, "RSD PTR ", 8) != 0) {
             Printk::Write(Printk::Level::LOG_ERR, " Invalid RSDP signature\n");
+            Printk::Write(Printk::Level::LOG_ERR, "EXPECTED RSDP SIGNATURE: RSD PTR \n");
+            Printk::Write(Printk::Level::LOG_ERR, "ACTUAL RSDP SIGNATURE: %c%c%c%c%c%c%c%c\n",
+                rsdp->Signature[0], rsdp->Signature[1], rsdp->Signature[2], rsdp->Signature[3],
+                rsdp->Signature[4], rsdp->Signature[5], rsdp->Signature[6], rsdp->Signature[7]);
+            
+            // HEXDUMP ENTIRE 0x1000 Memory infront of RSD PTR
             return;
         }
 

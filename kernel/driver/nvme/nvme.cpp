@@ -90,11 +90,10 @@ namespace NVMe{
             volatile NVMeCompletion* Cpl = &CQBase[Head];
             U16 StatusVal = Cpl->Status;
             
-            // Ambil Phase Tag (Bit 0 dari Status U16, atau Bit 16 dari Dword 3)
-            U8 P = (StatusVal >> 0) & 1; // Asumsi bit struct lo bener
+            // Ambil Phase Tag (Bit 0 dari Status U16)
+            U8 P = (StatusVal >> 0) & 1; 
             
-            // Kalau Phase Tag di memori != Phase Tag harapan driver, 
-            // berarti Controller BELUM nulis disitu. Stop.
+            // Kalau Phase Tag di memori != Phase Tag harapan driver, stop.
             if (P != PTag) {
                 break;
             }
@@ -105,16 +104,21 @@ namespace NVMe{
             // Cek Error
             U16 StatusCode = (StatusVal >> 1) & 0x7FFF; // Bit 1-15
             U16 CID = Cpl->CommandID;
+
+            // [+] TAMBAHAN BARU: Simpan status untuk dibaca oleh Read/WriteSectors
+            this->CommandStatus[CID] = (StatusCode == 0);
             
             if (StatusCode != 0) {
                 Write(Level::LOG_ERR, " [NVMe] Cmd ID %d Failed! Status: 0x%x\n", CID, StatusCode);
-            } else {
-                // Command Sukses!
-                // Nanti disini lo mapping CID ke Request asli buat notify OS.
-                // Misal: RequestTable[CID].Complete = TRUE;
+            } 
+
+            // Bangunkan Thread yang sedang tertidur menunggu I/O ini
+            Tasking::Task *T = this->WaitingTask[CID];
+            if(T){
+                Tasking::UnblockTaskWithIOBoost(T);
             }
 
-            // Majuin Head
+            // [!] BAGIAN INI HARUS TETAP ADA: Majuin Head
             Head = (Head + 1) % 32; // Ingat AQA kita 32 entry
 
             // Kalau wrap-around, flip Phase Tag harapan driver
@@ -123,7 +127,7 @@ namespace NVMe{
             }
         }
 
-        // Kalau ada yang diproses, update Doorbell biar Controller tau kita udah baca
+            // Kalau ada yang diproses, update Doorbell biar Controller tau kita udah baca
         if (ProcessedCount > 0) {
             WriteDoorbell(QueueID, Head, TRUE); // TRUE = Completion Queue Doorbell
         }
@@ -251,23 +255,20 @@ namespace NVMe{
         
         this->LBACount = Data->NSZE; // Total Sector
         
-        // Cek format LBA (LBA Format 0 biasanya default)
-        // FLBAS (Formatted LBA Size) bits 0-3 index ke tabel LBAF
-        // Untuk simpel, kita asumsikan LBAF[0] aktif atau cek bit 4 buat metadata.
-        // Tapi cara paling gampang buat logic LBA size (shift factor):
         U8 LBAF_Index = Data->FLBAS & 0xF;
-        UNUSED__ U8 LBA_DS = (Data->NLBAF >> (LBAF_Index * 0)) & 0xFF; // Logic ini kompleks ambil dari struct array LBAF
-        // SHORTCUT: Identify Namespace Struct byte 128 (LBA Format 0 Support)
-        // Byte 128 bit 16-23 is LBA Data Size (power of 2).
-        // Biasanya 9 (2^9 = 512) atau 12 (2^12 = 4096).
-        
-        // Kita pakai hardcode logic sederhana dulu:
-        // Cek LBA Format 0 (Data->LBAF[0]) -> Ini ada di array struct sebenernya
-        // Untuk sekarang kita asumsikan 512 bytes kalau pusing parsing arraynya, 
-        // ATAU implementasi proper struct LBAF.
+
+        U32 *LBAF_Array = (U32*)((U8*)Data + 128);
+        U32 ActiveLBAF = LBAF_Array[LBAF_Index];
+
+        U8 LBADS = (ActiveLBAF >> 16) & 0xFF;
         
         // Fallback safe: 512 bytes
-        this->LBASize = 512; 
+        if (LBADS >= 9 && LBADS <= 12) {
+            this->LBASize = (1 << LBADS); 
+        } else {
+            Write(Level::LOG_WARNING, " [NVMe] Unknown LBADS %d, fallback to 512 bytes.\n", LBADS);
+            this->LBASize = 512;
+        }
         
         Write(Level::LOG_INFO, " [NVMe] Namespace 1 Active. Size: %lld sectors (%lld MB)\n", 
               this->LBACount, (this->LBACount * this->LBASize) / (1024*1024));
@@ -321,161 +322,221 @@ namespace NVMe{
         // 1. Alokasi Buffer DMA buat nampung data dari disk
         // Hitung butuh berapa page. Asumsi 1 sector = 512 bytes.
         U64 TotalBytes = Count * this->LBASize;
-        U64 PagesNeeded = (TotalBytes + 4095) / 4096;
-        
-        auto *Buf = PageAlloc::DMAAlloc::AllocateDMAPages(PagesNeeded);
+
+        U64 NumPages = (TotalBytes + (PAGE_SIZE - 1)) / PAGE_SIZE;
+
+        auto *Buf = PageAlloc::DMAAlloc::AllocateDMAPages(NumPages);
         if (!Buf) return FALSE;
-        
         String::Memset((void*)Buf->VirtAddr, 0, TotalBytes);
+
+        // Penampung tabel
+        PageAlloc::DMAAlloc::DMABuffer *PRPListBuf = nullptr;
+
+        this->IOLock.Acquire();
+
+        U16 CID = AllocateCID();
+        if(CID == 0xFFFF){
+            this->IOLock.Release();
+            PageAlloc::DMAAlloc::FreeDMABuffer(Buf);
+            Printk::Write(Printk::Level::LOG_ERR, "CID is full. Please try again later.\n");
+            return FALSE;
+        }
 
         // 2. Siapkan Command NVMe (NVM Command Set)
         NVMeCommand cmd = {};
         cmd.Opcode = 0x02; // 0x02 = Read, 0x01 = Write
-        cmd.CommandID = 0x55; // ID bebas, asal unik per request
+        cmd.CommandID = CID;
         cmd.NSID = 1;      // Namespace ID (biasanya 1)
-        
-        // Alamat Buffer Fisik (PRP1)
-        // NOTE: Kalau buffer > 4KB atau nyebrang page boundary, lo butuh PRP List (PRP2).
-        // Untuk simpel, kita asumsi buffer contiguous fisik dan < 4KB atau aligned sempurna dulu.
-        cmd.DataPtr1 = Buf->PhysAddr; 
-        
-        // SLBA (Starting LBA) - 64 bit split ke 2 Dword
         cmd.Dword10 = (U32)LBA;
         cmd.Dword11 = (U32)(LBA >> 32);
-        
-        // NLB (Number of Logical Blocks) - 0 based (Count - 1)
-        // Bit 0-15: NLB. 
         cmd.Dword12 = (Count - 1) & 0xFFFF;
+
+        // Logka PRP gw disini
+        cmd.DataPtr1 = Buf->PhysAddr;
+        
+        if(NumPages == 2){
+            cmd.DataPtr2 = Buf->PhysAddr + PAGE_SIZE;
+        } else if(NumPages > 2){
+            PRPListBuf = PageAlloc::DMAAlloc::AllocateDMAPages(1);
+            if(!PRPListBuf){
+                this->IOLock.Release();
+                PageAlloc::DMAAlloc::FreeDMABuffer(PRPListBuf);
+                Printk::Write(Printk::Level::LOG_ERR, "ReadError: PRPListBuf return 0.\n");
+                return FALSE;
+            }
+
+            U64 *PRPList = (U64*)PRPListBuf->VirtAddr;
+            String::Memset(PRPList, 0, 4096);
+            
+            // Isi PRP List dengan alamat fisik page ke-2, ke-3, dst.
+            for (U64 i = 1; i < NumPages; i++) {
+                PRPList[i - 1] = Buf->PhysAddr + (i * 4096);
+            }
+
+            // PRP2 menunjuk ke alamat fisik dari PRP List itu sendiri
+            cmd.DataPtr2 = PRPListBuf->PhysAddr;
+        }
 
         // 3. Masukkan ke Submission Queue I/O (QID 1)
         // Hati-hati race condition kalau multithread, perlu Spinlock disini.
         
         U16 Tail = this->iOSQTail;
         this->iOSQBase[Tail] = cmd;
-        
-        // Update Tail Driver local
         this->iOSQTail = (Tail + 1) % 32; // Asumsi queue depth 32
         
         // 4. Ring Doorbell I/O (QID 1, bukan 0!)
         WriteDoorbell(1, this->iOSQTail, FALSE); // FALSE = Submission
 
-        // 5. Tunggu Completion
-        // Karena lo udah setup MSI-X, idealnya lo 'Sleep' thread ini dan dibangunin sama Interrupt Handler.
-        // TAPI untuk tes awal: Polling dulu queue I/O-nya manual kayak admin tadi.
-        
-        // ... logic polling completion QID 1 ...
-        // (Bisa copas logic PollAdminCompletion tapi ganti target ke iOCQBase & iOCQHead)
-        
-        // SEMENTARA: Polling bodoh buat tes
-        int Timeout = 1000000;
-        while(Timeout--) {
-            volatile NVMeCompletion* Cpl = &this->iOCQBase[this->iOCQHead];
-            // Inget fix Phase Tag tadi!
-            if((Cpl->Status & 1) == this->iOPhaseTag) {
-                // Found completion!
-                
-                // Update Head & PhaseTag
-                this->iOCQHead = (this->iOCQHead + 1) % 32;
-                if(this->iOCQHead == 0) this->iOPhaseTag = !this->iOPhaseTag;
-                
-                // Ring Doorbell Completion
-                WriteDoorbell(1, this->iOCQHead, TRUE);
-                
-                *BufferOut = Buf;
-                return TRUE;
-            }
-            Arch::ASM::CPURelax();
+        Tasking::Task *CurrentTask = Tasking::GetCurrentTaskPtr();
+        if(CurrentTask){
+            this->WaitingTask[CID] = CurrentTask;
+            this->IOLock.Release();
+            Tasking::BlockTaskCauseOfIOAndYield(CurrentTask);
+        } else {
+            this->IOLock.Release();
         }
+
+        BOOL Success = this->CommandStatus[CID];
+        this->WaitingTask[CID] = nullptr;
+
+        if(PRPListBuf){
+            PageAlloc::DMAAlloc::FreeDMABuffer(PRPListBuf);
+        }
+
+        if(!Success){
+            PageAlloc::DMAAlloc::FreeDMABuffer(Buf);
+            Printk::Write(Printk::LOG_ERR, "Error. Read Sectors unsuccess.\n");
+            return FALSE;
+        }
+
+        Arch::ASM::InvalidateCacheLine((VOID*)Buf->VirtAddr, TotalBytes);
         
-        return FALSE;
+        *BufferOut = Buf;
+        return TRUE;
     }
 
     BOOL NVMeController::WriteSectors(U64 LBA, U32 Count, PageAlloc::DMAAlloc::DMABuffer *Buffer){
         if(!Buffer || Count == 0) return FALSE;
 
+        U64 TotalBytes = Count * this->LBASize;
+        U64 NumPages = (TotalBytes + (PAGE_SIZE - 1)) / PAGE_SIZE;
+
+        PageAlloc::DMAAlloc::DMABuffer *PRPListBuf = nullptr;
+
+        this->IOLock.Acquire();
+
+        U16 CID = AllocateCID();
+        if(CID == 0xFFFF){
+            this->IOLock.Release();
+            Printk::Write(Printk::Level::LOG_ERR, "CID is full. Please try again later.\n");
+            return FALSE;
+        }
+
         NVMeCommand cmd = {};
-        cmd.Opcode = 0x01; // Write
-        cmd.CommandID = 0x56;
+        cmd.Opcode = 0x01; // 0x01 = Write
+        cmd.CommandID = CID; 
         cmd.NSID = 1;
-        cmd.DataPtr1 = Buffer->PhysAddr;
         cmd.Dword10 = (U32)LBA;
         cmd.Dword11 = (U32)(LBA >> 32);
         cmd.Dword12 = (Count - 1) & 0xFFFF;
 
+        // Logika PRP sama seperti Read
+        cmd.DataPtr1 = Buffer->PhysAddr;
+        
+        if(NumPages == 2){
+            cmd.DataPtr2 = Buffer->PhysAddr + PAGE_SIZE;
+        } else if(NumPages > 2){
+            PRPListBuf = PageAlloc::DMAAlloc::AllocateDMAPages(1);
+            if(!PRPListBuf){
+                this->IOLock.Release();
+                Printk::Write(Printk::Level::LOG_ERR, "WriteError: PRPListBuf return 0.\n");
+                return FALSE;
+            }
+
+            U64 *PRPList = (U64*)PRPListBuf->VirtAddr;
+            String::Memset(PRPList, 0, 4096);
+            
+            for (U64 i = 1; i < NumPages; i++) {
+                PRPList[i - 1] = Buffer->PhysAddr + (i * 4096);
+            }
+            cmd.DataPtr2 = PRPListBuf->PhysAddr;
+        }
+
         U16 Tail = this->iOSQTail;
         this->iOSQBase[Tail] = cmd;
         this->iOSQTail = (Tail + 1) % 32;
 
         WriteDoorbell(1, this->iOSQTail, FALSE);
 
-        int Timeout = 1000000;
-        while(Timeout--) {
-            volatile NVMeCompletion* Cpl = &this->iOCQBase[this->iOCQHead];
-            
-            if((Cpl->Status & 1) == this->iOPhaseTag) {
-                // Check status code (Shift right 1 bit karena bit 0 itu Phase Tag)
-                // Bit 17-31: Status Code Type & Value. 0 = Success.
-                if ((Cpl->Status >> 1) != 0) {
-                    // Error handling: Write Failed
-                    // Balikin Head biar ga macet, tapi return FALSE
-                    this->iOCQHead = (this->iOCQHead + 1) % 32;
-                    if(this->iOCQHead == 0) this->iOPhaseTag = !this->iOPhaseTag;
-                    WriteDoorbell(1, this->iOCQHead, TRUE);
-                    return FALSE;
-                }
-
-                // Success
-                this->iOCQHead = (this->iOCQHead + 1) % 32;
-                if(this->iOCQHead == 0) this->iOPhaseTag = !this->iOPhaseTag;
-                
-                WriteDoorbell(1, this->iOCQHead, TRUE); // Completion Doorbell QID 1
-                return TRUE;
-            }
-            Arch::ASM::CPURelax();
+        // Tidurkan Task
+        Tasking::Task *CurrentTask = Tasking::GetCurrentTaskPtr();
+        if(CurrentTask){
+            this->WaitingTask[CID] = CurrentTask;
+            this->IOLock.Release(); 
+            Tasking::BlockTaskCauseOfIOAndYield(CurrentTask);
+        } else {
+            this->IOLock.Release();
         }
 
-        return FALSE;
+        // --- TERBANGUN OLEH INTERRUPT DISINI ---
+
+        BOOL Success = this->CommandStatus[CID];
+        this->WaitingTask[CID] = nullptr; 
+
+        // Bersihkan PRPList memori
+        if(PRPListBuf){
+            PageAlloc::DMAAlloc::FreeDMABuffer(PRPListBuf);
+        }
+
+        if(!Success){
+            Printk::Write(Printk::Level::LOG_ERR, "Error. Write Sectors unsuccess.\n");
+            return FALSE;
+        }
+
+        return TRUE;
     }
 
     BOOL NVMeController::FlushCache(){
+        this->IOLock.Acquire();
+
+        U16 CID = AllocateCID();
+        if(CID == 0xFFFF){
+            this->IOLock.Release();
+            Printk::Write(Printk::Level::LOG_ERR, "CID is full on FlushCache.\n");
+            return FALSE;
+        }
+
         NVMeCommand cmd = {};
-        cmd.Opcode = 0x00;
-        cmd.CommandID = 0x99;
+        cmd.Opcode = 0x00; // Flush
+        cmd.CommandID = CID;
         cmd.NSID = 1;
 
         U16 Tail = this->iOSQTail;
         this->iOSQBase[Tail] = cmd;
-
         this->iOSQTail = (Tail + 1) % 32;
 
         WriteDoorbell(1, this->iOSQTail, FALSE);
 
-        int Timeout = 1000000; // Flush mungkin butuh waktu agak lama
-        while(Timeout--) {
-            volatile NVMeCompletion* Cpl = &this->iOCQBase[this->iOCQHead];
-            
-            if((Cpl->Status & 1) == this->iOPhaseTag) {
-                
-                // Cek Error
-                if ((Cpl->Status >> 1) != 0) {
-                    // Flush gagal
-                    this->iOCQHead = (this->iOCQHead + 1) % 32;
-                    if(this->iOCQHead == 0) this->iOPhaseTag = !this->iOPhaseTag;
-                    WriteDoorbell(1, this->iOCQHead, TRUE);
-                    return FALSE;
-                }
-
-                // Success
-                this->iOCQHead = (this->iOCQHead + 1) % 32;
-                if(this->iOCQHead == 0) this->iOPhaseTag = !this->iOPhaseTag;
-                
-                WriteDoorbell(1, this->iOCQHead, TRUE);
-                return TRUE;
-            }
-            Arch::ASM::CPURelax();
+        Tasking::Task *CurrentTask = Tasking::GetCurrentTaskPtr();
+        if(CurrentTask){
+            this->WaitingTask[CID] = CurrentTask;
+            this->IOLock.Release();
+            Tasking::BlockTaskCauseOfIOAndYield(CurrentTask);
+        } else {
+            this->IOLock.Release();
         }
 
-        return FALSE;
+        // --- TERBANGUN OLEH INTERRUPT DISINI ---
+
+        BOOL Success = this->CommandStatus[CID];
+        this->WaitingTask[CID] = nullptr;
+
+        if(!Success){
+            Printk::Write(Printk::Level::LOG_ERR, "NVMe Flush Cache Failed.\n");
+            return FALSE;
+        }
+
+        return TRUE;
     }
 
     BOOL NVMeController::CreateIOQueues() {

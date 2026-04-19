@@ -3,6 +3,7 @@
 #include <rosval.h>
 #include "../../filesys/iblockdevice.hpp"
 #include "../pci/pci.hpp"
+#include "spinlock/mutex.hpp"
 
 namespace NVMe{
     struct NVMeRegister{
@@ -114,6 +115,17 @@ namespace NVMe{
 
         public:
             NVMeController(U8 bus, U8 device, U8 function);
+            Mutex IOLock;
+            Tasking::Task *WaitingTask[32] = {nullptr};
+            BOOL CommandStatus[32] = {FALSE};
+
+            U16 AllocateCID(){
+                for(U16 i = 0; i < 32; i++){
+                    if(WaitingTask[i] == nullptr) return i;
+                }
+                return 0xFFFF;
+            }
+            
             BOOL Initialize();
             BOOL IdentifyController();
 

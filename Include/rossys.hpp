@@ -154,6 +154,31 @@ namespace Arch {
         static inline void FPU_Restore(void* buffer) {
             asm volatile("fxrstor (%0)" :: "r"(buffer) : "memory");
         }
+
+        static void InvalidateCacheLine(void* VirtAddr, unsigned long long TotalBytes) {
+            // Biasanya cache line berukuran 64 bytes
+            const unsigned long long cache_line_size = 64;
+            
+            // Casting ke tipe pointer yang bisa dimanipulasi secara numerik
+            unsigned char* ptr = (unsigned char*)VirtAddr;
+            unsigned char* end = ptr + TotalBytes;
+
+            // Sejajarkan (align) ptr ke batas cache line terendah
+            ptr = (unsigned char*)((unsigned long long)ptr & ~(cache_line_size - 1));
+
+            while (ptr < end) {
+                __asm__ __volatile__ (
+                    "clflush %0" 
+                    : "+m" (*ptr) // Output/Input operand
+                    : 
+                    : "memory"    // Clobber memory untuk mencegah reordering compiler
+                );
+                ptr += cache_line_size;
+            }
+
+            // Pastikan semua flush selesai sebelum lanjut
+            __asm__ __volatile__ ("mfence" ::: "memory");
+        }
     }
 
         // Model-specific register helpers (RDMSR/WRMSR) and convenient EFER/STAR accessors.

@@ -76,11 +76,11 @@ ABI_C NORET void KernelMain(VOID*)
     // and IOAPIC/LAPIC initialized, start Application Processors.
     //AACPI::LAPIC::SMP::InitSMP();
 
-    BootInfoPrint();
-
     ROOTFS::InitROOTFS();
     DEVFS::Init();
     PipeFS::Init();
+
+    BootInfoPrint();
 
     // Initialize PCI and its drivers
     PCI::IntializePCIDrivers();
@@ -93,14 +93,15 @@ ABI_C NORET void KernelMain(VOID*)
 
     Userland::Syscall_Init();
     SharedMemoryManager::Init();
-    
 
-    Partition *P = PartitionManager::FindPartitionByDeviceName("sda2");
+    const char* DeviceName = "nvme0n1p2";
+
+    Partition *P = PartitionManager::FindPartitionByDeviceName(DeviceName);
     if(P && P->Mount()){
         FileSystem *EXT2FS = P->GetFilesystem();
         if(EXT2FS){
             ROOTFS::GetRootFS()->SetBackingFileSystem(EXT2FS);
-            Printk::Write(Printk::Level::LOG_INFO, "KernelMain: Successfully mounted partition sda2 as RootFS Backing Filesystem.\n");
+            Printk::Write(Printk::Level::LOG_INFO, "KernelMain: Successfully mounted partition %s as RootFS Backing Filesystem.\n", DeviceName);
         }
     } else {
         Printk::Write(Printk::Level::LOG_ERR, "KernelMain: Failed to mount partition sda2.\n"); 

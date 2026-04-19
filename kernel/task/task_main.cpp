@@ -177,4 +177,15 @@ namespace Tasking {
 			Printk::Write(Printk::Level::LOG_INFO, "PID %d marked as Critical Process.\n", t->pid);
 		}
 	}
+
+	BOOL BlockTaskCauseOfIOAndYield(Task *t){
+		if(!t) return FALSE;
+
+		t->State = TaskState::BLOCKED;
+		t->BlockReason = TASK_WAIT_IO;
+
+		SchedulerYield();
+
+		return TRUE;
+	}
 }

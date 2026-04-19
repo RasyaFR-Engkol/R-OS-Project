@@ -41,6 +41,8 @@ struct File;
 
 // FLAGS MLFQ
 #define TASK_SLEEPING (1 << 0)
+#define TASK_WAIT_HARDWARE (1 << 1)
+#define TASK_WAIT_IO (1 << 2)
 
 // flags POLLIN
 // Konstanta bitmask poll (Standar)
@@ -208,4 +210,5 @@ namespace Tasking{
     VOID Debug_DumpProcessState();
     VOID Debug_DumpFDProccessBelowPID10();
     VOID Debug_MinorAndMajorFaultsBelowPID10();
+    BOOL BlockTaskCauseOfIOAndYield(Task *t);
 }
