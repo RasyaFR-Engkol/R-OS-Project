@@ -67,8 +67,7 @@ ABI_C VOID Syscall_Entry(CpuContext_T *CPUContext){
                 // Note: Handler harus panggil syscall 'sigreturn' untuk restore context dari stack
                 // atau exit() kalau memang tujuannya terminate (seperti ping).
             } else {
-                CurTask->Priority = 0;
-                CurTask->TimeSlice = Tasking::GetTimeSliceForPriority(0);
+                CurTask->vruntime = Tasking::MinVRuntime - 1;
 
                 // Wake parent
                 U64 ppid = CurTask->ppid;

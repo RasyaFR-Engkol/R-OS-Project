@@ -12,7 +12,7 @@
 VOLATILE U64 ACPI::Timer::LapicTicks = 0;
 U32 ACPI::Timer::LapicHz = 0;
 U64 ACPI::Timer::RawApicHz = 0;
-bool ACPI::Timer::UsingTscDeadline = false;
+VOLATILE BOOL ACPI::Timer::UsingTscDeadline = false;
 U64 ACPI::Timer::TscTicksPerSystemTick = 0; 
 static VOLATILE U32 ApicTicksPerSystemTick = 0;
 static VOLATILE U64 LastTscTimestamp = 0;

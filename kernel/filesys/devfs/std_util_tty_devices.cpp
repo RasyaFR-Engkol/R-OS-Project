@@ -21,6 +21,8 @@ VOID TTY::OnInput(U8 c){
         Tasking::Debug_MinorAndMajorFaultsBelowPID10();
     } else if(c == 0x07){
         Printk::Panic("Triggered panic VIA TTY.\n");
+    } else if (c == 0x08){
+        Tasking::DumpSchedulerTree();
     }
 
     if((m_Termios.c_iflag & IXON)){
@@ -113,10 +115,9 @@ VOID TTY::OnInput(U8 c){
             task->State = Tasking::TaskState::READY;
             
             // Boost Priority biar interaktif
-            task->Priority = 0; 
-            task->TimeSlice = Tasking::GetTimeSliceForPriority(0);
+            task->vruntime = Tasking::MinVRuntime + 1;
 
-            Tasking::Enqueue(task);
+            Tasking::CFSEnqueue(task);
             
             // Preemption
             Tasking::ForceReschedule = TRUE; 

@@ -105,6 +105,7 @@ namespace Tasking{
             Printk::Write(Printk::Level::LOG_ERR, "ConstructTask: failed to allocate Task struct\n");
             return nullptr;
         }
+        String::Memset(NewTask, 0, sizeof(Task));
 
         NewTask->StackSize = 0x4000; // 16 KB stack
         NewTask->StackBase = (VOID*)Kmalloc::Alloc(NewTask->StackSize);
@@ -138,12 +139,17 @@ namespace Tasking{
         NewTask->RSP = FrameAddr;
 
         NewTask->State = TaskState::READY;
-        NewTask->Priority = 0;
-        NewTask->TimeSlice = 5;
-        NewTask->SleepUntil = 0;
+        NewTask->vruntime = MinVRuntime;
+        NewTask->NiceValueOfThisGuy = 0;
+        NewTask->Weight = RateThisTaskNice(NewTask->NiceValueOfThisGuy);
         NewTask->IsCriticalProc = FALSE;
         NewTask->IsSudoOrAdmin = FALSE;
         NewTask->IsEssentialSystem = FALSE;
+        NewTask->RbtLeft = nullptr;
+        NewTask->RbtRight = nullptr;
+        NewTask->RbtParent = nullptr;
+        NewTask->Color = RBT_RED;
+        NewTask->YieldRequested = FALSE;
 
         for(U32 i = 0; i < MAX_FILE_IN_PROCESS; i++){
             NewTask->FDTable[i] = nullptr;
@@ -157,10 +163,6 @@ namespace Tasking{
 
         // Debug: Pastikan alignment benar
         // Printk::Write(Printk::Level::LOG_DEBUG, "Task FPU Aligned at: %llx\n", (U64)NewTask->FPU_Region);
-
-        // Init State FPU
-        // Pastikan SSE sudah enable di CPU sebelum ini dipanggil!
-        Arch::ASM::FPU_Init(); 
         
         // Sekarang aman, karena FPU_Region pasti aligned 16-byte
         Arch::ASM::FPU_Save(NewTask->FPU_Region);
@@ -184,7 +186,7 @@ namespace Tasking{
                     // Enqueue biasanya aman dipanggil saat int disabled (karena dia handle lock sendiri/nested)
                     // Tapi lebih baik cek implementasi Enqueue lu. 
                     // Kalau Enqueue melakukan locking lagi, pastikan SaveAndDisableInterrupts support nesting.
-                    Enqueue(NewTask); 
+                    CFSEnqueue(NewTask); 
                 }
             }
             Arch::RestoreInterrupts(rflags); // RESTORE
@@ -204,7 +206,7 @@ namespace Tasking{
 
                 if (NewTask->State == TaskState::READY) {
                     Printk::Write(Printk::Level::LOG_CRIT, "TaskConstructor: Enqueueing task PID %d.\n", NewTask->pid);
-                    Enqueue(NewTask);
+                    CFSEnqueue(NewTask);
                 }
                 
                 Arch::RestoreInterrupts(rflags); // RESTORE & SELESAI
@@ -234,7 +236,6 @@ namespace Tasking{
         
         // Paksa taruh di slot 0
         Idle->pid = PID_IDLE;
-        Idle->Priority = MLFQ_LEVELS - 1; // Prioritas paling rendah
         String::Strcpy(Idle->Name, "System Idle");
         
         if(TaskArray[PID_IDLE] == nullptr){

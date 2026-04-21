@@ -243,9 +243,7 @@ namespace PIC{
                         
                         // --- TAMBAHAN PENTING (IO BOOST) ---
                         // Karena task ini bangun dari IO (Interactive), dia harus prioritas tertinggi!
-                        WaitingTask->Priority = 0; 
-                        WaitingTask->TimeSlice = Tasking::GetTimeSliceForPriority(0); // Reset timeslice
-                        WaitingTask->TimeUsedInPriority = 0; 
+                        WaitingTask->vruntime = Tasking::MinVRuntime - 1;
                         
                         // Opsional: Set flag global biar Scheduler tau ada yang urgent
                         Tasking::ForceReschedule = TRUE; 

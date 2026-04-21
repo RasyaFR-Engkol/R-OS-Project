@@ -53,16 +53,19 @@ struct File;
 #define POLLHUP     0x0010
 #define POLLNVAL    0x0020
 
+#define PRIO_PROCESS 0
+#define PRIO_PGRP    1
+#define PRIO_USER    2
+
 extern VOLATILE U32 PriorityBitmap;
+
+enum RBTColor { RBT_RED, RBT_BLACK };
 
 namespace Tasking {
     constexpr U64 PID_IDLE = 0;
     constexpr U64 PID_INIT = 1;
     constexpr U64 PID_USER_START = 10; // User process mulai dari sini
 }
-
-extern VOLATILE U64 GlobalBoostEpoch;
-
 // tasking FLAGS
 #define PERM_ESSENTIAL_SYSTEM   (1 << 1) // Gak bisa di-kill sembarangan
 #define PERM_ADMIN_SUDO         (1 << 2) // Punya akses root/kernel space helper
@@ -108,8 +111,7 @@ namespace Tasking{
         // Pointer inilah yang akan kita pass ke fxsave/fxrstor
         U8* FPU_Region;
 
-        U8 Priority; // Prioritas task (0 = tertinggi)
-        U64 TimeUsedInPriority;
+        I8 NiceValueOfThisGuy;
 
         VOLATILE Tasking::TaskState::State State; // Current State of the Task
         UFLAGS BlockReason; 
@@ -118,9 +120,6 @@ namespace Tasking{
         VOLATILE U64 SleepTick;
         
         Tasking::Task *NextWaitTask;
-
-        U64 TimeSlice; // Time slice for scheduling
-        U64 SleepUntil; // Waktu hingga task ini harus dibangunkan (jika tidur)
 
         Tasking::Task *NextTask; // Pointer to the next task in the scheduler's list
 
@@ -136,16 +135,19 @@ namespace Tasking{
         BOOL IsCriticalProc = FALSE;
         BOOL IsEssentialSystem = FALSE;
 
-        Task *NextRunQueue = nullptr;
-        Task *PrevRunQueue = nullptr;
         Task *NextSleepQueue = nullptr;
-        Task* NextReady = nullptr;
-        U64 LastBoostEpoch = 0;
 
         U64 CountMinorFault = 0;
         U64 CountMajorFault = 0;
 
         bool IsQueued = false; // Apakah task ini sedang berada di run queue atau sleep queue?
+
+        U64 vruntime;
+        U64 Weight;
+        Task *RbtLeft;
+        Task *RbtRight;
+        Task *RbtParent;
+        RBTColor Color;
     };
 
     struct RunQueue{
@@ -167,6 +169,9 @@ namespace Tasking{
     extern VOLATILE BOOL SchedulerActive;
     extern U64 g_ForegroundPID;
     extern VOLATILE BOOL ForceReschedule;
+    extern Task *CFSLeftmost;
+    extern VOLATILE 
+    U64 MinVRuntime;
 
     VOID SchedulerStart();
     Task* CreateKThread(VOID (*Entry)(VOID *Context), VOID *ContextArg, const char* taskname);
@@ -201,14 +206,16 @@ namespace Tasking{
     VOID WakeUp(WaitQueue &queue);
     VOID WakeUpAll(WaitQueue &queue);
     short CheckFileDesc(int fd, short events);
-    VOID Enqueue(Task *t);
     VOID AddToSleepList(Task *t);
     VOID SettingAppPerm(Task *t, U32 Perm);
-
+    VOID CFSEnqueue(Task *NewTask);
     VOID ReapDTask();
     VOID Sleep(U64 ms);
     VOID Debug_DumpProcessState();
     VOID Debug_DumpFDProccessBelowPID10();
     VOID Debug_MinorAndMajorFaultsBelowPID10();
     BOOL BlockTaskCauseOfIOAndYield(Task *t);
+    VOID DumpSchedulerTree();
+    U64 RateThisTaskNice(I8 RateThisTaskNice);
+    VOID CFSDequeue(Task *T);
 }

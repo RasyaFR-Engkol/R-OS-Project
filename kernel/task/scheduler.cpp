@@ -1,3 +1,4 @@
+#include "rbt.hpp"
 #include "string.hpp"
 #include <rossys.hpp>
 #define PRINTK_MODULE_NAME "Sched"
@@ -18,123 +19,74 @@ extern "C" void Arch_SwitchStackAndCall(void* new_sp, void (*target)(void*), voi
 extern "C" void Scheduler_IretTrampoline();
 ABI_C VOID Context_Restore(VOID *Context);
 
-static U64 LastSchedulerTickTimestamp = 0;
-VOLATILE U64 GlobalBoostEpoch = 0;
 static VOLATILE U64 TotalSleepingTasks = 0; // Tambah ini
-VOLATILE U32 PriorityBitmap = 0;
 
 namespace Tasking {
-    RunQueue PriorityQueues[MLFQ_LEVELS];
-    static Arch::Spinlock::Spinlock RunqueueLock;
-    Task *SleepingHead = nullptr;
-    Task* QueueHead[MLFQ_LEVELS] = { nullptr };
-    Task* QueueTail[MLFQ_LEVELS] = { nullptr };
-    Task* SleepWheel[TIMER_WHEEL_SIZE] = { nullptr };
+    Task *CFSRoot = nullptr;
+    Task *CFSLeftmost = nullptr;
+    Task *SleepWheel[TIMER_WHEEL_SIZE] = { nullptr };
+    VOLATILE U64 MinVRuntime = 0;
 
-    VOID Enqueue(Task *t){
-        Arch::Spinlock::SpinlockGuard Guard(RunqueueLock);
-        
-        if(!t) {
-            Printk::Write(Printk::Level::LOG_DEBUG, "No Task to Enqueue.\n");
-            return;
+    VOID CFSEnqueue(Task *NewTask){
+        if (!NewTask || NewTask->pid == PID_IDLE) return;
+        Task **Link = &CFSRoot;
+        Task *Parent = nullptr;
+        BOOL Leftmost = TRUE;
+
+        while(*Link){
+            Parent = *Link;
+            /* Perbandingan kalo vruntime task lebih kecil daripada task di atas nya or parent */
+            if(NewTask->vruntime < Parent->vruntime){
+                Link = &Parent->RbtLeft; // Turun tingkat
+            }
+            /* Perbandingan kalo vruntime task lebih besar daripada task di atas nya or parent */
+            else {
+                Link = &Parent->RbtRight;
+                Leftmost = FALSE;
+            }
         }
 
-        if(t->IsQueued){
-            return;
+        // Udah mentok sampe null.
+        NewTask->RbtParent = Parent;
+        NewTask->RbtLeft = nullptr;
+        NewTask->RbtRight = nullptr;
+        NewTask->Color = RBT_RED;
+        *Link = NewTask;
+
+        if(Leftmost){
+            CFSLeftmost = NewTask;
         }
 
-        t->IsQueued = true; 
+        RBT_InsertFixup(&CFSRoot, NewTask);
 
-        if(t->Priority >= MLFQ_LEVELS) t->Priority = MLFQ_LEVELS - 1;
-
-        if (t->LastBoostEpoch < GlobalBoostEpoch) {
-            // MASA BOOST: Angkat SEMUA task ke Priority 0 biar kebagian CPU!
-            // Jangan khawatir, task biasa nanti otomatis turun kasta lagi di SchedulerTick.
-            t->Priority = 0; 
-            
-            t->TimeSlice = GetTimeSliceForPriority(t->Priority);
-            t->LastBoostEpoch = GlobalBoostEpoch;
+        Task* current = Tasking::GetCurrentTaskPtr();
+        if (current && NewTask->vruntime < current->vruntime) {
+            Tasking::ForceReschedule = TRUE;
         }
-
-        RunQueue &Rq = PriorityQueues[t->Priority];
-
-        t->NextRunQueue = nullptr;
-        t->PrevRunQueue = Rq.Tail;
-
-        if(Rq.Tail) Rq.Tail->NextRunQueue = t;
-        else Rq.Head = t;
-
-        Rq.Tail = t;
-        Rq.Count++;
-
-        PriorityBitmap |= (1 << t->Priority);
     }
 
-    VOID InternalEnqueue(Task *t){        
-        if(!t) {
-            Printk::Write(Printk::Level::LOG_DEBUG, "No Task to Enqueue.\n");
-            return;
+    VOID CFSDequeue(Task *T){
+        if (T == CFSLeftmost) {
+            Task *NextLeft = T->RbtRight;
+            if (NextLeft) {
+                while (NextLeft->RbtLeft) NextLeft = NextLeft->RbtLeft;
+                CFSLeftmost = NextLeft;
+            } else {
+                CFSLeftmost = T->RbtParent;
+            }
         }
-
-        if(t->IsQueued){
-            return;
-        }
-
-        t->IsQueued = true;
-
-        if(t->Priority >= MLFQ_LEVELS) t->Priority = MLFQ_LEVELS - 1;
-
-        if (t->LastBoostEpoch < GlobalBoostEpoch) {
-            // MASA BOOST: Angkat SEMUA task ke Priority 0 biar kebagian CPU!
-            // Jangan khawatir, task biasa nanti otomatis turun kasta lagi di SchedulerTick.
-            t->Priority = 0; 
-            
-            t->TimeSlice = GetTimeSliceForPriority(t->Priority);
-            t->LastBoostEpoch = GlobalBoostEpoch;
-        }
-
-        RunQueue &Rq = PriorityQueues[t->Priority];
-
-        t->NextRunQueue = nullptr;
-        t->PrevRunQueue = Rq.Tail;
-
-        if(Rq.Tail) Rq.Tail->NextRunQueue = t;
-        else Rq.Head = t;
-
-        Rq.Tail = t;
-        Rq.Count++;
-
-        PriorityBitmap |= (1 << t->Priority);
+        // PERBAIKAN DI SINI: Root di depan, Task di belakang
+        RBT_Erase(&CFSRoot, T); 
     }
 
-    Task *Dequeue(){
-         Arch::Spinlock::SpinlockGuard Guard(RunqueueLock);
+    Task *CFSPickNext() {
+        Task *Next = CFSLeftmost;
 
-        if (PriorityBitmap == 0) {
-            return nullptr;
+        if(Next){
+            CFSDequeue(Next);
         }
 
-        INTN HighestPrio = __builtin_ctz(PriorityBitmap);
-        RunQueue &Rq = PriorityQueues[HighestPrio];
-
-        Task *t = Rq.Head;
-        if(!t) {
-            return nullptr;
-        }
-
-        Rq.Head = t->NextRunQueue;
-        if(Rq.Head) Rq.Head->PrevRunQueue = nullptr;
-        else {
-            Rq.Tail = nullptr;
-            PriorityBitmap &= ~(1 << HighestPrio);
-        }
-
-        Rq.Count--;
-        t->NextRunQueue = nullptr;
-        t->PrevRunQueue = nullptr;
-        t->IsQueued = false;
-
-        return t;
+        return Next;
     }
 
     VOID AddToSleepList(Task *t) {
@@ -225,8 +177,14 @@ namespace Tasking {
                     
                     // Reset data sleep biar bersih di dump
                     t->SleepTick = 0;
+
+                    if (MinVRuntime > 10) {
+                        t->vruntime = MinVRuntime - 10;
+                    } else {
+                        t->vruntime = MinVRuntime;
+                    }
                     
-                    Enqueue(t);
+                    CFSEnqueue(t);
                     t = next;
                 } else {
                     prev = t;
@@ -283,14 +241,9 @@ namespace Tasking {
         Arch::ASM::Cli();
         SchedulerActive = FALSE;
 
-        for (U64 i = 1; i < MAX_TASK; ++i) { 
-            Task *t = TaskArray[i];
-            if (t && t->State == TaskState::READY) {
-                Enqueue(t);
-            }
-        }
+        // --- FOR LOOP YANG LAMA UDAH GW HAPUS BIAR GAK DOUBLE INSERT ---
 
-        Task *First = Dequeue();
+        Task *First = CFSPickNext();
 
         if(First){
             CurrentTaskIndex = First->pid;
@@ -321,173 +274,108 @@ namespace Tasking {
     UNUSED__ static U64 GlobalTickCounter = 0;
     VOID DestroyTask(Task *task);
 
-    VOID SchedulerTick(void *context){
-        // 1. Lock biar aman (Opsional kalau single core, tapi good practice)
-        Arch::ASM::Cli(); 
+    VOID Schedule(VOID *CurrentContextRSP) {
+        Task *Prev = Tasking::GetCurrentTaskPtr();
         
-        CpuContext_T *Context = (CpuContext_T*)context;
-        if(!SchedulerActive) return;    
+        // 1. Simpan state dan HANYA masukkan kembali ke RBT jika dia masih RUNNING
+        if (Prev) {
+            // Selalu update RSP terakhir pas kena preempt
+            Prev->RSP = (U64)CurrentContextRSP;
+            
+            // Selalu save FPU State kalau ada
+            if (Prev->FPU_Region) {
+                Arch::ASM::FPU_Save(Prev->FPU_Region);
+            }
 
-        Task *PrevTask = nullptr;
-        if(CurrentTaskIndex < MAX_TASK){
-            PrevTask = TaskArray[CurrentTaskIndex];
-        }
-
-        // 2. Simpan Context Task Lama (PrevTask)
-        if(PrevTask != nullptr){
-            PrevTask->RSP = (U64)Context;
-            if (PrevTask->FPU_Region) {
-                Arch::ASM::FPU_Save(PrevTask->FPU_Region);
+            // HANYA MASUKKAN KE RBT JIKA BUKAN IDLE TASK DAN MASIH RUNNING
+            if (Prev->pid != PID_IDLE && Prev->State == TaskState::RUNNING) {
+                Prev->State = TaskState::READY; 
+                CFSEnqueue(Prev); 
             }
         }
 
-        // Update System Tick
-        U64 CurrentSystemTick = ACPI::Timer::LapicTicks;
-        U64 DeltaTicks = 1; 
-        if (LastSchedulerTickTimestamp != 0) {
-            DeltaTicks = CurrentSystemTick - LastSchedulerTickTimestamp;
-        }
-        LastSchedulerTickTimestamp = CurrentSystemTick;
-
-        // 3. LOGIKA PREV TASK (YANG WAJIB ADA)
-        if(PrevTask && PrevTask->pid != PID_IDLE){
-            // Handle Yield manual / Force Reschedule
-            if(Tasking::ForceReschedule || PrevTask->YieldRequested){
-                Tasking::ForceReschedule = FALSE;
-                PrevTask->YieldRequested = FALSE;
-                
-                PrevTask->TimeUsedInPriority = 0;
-
-                if(PrevTask->IsCriticalProc || PrevTask->IsEssentialSystem){
-                    PrevTask->Priority = 0;
-                    PrevTask->TimeSlice = GetTimeSliceForPriority(0);
-                }
-            } 
-            else {
-                // Logic MLFQ TimeSlice (Pengurangan jatah waktu)
-                if(PrevTask->TimeSlice >= DeltaTicks) PrevTask->TimeSlice -= DeltaTicks;
-                else PrevTask->TimeSlice = 0;
-
-                PrevTask->TimeUsedInPriority += DeltaTicks;
-
-                if(PrevTask->IsCriticalProc || PrevTask->IsEssentialSystem){
-                    // Set allotment tinggi buat VVIP (misal 1000ms alias 1 detik)
-                    U64 CriticalAllotment = 1000; 
-
-                    if (PrevTask->TimeUsedInPriority >= CriticalAllotment) {
-                        // Kalau VVIP rakus banget, hukum turun ke Prio 1 sementara
-                        PrevTask->Priority = 1; 
-                        PrevTask->TimeUsedInPriority = 0;
-                        PrevTask->TimeSlice = GetTimeSliceForPriority(1);
-                    } else if (PrevTask->TimeSlice == 0) {
-                        PrevTask->Priority = 0; // Tetap di Prio 0
-                        PrevTask->TimeSlice = GetTimeSliceForPriority(0);
-                    }
-                } else {
-                    U64 Allotment = GetTimeAllotmentForPriority(PrevTask->Priority);
-
-                    if(PrevTask->TimeUsedInPriority >= Allotment){
-                        if(PrevTask->Priority < MLFQ_LEVELS - 1) PrevTask->Priority++;
-                        PrevTask->TimeUsedInPriority = 0;
-                        PrevTask->TimeSlice = GetTimeSliceForPriority(PrevTask->Priority);
-                    }
-                    else if(PrevTask->TimeSlice == 0){
-                        PrevTask->TimeSlice = GetTimeSliceForPriority(PrevTask->Priority);
-                    }
-                }
-            }
-            if (PrevTask->State == TaskState::RUNNING || PrevTask->State == TaskState::READY) {
-                PrevTask->State = TaskState::READY;
-                
-                // Masukin lagi ke antrian biar Scheduler tau dia masih mau jalan
-                Enqueue(PrevTask); 
+        // 2. Ambil task yang paling butuh CPU
+        Task *Next = CFSPickNext();
+        if (!Next) {
+            Next = GetTaskPID(PID_IDLE);
+        } else {
+            if (Next->vruntime > MinVRuntime) {
+                MinVRuntime = Next->vruntime;
             }
         }
+
+        // 3. Update pointer kernel
+        Tasking::ActiveTask = Next->pid;
+        CurrentTaskIndex = Next->pid; 
+        Next->State = TaskState::RUNNING; 
+        Tasking::ForceReschedule = FALSE;
+
+        // ---> FIX: ARM TIMER LAPIC DI SINI BIAR GAK FREEZE <---
+        // Kita set timer untuk meledak konstan setiap 4ms biar scheduler 
+        // dapet kesempatan jalan lagi buat ngecek RBT (Preemption)
+        const U64 MIN_SYSTEM_TICK_MS = 4;
+        U64 SystemTickInTSC = MIN_SYSTEM_TICK_MS * ACPI::Timer::TscTicksPerSystemTick; 
         
-        // 4. Bangunin Task yang lagi tidur (Sleep)
+        if (SystemTickInTSC < 5000) SystemTickInTSC = 5000; // Failsafe
+        ACPI::Timer::Arm(SystemTickInTSC);
+        // ------------------------------------------------------
+
+        // 4. Switch CR3 (Page Table)
+        U64 CurrentCR3 = (U64)DoCR3::GetCurrentCR3();
+        if(Next->CR3 != CurrentCR3){
+            DoCR3::Load((U64*)Next->CR3);
+        }
+
+        // 5. Restore FPU State
+        if (Next->FPU_Region) {
+            Arch::ASM::FPU_Restore(Next->FPU_Region);
+        }
+
+        // 6. Context Switch
+        TSS::SetRsp0((UPTR)Next->StackBase + Next->StackSize);
+        Context_Restore((VOID*)Next->RSP); 
+    }
+
+    VOID SchedulerTick(VOID *Context) {
         CheckSleepingTasks();
 
-        // 5. Global Boost (Anti Starvation)
+        Task *Current = Tasking::GetCurrentTaskPtr();
         
-        GlobalTickCounter += DeltaTicks;
-        if(GlobalTickCounter >= PRIORITY_BOOST_INTERVAL){
-            GlobalTickCounter = 0;
-            GlobalBoostEpoch = GlobalBoostEpoch + 1;
+        if (Current && Current->pid != PID_IDLE) {
+            // --- PRO-TIPS: CFS VRUNTIME CALCULATION ---
+            // Rumus: vruntime += 1_tick * (NICE_0_WEIGHT / Current->Weight)
+            // Kita pake skala (misal 1024) biar gak ilang presisinya pas pembagian.
+            
+            U64 delta_exec = 1; // 1 tick
+            U64 weight_0 = 1024; // Weight untuk Nice 0
+            
+            // Hitung penalti vruntime
+            // Task VIP (Weight > 1024) bakal punya 'penalty' < 1
+            // Task Nyantai (Weight < 1024) bakal punya 'penalty' > 1
+            U64 vdiff = (delta_exec * weight_0) / Current->Weight;
+            
+            // Minimal nambah 1 biar vruntime gak mandeg (stagnan)
+            if (vdiff == 0) vdiff = 1;
 
-            Arch::Spinlock::SpinlockGuard Guard(RunqueueLock);
-
-            for(int i = 1; i < MLFQ_LEVELS; i++){
-                if((PriorityBitmap & (1 << i)) != 0) {
-
-                    Task *Current = PriorityQueues[i].Head; 
-                    while(Current != nullptr){
-                        Task *NextTask = Current->NextRunQueue;
-
-                        Current->Priority = 0;
-                        Current->TimeUsedInPriority = 0;
-                        Current->TimeSlice = GetTimeSliceForPriority(0);
-
-                        InternalEnqueue(Current); // Sekarang pasti berhasil masuk Prio 0!
-
-                        Current = NextTask;
-                    }
-
-                    PriorityQueues[i].Head = nullptr;
-                    PriorityQueues[i].Tail = nullptr;
-                    PriorityQueues[i].Count = 0;
-                    
-                    PriorityBitmap &= ~(1 << i);
-                }
-            }
-        } 
-
-        // 6. Ambil Task Baru (Dequeue)
-        Task *NextTask = Dequeue();
-
-        // --- JEBAKAN BATMAN (Panic Check) ---
-            // Kalau masih null, pake IDLE
-            if (NextTask == nullptr) {
-                NextTask = TaskArray[PID_IDLE];
-            }
-        // ------------------------------------
-
-        if(NextTask == nullptr){
-            NextTask = TaskArray[PID_IDLE];
+            Current->vruntime += vdiff;
         }
 
-        // 7. Context Switch ke NextTask
-        UNUSED__ ExecuteSwitch:{
-            if(NextTask != nullptr){
-                CurrentTaskIndex = NextTask->pid;
-
-                // Hitung Timer Interrupt selanjutnya
-                U64 TimeSliceInTSC = NextTask->TimeSlice * ACPI::Timer::TscTicksPerSystemTick;
-                const U64 MIN_SYSTEM_TICK_MS = 4;
-                U64 SystemTickInTSC = MIN_SYSTEM_TICK_MS * ACPI::Timer::TscTicksPerSystemTick; 
-                
-                if (TimeSliceInTSC > SystemTickInTSC) TimeSliceInTSC = SystemTickInTSC;
-                if (TimeSliceInTSC < 5000) TimeSliceInTSC = 5000;
-
-                ACPI::Timer::Arm(TimeSliceInTSC);
-                
-                // Restore State
-                NextTask->State = TaskState::RUNNING;
-
-                U64 CurrentCR3 = (U64)DoCR3::GetCurrentCR3();
-                if(NextTask->CR3 != CurrentCR3){
-                    DoCR3::Load((U64*)NextTask->CR3);
+        // Cek preemption
+        if (CFSLeftmost) {
+            if (Current && Current->pid == PID_IDLE) {
+                ForceReschedule = TRUE;
+            } else if (Current) {
+                // --- OPTIMASI: Preemption Granularity ---
+                // Jangan langsung switch cuma gara-gara beda 1 vruntime (bikin overhead)
+                // Kasih napas dikit, misal beda 2-4 vruntime baru swap.
+                U64 granularity = 2; 
+                if (Current->vruntime > (CFSLeftmost->vruntime + granularity)) {
+                    ForceReschedule = TRUE;
                 }
-
-                if (NextTask->FPU_Region) {
-                    Arch::ASM::FPU_Restore(NextTask->FPU_Region);
-                }
-
-                TSS::SetRsp0((UPTR)NextTask->StackBase + NextTask->StackSize);
-                Context_Restore((VOID*)NextTask->RSP);
-            } else {
-                Printk::Panic("No init task. SYSBRK.\n");
             }
         }
+
+        Schedule(Context);
     }
 
     U64 GetTimeSliceForPriority(U8 Priority){
@@ -565,34 +453,21 @@ namespace Tasking {
     }
 
     VOID WakeUp(WaitQueue &queue) {
-        // 1. Cek ada yang tidur gak?
         if (queue.Head == nullptr) return;
 
-        // 2. Ambil task paling depan (Compositor lu biasanya disini)
         Task *t = queue.Head;
-        
-        // 3. Majuin Head ke task berikutnya (Pake NextWaitTask!)
         queue.Head = t->NextWaitTask;
         
-        // Kalau antrian jadi kosong, update Tail juga
         if (queue.Head == nullptr) {
             queue.Tail = nullptr;
         }
-
-        // Putus link task ini dari antrian lama biar bersih
         t->NextWaitTask = nullptr;
 
-        // 4. Set status jadi READY dan masukin ke RunQueue Scheduler
         t->State = TaskState::READY;
-        t->BlockReason = 0; // Clear reason
+        t->BlockReason = 0; 
         
-        // 5. Preempt! Kalau yang bangun (Prio 0) lebih penting dari yang jalan sekarang (Prio 3)
-        // Tendang yang sekarang, kasih CPU ke yang baru bangun.
-        Task* Current = GetCurrentTaskPtr();
-        if (Current && t->Priority < Current->Priority) {
-            ForceReschedule = TRUE;
-        }
-
+        // Langsung lempar ke fungsi unblock, dia yang bakal handle vruntime
+        // dan set ForceReschedule = TRUE
         UnblockTaskWithIOBoost(t); 
     }
     
@@ -620,8 +495,8 @@ namespace Tasking {
             Printk::Write(Printk::LOG_INFO, "TASK NAME: %s.\n", t->Name);
 
             Printk::Write(Printk::Level::LOG_INFO, 
-                "PID: %d | State: %s | Prio: %d | Slice: %d\n",
-                t->pid, stateStr, t->Priority, t->TimeSlice
+                "PID: %d | State: %s | Nice: %d | Weight: %u \n",
+                t->pid, stateStr, t->NiceValueOfThisGuy, t->Weight
             );
 
             Printk::Write(Printk::LOG_INFO, "Is Essential: %s | Is Critical: %s | Is Sudo/Admin: %s\n",
@@ -629,8 +504,6 @@ namespace Tasking {
                 t->IsCriticalProc ? "YES" : "NO",
                 t->IsSudoOrAdmin ? "YES" : "NO"
             );
-
-            Printk::Write(Printk::Level::LOG_DEBUG, "PriorityBitmap: 0x%x | ActiveTask: %d\n", PriorityBitmap, ActiveTask);
 
             if (t->State == TaskState::BLOCKED) {
                 Printk::Write(Printk::Level::LOG_INFO, 
@@ -675,5 +548,35 @@ namespace Tasking {
             Printk::Write(Printk::Level::LOG_DEBUG, "MAJOR = %u.\n", Major);
             Printk::Write(Printk::Level::LOG_DEBUG, "MINOR = %u.\n", Minor);
         }
+    }
+
+    VOID Debug_PrintRBT(Task *node, INTN depth) {
+        if (!node) return;
+
+        // Print cabang Kanan (Di atas kalau diputar 90 derajat)
+        Debug_PrintRBT(node->RbtRight, depth + 1);
+
+        // Cetak indentasi (jarak) berdasarkan kedalaman
+        for (INTN i = 0; i < depth; i++) {
+            Printk::Write(Printk::Level::LOG_INFO, "        ");
+        }
+
+        // Cetak Warna, PID, dan vruntime
+        const CHAR8* colorStr = (node->Color == RBT_RED) ? "[R]" : "[B]";
+        Printk::Write(Printk::Level::LOG_INFO, "%s PID:%d(v:%llu)\n", 
+                      colorStr, node->pid, node->vruntime);
+
+        // Print cabang Kiri (Di bawah)
+        Debug_PrintRBT(node->RbtLeft, depth + 1);
+    }
+
+    VOID DumpSchedulerTree() {
+        Printk::Write(Printk::Level::LOG_INFO, "=== DUMP CFS RED-BLACK TREE ===\n");
+        if (!CFSRoot) {
+            Printk::Write(Printk::Level::LOG_INFO, "(Tree is empty)\n");
+        } else {
+            Debug_PrintRBT(CFSRoot, 0);
+        }
+        Printk::Write(Printk::Level::LOG_INFO, "===============================\n");
     }
 }

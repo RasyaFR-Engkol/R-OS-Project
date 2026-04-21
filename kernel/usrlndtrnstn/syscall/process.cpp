@@ -66,9 +66,7 @@ VOID Sys_Exit(CpuContext_T *CPUContext) {
                 if (!T) continue;
                 if (T->pid == curr->ppid && T->State == Tasking::TaskState::BLOCKED) {
                     T->State = Tasking::TaskState::READY;
-                    T->Priority = 0;
-                    T->TimeSlice = Tasking::GetTimeSliceForPriority(0);
-                    T->TimeUsedInPriority = 0;
+                    T->vruntime = Tasking::MinVRuntime - 1;
                 }
             }
             Tasking::SchedulerYield();
@@ -141,17 +139,14 @@ VOID Sys_Fork(CpuContext_T *CPUContext) {
     ChildContext->rax = 0;
     
     // 6. Set PID/PPID/PGID
-    Child->NextRunQueue = nullptr;
-    Child->PrevRunQueue = nullptr;
     Child->NextSleepQueue = nullptr;
     Child->NextWaitTask = nullptr;
     Child->ppid = Current->pid;
     Child->pid = (U64)-1; // Will be set by SchedulerAddTask
     Child->State = Tasking::TaskState::READY;
-    Child->Priority = 0;
-    Child->TimeSlice = Tasking::GetTimeSliceForPriority(0);
-    Child->TimeUsedInPriority = 0;
-    Child->LastBoostEpoch = GlobalBoostEpoch; // Sync epoch biar gak langsung reset lagi
+    Child->NiceValueOfThisGuy = 0;
+    Child->Weight = Tasking::RateThisTaskNice(Child->NiceValueOfThisGuy);
+    Child->vruntime = Tasking::MinVRuntime;
     Child->PGID = Current->PGID;
     Child->PGIDTaskPtr = nullptr; // Safety awal
     Child->IsCriticalProc = FALSE; // Default non-critical
@@ -971,7 +966,7 @@ VOID Sys_Poll(CpuContext_T *CPUContext){
 
         Current->BlockReason |= TASK_SLEEPING;
 
-        Current->SleepTick = 1; // 1 Tick relatif pendek
+        Current->SleepTick = ACPI::Timer::LapicTicks + 1;
         Current->State = Tasking::TaskState::BLOCKED;
 
         Tasking::AddToSleepList(Current);    
@@ -1100,6 +1095,66 @@ VOID Sys_GetClockTime(CpuContext_T *CPUContext){
         CPUContext->rax = -14; // EFAULT
         return;
     }
+
+    CPUContext->rax = 0;
+}
+
+VOID Sys_SetPriority(CpuContext_T *CPUContext){
+    // set cpu context. karena sudah pake CFS, wajib untuk set
+    // priority disini mau ga mau
+    INTN Which = CPUContext->rdi;
+    INTN Who = CPUContext->rsi;
+    INTN NiceValue = CPUContext->rdx;
+
+    Tasking::Task *Current = Tasking::GetCurrentTaskPtr();
+    if(!Current){
+        CPUContext->rax = -ROS_ERROR_TRY_AGAIN_LATER;
+        return;
+    }
+
+    if(NiceValue < -20) NiceValue = -20;
+    if(NiceValue > 19) NiceValue = 19;
+
+    Tasking::Task *Target = nullptr;
+
+    if(Which == PRIO_PROCESS){
+        U64 TargetPid = (Who == 0) ? Current->pid : Who;
+        Target = Tasking::GetTaskPID(TargetPid);
+    } 
+    else if (Which == PRIO_PGRP){
+        // TODO: Implement buat PGRP
+        CPUContext->rax = -ROS_ERROR_FUNCTION_NOT_IMPLEMENTED;
+        return;
+    }
+    else {
+        CPUContext->rax = -ROS_ERROR_INVAL;
+        return;
+    }
+
+    if(!Target) {
+        CPUContext->rax = -ROS_ERROR_NO_PROCCESS;
+        return;
+    }
+
+    if (NiceValue < Target->NiceValueOfThisGuy && !Current->IsSudoOrAdmin){
+        CPUContext->rax = -ROS_ERROR_PERMISSION_DENIED;
+        return;
+    }
+
+    LOCKRFLAGS rflags = Arch::SaveAndDisableInterrupts();
+
+    if(Target->State == Tasking::TaskState::READY) {
+        Tasking::CFSDequeue(Target);
+    }
+
+    Target->NiceValueOfThisGuy = NiceValue;
+    Target->Weight = Tasking::RateThisTaskNice(NiceValue);
+
+    if(Target->State == Tasking::TaskState::READY){
+        Tasking::CFSEnqueue(Target);
+    }
+
+    Arch::RestoreInterrupts(rflags);
 
     CPUContext->rax = 0;
 }

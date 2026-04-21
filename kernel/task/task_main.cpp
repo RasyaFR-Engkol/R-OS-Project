@@ -14,6 +14,26 @@ namespace Tasking {
 	U64 g_ForegroundPID = -1;
 	VOLATILE BOOL ForceReschedule = FALSE;
 
+	static const U64 PrioToWeight[40] = {
+		/* -20 */ 88761, 71755, 56483, 46273, 36291,
+		/* -15 */ 29154, 23254, 18705, 14949, 11916,
+		/* -10 */  9548,  7620,  6100,  4904,  3906,
+		/* -5 */  3121,  2501,  1991,  1586,  1277,
+		/* 0 */  1024,   820,   655,   526,   423,
+		/* 5 */   335,   272,   215,   172,   137,
+		/* 10 */   110,    87,    70,    56,    45,
+		/* 15 */    36,    29,    23,    18,    15
+	};
+
+	U64 RateThisTaskNice(I8 RateThisTaskNice) {
+		// Safety clamp: pastikan nilai gak keluar dari -20 s/d 19 biar gak segfault
+		if (RateThisTaskNice < -20) RateThisTaskNice = -20;
+		if (RateThisTaskNice > 19) RateThisTaskNice = 19;
+		
+		// Offset +20 biar array index-nya mulai dari 0
+		return PrioToWeight[RateThisTaskNice + 20];
+	}
+
 	Task *GetTaskPID(U64 pid){
 		if (pid >= MAX_TASK) return nullptr;
 		// O(1) array access
@@ -58,13 +78,12 @@ namespace Tasking {
 					t->Signals |= (1 << signal);
 					// kalo SIGINT, langsung bangunin kalo lagi BLOCKED. Priority 0
 					if(t->Signals & (1 << 2)){
-						t->Priority = 0;
-						t->TimeSlice = GetTimeSliceForPriority(0);
+						t->vruntime = Tasking::CFSLeftmost->vruntime;
 					}
 
 					if(t->State == TaskState::BLOCKED){
 						t->State = TaskState::READY;
-						Enqueue(t);
+						CFSEnqueue(t);
 					}
 				}
 				t = t->PGIDTaskPtr;
@@ -76,13 +95,12 @@ namespace Tasking {
 
 				// kalo SIGINT, langsung bangunin kalo lagi BLOCKED. Priority 0
 				if(t->Signals & (1 << 2)){
-					t->Priority = 0; 
-					t->TimeSlice = GetTimeSliceForPriority(0);
+					t->vruntime = Tasking::CFSLeftmost->vruntime;
 				}
 
 				if(t->State == TaskState::BLOCKED){
 					t->State = TaskState::READY;
-					Enqueue(t); 
+					CFSEnqueue(t); 
 				}
 			}
 		}
@@ -128,18 +146,20 @@ namespace Tasking {
 	VOID UnblockTaskWithIOBoost(Task *t){
         if(!t) return;
         
-        // IO BOOST: Reset priority ke paling tinggi (0)
-        // Karena task ini interaktif (nunggu input user/disk), kasih hadiah.
-        t->Priority = 0;
-        
-        // Reset jatah waktu biar dia bisa kerja full power
-        t->TimeSlice = GetTimeSliceForPriority(0); 
-        
-        // Reset history penggunaan di priority ini
-        t->TimeUsedInPriority = 0;
-		t->LastBoostEpoch = GlobalBoostEpoch;
+        // IO BOOST versi CFS sesungguhnya: 
+        // Jangan pake CFSLeftmost karena bisa NULL kalau antrian kosong.
+        // Pake MinVRuntime, dan kasih "diskon" biar dia pasti menang.
+        if (MinVRuntime > 10) {
+            t->vruntime = MinVRuntime - 10; 
+        } else {
+            t->vruntime = 0;
+        }
 
-		Enqueue(t);
+        CFSEnqueue(t);
+
+        // MUTLAK PREEMPT! Kalau ada I/O (keyboard/mouse/disk) beres, 
+        // langsung tendang CPU biar responsive.
+        ForceReschedule = TRUE;
     }
 
 	short CheckFileDesc(int fd, short events){

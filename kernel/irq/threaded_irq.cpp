@@ -58,7 +58,7 @@ ABI_C {
 
         Action->WorkerThread = Tasking::CreateKThread(IrqWorkerWrapper, Action, "IRQWorker");
         Action->WorkerThread->IsCriticalProc = TRUE; // Tandai sebagai kritikal agar gak di-kill sembarangan
-        Action->WorkerThread->Priority = 0; // Prioritas tertinggi agar segera dijalankan saat di-wake
+        Action->WorkerThread->vruntime = Tasking::MinVRuntime - 1;
 
         if (Vector < (U8)MAX_IRQS) {
             RegisteredIrqActions[Vector] = Action;

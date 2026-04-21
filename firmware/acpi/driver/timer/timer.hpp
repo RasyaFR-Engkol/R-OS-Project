@@ -13,7 +13,7 @@ namespace ACPI {
         extern volatile U64 ticks;
         extern U64 RawApicHz;
 
-        extern bool UsingTscDeadline;
+        extern VOLATILE BOOL UsingTscDeadline;
         extern U64 TscTicksPerSystemTick; // Berapa cycle TSC untuk 10ms (100hz)
 
         extern U64 TSCFrequencyHz;

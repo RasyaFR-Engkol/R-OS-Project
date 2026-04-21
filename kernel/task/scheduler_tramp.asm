@@ -12,16 +12,6 @@ Scheduler_IretTrampoline:
     ; VOID ContextRestore(VOID* ContextRSP);
 Context_Restore:
     mov rsp, rdi
-    ; Call debug dump to print the saved iret frame before popping registers
-    ; rdi contains the pointer to CpuContext_T (we received it as argument)
-    push rbp
-    push rax
-    push rcx
-    push rdx
-    pop rdx
-    pop rcx
-    pop rax
-    pop rbp
 
     ; Restore General Purpose Registers (sesuai urutan push/pop irqstub)
     pop r15
